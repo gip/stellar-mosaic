@@ -109,4 +109,27 @@ Three paths (cost vs trusted-setup):
 Open decision for M1: build/port a native-host-function UltraHonk verifier (~35M target, no
 trusted setup, unproven) vs adopt Groth16 (~12M proven, trusted setup). Only EC ops offload to
 host fns; sumcheck/field work stays in WASM, so ~35M is plausible but must be measured.
+
+### IMPORTANT correction: salazarsebas's UltraHonk verifier is an UNSOUND stub
+
+Read `crates/stellar-zk-core/templates/contracts/ultrahonk_verifier/src/lib.rs.tmpl`. Its
+`verify()` does ONLY a final KZG pairing check on values read straight from the proof bytes
+(W, W', and an "aggregate commitment P at a known offset"). It has **no Fiat-Shamir transcript,
+no sumcheck verification, and no MSM** - it reads P from the prover-controlled proof instead of
+computing it. Its own comment says "simplified batched check." A malicious prover can forge a
+passing proof. So the ~35M is cheap because it SKIPS the security-critical work, not because
+native host functions made a real verifier cheap. NOT comparable to our 79.9M (a complete,
+sound verifier). Their Groth16 ~12M IS sound (Groth16 verification genuinely is a pairing check).
+
+Corrected landscape for UltraHonk:
+| Path | Sound | Cost | Status |
+|------|-------|------|--------|
+| Groth16 native | yes | ~12M | real; needs per-circuit trusted setup |
+| UltraHonk software (Nethermind) | yes | 79.9M measured | works today; 2-verify infeasible |
+| UltraHonk native, complete | yes | UNKNOWN (>35M, <?) | NOT built; port Nethermind's verifier to host fns |
+| UltraHonk native (salazarsebas) | NO | ~35M | unsound stub - do not use |
+
+Takeaway: there is no off-the-shelf verifier that is BOTH cheap-enough-for-2-verify AND a
+sound UltraHonk verifier. Real options: (a) Groth16 (cheap+sound, trusted setup), or (b) build
+a native-host-function complete UltraHonk verifier and measure it.
 ```
