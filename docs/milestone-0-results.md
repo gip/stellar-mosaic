@@ -133,3 +133,28 @@ Takeaway: there is no off-the-shelf verifier that is BOTH cheap-enough-for-2-ver
 sound UltraHonk verifier. Real options: (a) Groth16 (cheap+sound, trusted setup), or (b) build
 a native-host-function complete UltraHonk verifier and measure it.
 ```
+
+### FINAL CORRECTION: Nethermind's verifier is ALREADY native (and complete)
+
+Read Nethermind's verifier source directly:
+- `crates/ultrahonk-soroban-verifier/Cargo.toml`: only dep is `soroban-sdk` (NO arkworks).
+- `field.rs`: `soroban_sdk::crypto::bn254::Bn254Fr` + `env().crypto().bn254()` field ops (native).
+- `ec.rs`: `env.crypto().bn254().g1_msm(...)` and `.pairing_check(...)` (native MSM + pairing).
+- Complete pipeline: `sumcheck.rs`, `shplemini.rs`, `relations.rs`, `transcript.rs`.
+
+So our measured **79.9M is a complete, SOUND, ALREADY-NATIVE UltraHonk verifier.** The
+native-host-function lever is already pulled. (My earlier "Nethermind = software arkworks" was
+wrong - that was indextree, whose yugocabrio verifier IS arkworks/software and exceeded 100M.)
+
+| Verifier | EC backend | Sound | Cost |
+|----------|-----------|-------|------|
+| indextree (yugocabrio) | arkworks software (WASM) | yes | >100M (FAILED) |
+| Nethermind | native host fns | yes | 79.9M measured |
+| salazarsebas UltraHonk | native host fns | NO (stub) | ~35M modeled |
+| salazarsebas Groth16 | native host fns | yes | ~12M |
+
+Implications (firmed up):
+- 79.9M is the real optimized floor for a sound UltraHonk verify on Soroban. No easy native win left.
+- Two separate verifies/tx (160M) is firmly infeasible.
+- Settlement options: (a) verify ONE recursively-aggregated proof per tx (~80M, fits) - keeps
+  no-trusted-setup + single-tx atomicity; or (b) Groth16 (~12M, two fit) + per-circuit trusted setup.
