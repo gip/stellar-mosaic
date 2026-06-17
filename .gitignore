@@ -1,0 +1,16 @@
+# Noir / bb build artifacts
+circuits/**/target/
+*.gz
+*.witness
+
+# proof + vk outputs
+artifacts/
+
+# vendored verifier repos (cloned separately, pinned to specific commits)
+vendor/
+
+# Rust
+target/
+
+# misc
+.DS_Store

@@ -1,0 +1,11 @@
+# Example witness for the Milestone 0 sizing spike. Values are arbitrary:
+# the circuit computes root + nullifier from these, so any consistent set works.
+asset = "1"
+amount = "1000"
+serial = "789"
+blind = "321"
+sk = "123456789"
+nk = "987654321"
+path = ["11", "22", "33", "44", "55"]
+index_bits = ["0", "1", "0", "1", "0"]
+txbind = "424242"
