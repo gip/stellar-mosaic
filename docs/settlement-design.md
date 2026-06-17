@@ -92,3 +92,28 @@ Conclusion (architecture VALIDATED):
 - Two lifts (separate txs) + one settle: each fits individually. Two-sided trade is feasible.
 
 So "verify-at-lift, settle-cheap" fits the Soroban budget where two-verify-in-one-tx did not.
+
+## Real lift measured on testnet (2026-06-17) — full flow
+
+Made `lift` real: it calls Nethermind's verifier (native BN254 host fns) in-process and stores
+the entry ONLY if the proof verifies; the stored nullifier is bound to the proof's public inputs.
+Contract `contracts/settlement` deployed with our spend-circuit VK
+(`CC23Q4KSMUDN5TBXXNSFXTWHTT2U3ZDYNLH3UH65JFKTP2MXEECL346E`).
+
+End-to-end with TWO distinct real proofs:
+- lift A (verify proof A + store, id 1): submitted. Non-refundable CPU fee **126,454 stroops**
+  (one verify = 122,698; the delta is the pool-entry store). ~**82% of the per-tx budget** -> fits.
+- lift with a CORRUPTED proof: **rejected**, `Error(Contract, #8) = VerificationFailed`, nothing
+  stored. So lift genuinely verifies before storing.
+- lift B (verify proof B + store, id 2): submitted.
+- settle(1, 2) (NO verify): submitted; emitted `settled` with both output commitments.
+  Non-refundable CPU fee **16,549 stroops** (~13% of a verify, ~10-11% of budget).
+
+Result: a complete two-sided private trade = two verifying lifts (~82% budget each, separate
+txs) + one cheap settle (~11% budget). Every tx fits. The architecture is validated end-to-end
+on real proofs, not estimates.
+
+Note: the spike circuit binds only [txbind, root, nullifier]; the stored asset/amount/price/
+output are NOT yet proof-bound (soundness invariant 1 — the open item). The cost/flow result
+is unaffected by that. The settlement contract depends on the vendored Nethermind verifier
+(gitignored path), so it does not build standalone yet.

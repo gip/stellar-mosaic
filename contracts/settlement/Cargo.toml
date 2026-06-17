@@ -7,11 +7,14 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Same soroban-sdk rev Nethermind's verifier deploys with (proven on our testnet).
-soroban-sdk = { git = "https://github.com/stellar/rs-soroban-sdk.git", rev = "acffbbd45be6a0a551146eebfc268d6f95078246", default-features = false, features = ["alloc"] }
+# Matched to Nethermind's workspace pin so the verifier crate and this crate share one soroban-sdk.
+soroban-sdk = { version = "26.0.1", default-features = false, features = ["alloc"] }
+# Vendored Nethermind UltraHonk verifier (native BN254 host fns). NOTE: path into gitignored
+# vendor/; this contract does not build standalone without it (acceptable for the spike).
+ultrahonk_soroban_verifier = { path = "../../vendor/rs-soroban-ultrahonk/crates/ultrahonk-soroban-verifier", default-features = false }
 
 [dev-dependencies]
-soroban-sdk = { git = "https://github.com/stellar/rs-soroban-sdk.git", rev = "acffbbd45be6a0a551146eebfc268d6f95078246", features = ["testutils", "alloc"] }
+soroban-sdk = { version = "26.0.1", default-features = false, features = ["testutils", "alloc"] }
 
 [profile.release]
 opt-level = "z"
