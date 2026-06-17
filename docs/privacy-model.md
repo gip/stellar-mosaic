@@ -1,0 +1,54 @@
+# Privacy model: owner-anonymous, amount-transparent
+
+Decision (2026-06-17): **amounts are public, ownership is hidden.** This is what makes
+verify-free settlement and plaintext value-conservation possible (see full-flow-review B1).
+
+## Note structure
+
+```
+  on-chain leaf:    commit = H(asset, amount, owner_tag, nonce)
+  published PUBLIC: asset, amount        (so the contract + observers can read them)
+  hidden:           owner_tag            (who can spend)
+```
+
+The commitment binds asset+amount+owner together so an owner_tag can't be re-paired with a
+different amount. The only secret is who owns the note.
+
+## Ownership privacy = four mechanisms (public amounts remove none of them)
+
+1. **Merkle note set** — spending proves "I own SOME note in the tree" without revealing which.
+   This is the anonymity set. No tree -> spend points at a specific note -> links to its creator.
+2. **Nullifiers (not note IDs)** — spend reveals `N = H(owner_secret, nonce)`, never the
+   commitment. Unlinks a spend from the note's creation. Contract checks N unused (no double-spend).
+3. **One-time / stealth owner tags** — owner_tag is fresh per note (derived from the recipient's
+   viewing key + randomness, randomness encrypted to them). So a user's notes aren't mutually
+   linkable, and only the recipient can scan/recognize/spend their notes (also = note discovery).
+4. **Relayer** — submits txs so the Stellar source account isn't the trader's.
+
+Spend proof (ZK): "a note in the tree has an owner_tag I can open, its nullifier is N, value is
+conserved" — reveals N + public amounts, never which note or who.
+
+## Public vs hidden
+
+```
+  PUBLIC:  every note's asset+amount; order book (pair, price, size); the match;
+           the amount-flow graph through the pool
+  HIDDEN:  the identity/key owning any note; the create<->spend link; which note a spend consumed
+```
+
+## The catch: public amounts shrink the anonymity set
+
+- **Amount + timing correlation:** distinctive values (137.42 USDC deposit -> 137.42 order ->
+  137.42 withdraw) are followable even with hidden owners. Anonymity set per spend ≈ "notes of a
+  compatible amount," not "all notes."
+- **Mitigation: standard denominations** (1/10/100/1000 + change notes) so many notes share each
+  amount -> large anonymity set (Tornado-style). Main lever without hiding amounts.
+- **Edges leak:** deposits/withdrawals move real tokens to/from real accounts -> amounts +
+  accounts visible. Privacy is inside the pool; entry/exit is pseudonymous at best.
+
+## One-liner
+
+**Owner-anonymous, amount-transparent.** No cryptographic link from a note/trade to an identity;
+but amounts + timing are followable (strongest with standard denominations, weakest at the edges).
+Defeating amount-correlation too = the deferred "hide amounts" hard mode (reintroduces proofs at
+settle, reopening the budget question).
