@@ -140,6 +140,19 @@ the fill amount in plaintext and forms each output deterministically:
 - Consequence: **fill amounts are public.** If amount-privacy is ever required, settle needs a
   proof (or a recursive/aggregated proof, or a Groth16 path), which reopens the budget question.
 
+**Why settle needs NO proof for the output notes (common question).** Settle creates 2-4 new
+notes, and new notes must be guaranteed correct — but NOT via a ZK proof, because the contract
+*constructs them itself* from values it computed and checked in plaintext:
+- **Conservation** is a plaintext check (amounts public): per asset, `sum(consumed) == sum(created)`
+  at the agreed price. (Hidden amounts WOULD force a proof here — that's the amount-hiding hard mode.)
+- **Owner** of each output (`owner_tag`) comes from the order notes, bound by the already-verified
+  lift proofs — the desk can't redirect proceeds.
+- **Well-formedness** — the contract computes `H(...)` itself; nothing for a prover to lie about.
+An output note is ZK-verified at its NEXT use (when spent: membership + nullifier + ownership
+proof), not at creation. This is also why STAGED is unnecessary: settle mints outputs straight to
+ACTIVE inside the atomic tx. Conservation chain has no gap: deposit proof -> order lift proof ->
+plaintext settle.
+
 ### B2 — Cross-contract note-state ownership. [ARCHITECTURE DECISION]
 Asset notes (Assets contract) and order notes (Desk contract) share ONE logical note set
 (commitments + nullifiers). If the two contracts keep separate state, a note consumed in one
