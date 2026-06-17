@@ -92,8 +92,10 @@ Chased the salazarsebas/stellar-zk "~35M" claim. Findings:
 - Stellar **Protocol 25 introduced native BN254 host functions** (`g1_add`, `g1_mul`,
   `g1_neg`, `fr_from_bytes`, `pairing_check`). A verifier that offloads pairing/MSM to these
   is far cheaper than one doing BN254 in WASM. (Our testnet is Protocol 26 -> available.)
-- Our measured **79.9M uses Nethermind's verifier, which does BN254 in pure WASM via arkworks
-  `ark-bn254`** - it does NOT use the native host functions. That is the ~2.3x penalty.
+- [CORRECTED - see FINAL CORRECTION below] Our measured **79.9M uses Nethermind's verifier,
+  which actually DOES use native BN254 host functions** (not arkworks; arkworks/software was
+  indextree, which exceeded 100M). So 79.9M is already the native, sound floor - there is no
+  software->native 2x left to gain on UltraHonk.
 - salazarsebas's **"~35M" is a STATIC COST-MODEL ESTIMATE**, not a measurement. Its
   `stellar-zk-ultrahonk` crate is an OFF-CHAIN proving/estimator backend (no on-chain verifier
   contract, no `pairing_check` calls; `estimate_cost()` -> `static_estimate()`). Their real,
