@@ -86,7 +86,27 @@ Also note: even a SINGLE verify leaves only ~20% headroom, so adding the settlem
 own storage I/O (nullifier checks, tree/root writes) on top of one verify must be measured -
 it may not fit alongside a verify either.
 
-### Still to understand
-- WHY Nethermind's verifier crate is cheaper than indextree's, before depending on it.
-- Whether testnet (Protocol 26) limit differs from mainnet, and any pending limit increases.
+### Resolved: the cost lever is native BN254 host functions (Protocol 25)
+
+Chased the salazarsebas/stellar-zk "~35M" claim. Findings:
+- Stellar **Protocol 25 introduced native BN254 host functions** (`g1_add`, `g1_mul`,
+  `g1_neg`, `fr_from_bytes`, `pairing_check`). A verifier that offloads pairing/MSM to these
+  is far cheaper than one doing BN254 in WASM. (Our testnet is Protocol 26 -> available.)
+- Our measured **79.9M uses Nethermind's verifier, which does BN254 in pure WASM via arkworks
+  `ark-bn254`** - it does NOT use the native host functions. That is the ~2.3x penalty.
+- salazarsebas's **"~35M" is a STATIC COST-MODEL ESTIMATE**, not a measurement. Its
+  `stellar-zk-ultrahonk` crate is an OFF-CHAIN proving/estimator backend (no on-chain verifier
+  contract, no `pairing_check` calls; `estimate_cost()` -> `static_estimate()`). Their real,
+  demonstrated native-path number is **Groth16 ~12M**.
+
+Three paths (cost vs trusted-setup):
+| Path | Per-verify | 2-in-1-tx | Status |
+|------|-----------|-----------|--------|
+| UltraHonk, software BN254 (Nethermind) | 79.9M measured | no | works today; needs settlement redesign |
+| UltraHonk, native BN254 host fns | ~35M modeled | yes (~70M) | NOT built/measured; needs verifier port |
+| Groth16, native BN254 host fns | ~12M (their real #) | yes (~24M) | proven path; needs per-circuit TRUSTED SETUP |
+
+Open decision for M1: build/port a native-host-function UltraHonk verifier (~35M target, no
+trusted setup, unproven) vs adopt Groth16 (~12M proven, trusted setup). Only EC ops offload to
+host fns; sumcheck/field work stays in WASM, so ~35M is plausible but must be measured.
 ```
