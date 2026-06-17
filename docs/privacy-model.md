@@ -6,13 +6,17 @@ verify-free settlement and plaintext value-conservation possible (see full-flow-
 ## Note structure
 
 ```
-  on-chain leaf:    commit = H(asset, amount, owner_tag, nonce)
-  published PUBLIC: asset, amount        (so the contract + observers can read them)
-  hidden:           owner_tag            (who can spend)
+  on-chain leaf:    commit = Poseidon(asset, amount, owner_tag)
+  published PUBLIC: asset, amount, owner_tag    (all readable; owner_tag is an opaque
+                                                 one-time address)
+  SECRET (wallet):  sk_o, rho   where pk_o=Poseidon(sk_o), owner_tag=Poseidon(pk_o, rho)
 ```
 
-The commitment binds asset+amount+owner together so an owner_tag can't be re-paired with a
-different amount. The only secret is who owns the note.
+**owner_tag is PUBLIC, not hidden** (corrected). It must be public so `settle` can stamp it onto
+proceeds notes with no proof. Ownership privacy does NOT come from hiding the tag; it comes from:
+the tag being one-way (can't recover identity), one-time (fresh `rho`, so a user's tags don't
+cluster), and spends revealing a nullifier (never the tag, and membership hides which note).
+The only secrets are `sk_o` and per-note `rho`.
 
 ## Ownership privacy = four mechanisms (public amounts remove none of them)
 
