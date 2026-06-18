@@ -1,13 +1,14 @@
-//! Integration test for the full verify-at-lift / proof-free-settle flow, run entirely in the
-//! local Soroban host (no testnet). The native BN254 host functions the UltraHonk verifier needs
-//! are part of the test `Env`, so verification is REAL, not mocked.
+//! Integration test for the atomic settlement flow, run entirely in the local Soroban host (no
+//! testnet). The native BN254 host functions the UltraHonk verifier needs are part of the test
+//! `Env`, so verification is REAL, not mocked.
 //!
-//! Fixtures in tests/fixtures/ are real bb artifacts for the `circuits/lift` circuit:
+//! Fixtures in tests/fixtures/ are real bb artifacts for the `circuits/lift` order circuit:
 //!   - order A: offer 100 of asset 1, want >= 1500 of asset 2 (tags 0x2329 / 0x232a)
 //!   - order B: offer 2000 of asset 2, want >= 50 of asset 1 (tags 0x2333 / 0x2334)
-//! A and B cross, so settle matches them. Regenerate with tests/fixtures/regen.sh.
+//! A and B cross, so `settle` matches them in one atomic two-verify transaction. Regenerate with
+//! tests/fixtures/regen.sh.
 
-use settlement::{DataKey, Error, PoolEntry, Settlement, SettlementClient};
+use settlement::{Error, Settlement, SettlementClient};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{StellarAssetClient, TokenClient},
@@ -30,13 +31,9 @@ const UNSHIELD_TO: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD
 const UNSHIELD_OP: u32 = 2;
 const UNSHIELD_AMOUNT: i128 = 100;
 
-// Public-input word indices (see docs/lift-circuit-spec.md).
+// Public-input word index for the membership root (see docs/lift-circuit-spec.md).
 const W_ROOT: usize = 1;
-const W_ASSET_IN: usize = 3;
 const W_AMOUNT_IN: usize = 4;
-const W_ASSET_OUT: usize = 5;
-const W_MIN_OUT: usize = 6;
-const W_OUT_TAG: usize = 7;
 
 fn test_env() -> Env {
     let env = Env::default();
@@ -46,7 +43,7 @@ fn test_env() -> Env {
     env
 }
 
-/// Register the settlement contract with the lift VK and a generated admin.
+/// Register the settlement contract with the order (lift) VK and a generated admin.
 fn deploy(env: &Env) -> (Address, Address) {
     let admin = Address::generate(env);
     let vk = Bytes::from_slice(env, VK);
@@ -56,18 +53,6 @@ fn deploy(env: &Env) -> (Address, Address) {
 
 fn bytes(env: &Env, b: &[u8]) -> Bytes {
     Bytes::from_slice(env, b)
-}
-
-fn u32_at(pi: &[u8], word: usize) -> u32 {
-    let o = word * 32;
-    u32::from_be_bytes([pi[o + 28], pi[o + 29], pi[o + 30], pi[o + 31]])
-}
-
-fn i128_at(pi: &[u8], word: usize) -> i128 {
-    let o = word * 32;
-    let mut b = [0u8; 16];
-    b.copy_from_slice(&pi[o + 16..o + 32]);
-    i128::from_be_bytes(b)
 }
 
 fn bytesn_at(env: &Env, pi: &[u8], word: usize) -> BytesN<32> {
@@ -82,21 +67,12 @@ fn push_root(client: &SettlementClient, env: &Env, pi: &[u8]) {
     client.push_root(&bytesn_at(env, pi, W_ROOT));
 }
 
-fn read_entry(env: &Env, id: &Address, entry_id: u32) -> PoolEntry {
-    env.as_contract(id, || {
-        env.storage()
-            .persistent()
-            .get::<DataKey, PoolEntry>(&DataKey::Entry(entry_id))
-            .expect("entry stored")
-    })
-}
-
 // ===========================================================================
-// Happy path: lift two crossing orders, then settle them with no proof.
+// Happy path: settle two crossing orders atomically (both proofs verified in one tx).
 // ===========================================================================
 
 #[test]
-fn full_flow_lift_then_settle() {
+fn settle_two_crossing_orders() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
     let client = SettlementClient::new(&env, &id);
@@ -104,107 +80,76 @@ fn full_flow_lift_then_settle() {
     push_root(&client, &env, PI_A);
     push_root(&client, &env, PI_B);
 
-    client.lift(&1, &bytes(&env, PROOF_A), &bytes(&env, PI_A));
-    client.lift(&2, &bytes(&env, PROOF_B), &bytes(&env, PI_B));
+    client.settle(
+        &bytes(&env, PROOF_A),
+        &bytes(&env, PI_A),
+        &bytes(&env, PROOF_B),
+        &bytes(&env, PI_B),
+    );
 
-    // settle succeeds and crosses the two bound orders.
-    client.settle(&1, &2);
+    // Exactly one settled event from this contract. Its proceeds are stamped from each order's
+    // bound output_owner_tag (derived from the verified public inputs).
+    assert_eq!(env.events().all().filter_by_contract(&id).events().len(), 1);
 
-    // Exactly one settled event is emitted. Its proceeds descriptors are stamped from each order's
-    // stored output_owner_tag, which `lift_stores_fields_derived_from_proof` proves equals the
-    // proof's bound public input — so settle's outputs are bound by construction.
-    assert_eq!(env.events().all().events().len(), 1);
-
-    // Both orders are now consumed.
-    assert!(read_entry(&env, &id, 1).consumed);
-    assert!(read_entry(&env, &id, 2).consumed);
-
-    // Re-settling the same pair is rejected.
-    let err = env
-        .as_contract(&id, || Settlement::settle(env.clone(), 1, 2))
-        .expect_err("double settle");
-    assert_eq!(err as u32, Error::AlreadyConsumed as u32);
-}
-
-// ===========================================================================
-// lift binds every order field to the proof (the core soundness property).
-// ===========================================================================
-
-#[test]
-fn lift_stores_fields_derived_from_proof() {
-    let env = test_env();
-    let (id, _admin) = deploy(&env);
-    let client = SettlementClient::new(&env, &id);
-
-    push_root(&client, &env, PI_A);
-    client.lift(&1, &bytes(&env, PROOF_A), &bytes(&env, PI_A));
-
-    // Every stored field must equal the verified public input, not anything a caller chose
-    // (the lift entrypoint takes no order arguments at all).
-    let e = read_entry(&env, &id, 1);
-    assert_eq!(e.asset_in, u32_at(PI_A, W_ASSET_IN));
-    assert_eq!(e.amount_in, i128_at(PI_A, W_AMOUNT_IN));
-    assert_eq!(e.asset_out, u32_at(PI_A, W_ASSET_OUT));
-    assert_eq!(e.min_out, i128_at(PI_A, W_MIN_OUT));
-    assert_eq!(e.output_owner_tag, bytesn_at(&env, PI_A, W_OUT_TAG));
-    assert!(!e.consumed);
-}
-
-// ===========================================================================
-// Negative cases.
-// ===========================================================================
-
-#[test]
-fn lift_rejects_unpublished_root() {
-    let env = test_env();
-    let (id, _admin) = deploy(&env);
-    // No push_root: the membership root is unknown.
+    // Both consumed-note nullifiers are now recorded: re-settling the same pair is rejected.
     let err = env
         .as_contract(&id, || {
-            Settlement::lift(env.clone(), 1, bytes(&env, PROOF_A), bytes(&env, PI_A))
+            Settlement::settle(
+                env.clone(),
+                bytes(&env, PROOF_A),
+                bytes(&env, PI_A),
+                bytes(&env, PROOF_B),
+                bytes(&env, PI_B),
+            )
+        })
+        .expect_err("replayed settle");
+    assert_eq!(err as u32, Error::NullifierUsed as u32);
+}
+
+// ===========================================================================
+// Negative cases for settle.
+// ===========================================================================
+
+#[test]
+fn settle_rejects_unpublished_root() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    // Both proofs verify, but no root was published.
+    let err = env
+        .as_contract(&id, || {
+            Settlement::settle(
+                env.clone(),
+                bytes(&env, PROOF_A),
+                bytes(&env, PI_A),
+                bytes(&env, PROOF_B),
+                bytes(&env, PI_B),
+            )
         })
         .expect_err("unpublished root");
     assert_eq!(err as u32, Error::UnknownRoot as u32);
 }
 
 #[test]
-fn lift_rejects_replayed_nullifier() {
+fn settle_rejects_tampered_order_field() {
+    // The proof binds every order field: a valid proof with a tampered amount_in fails to verify,
+    // so a matcher cannot substitute order terms.
     let env = test_env();
     let (id, _admin) = deploy(&env);
     let client = SettlementClient::new(&env, &id);
     push_root(&client, &env, PI_A);
+    push_root(&client, &env, PI_B);
 
-    client.lift(&1, &bytes(&env, PROOF_A), &bytes(&env, PI_A));
-
-    // Same proof again (same consumed-note nullifier) must be rejected, even at a new entry id.
-    let err = env
-        .as_contract(&id, || {
-            Settlement::lift(env.clone(), 5, bytes(&env, PROOF_A), bytes(&env, PI_A))
-        })
-        .expect_err("replayed nullifier");
-    assert_eq!(err as u32, Error::NullifierUsed as u32);
-}
-
-#[test]
-fn lift_rejects_tampered_order_field() {
-    let env = test_env();
-    let (id, _admin) = deploy(&env);
-    let client = SettlementClient::new(&env, &id);
-    push_root(&client, &env, PI_A);
-
-    // Flip the low byte of amount_in (word 4) while keeping the original valid proof.
-    // The proof binds amount_in, so verification must fail.
     let mut tampered = PI_A.to_vec();
-    let o = W_AMOUNT_IN * 32;
-    tampered[o + 31] ^= 0x01;
+    tampered[W_AMOUNT_IN * 32 + 31] ^= 0x01;
 
     let err = env
         .as_contract(&id, || {
-            Settlement::lift(
+            Settlement::settle(
                 env.clone(),
-                1,
                 bytes(&env, PROOF_A),
                 Bytes::from_slice(&env, &tampered),
+                bytes(&env, PROOF_B),
+                bytes(&env, PI_B),
             )
         })
         .expect_err("tampered order field");
@@ -212,14 +157,19 @@ fn lift_rejects_tampered_order_field() {
 }
 
 #[test]
-fn lift_rejects_wrong_public_input_length() {
+fn settle_rejects_wrong_public_input_length() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    // 9 words instead of 10.
-    let short = &PI_A[..PI_A.len() - 32];
+    let short = &PI_A[..PI_A.len() - 32]; // 9 words instead of 10
     let err = env
         .as_contract(&id, || {
-            Settlement::lift(env.clone(), 1, bytes(&env, PROOF_A), bytes(&env, short))
+            Settlement::settle(
+                env.clone(),
+                bytes(&env, PROOF_A),
+                bytes(&env, short),
+                bytes(&env, PROOF_B),
+                bytes(&env, PI_B),
+            )
         })
         .expect_err("short public inputs");
     assert_eq!(err as u32, Error::BadPublicInputs as u32);
@@ -227,18 +177,24 @@ fn lift_rejects_wrong_public_input_length() {
 
 #[test]
 fn settle_rejects_incompatible_orders() {
-    // Two A-orders do not cross (both offer asset 1, want asset 2).
+    // Order A against itself does not cross (A offers asset 1 / wants asset 2, so asset_in != the
+    // other side's asset_out). Both proofs verify; the crossing check rejects.
     let env = test_env();
     let (id, _admin) = deploy(&env);
     let client = SettlementClient::new(&env, &id);
     push_root(&client, &env, PI_A);
 
-    client.lift(&1, &bytes(&env, PROOF_A), &bytes(&env, PI_A));
-    // A second order with the same shape requires a distinct nullifier; reuse is blocked, so we
-    // assert on the only A-proof we have by lifting it once and pairing it with itself.
     let err = env
-        .as_contract(&id, || Settlement::settle(env.clone(), 1, 1))
-        .expect_err("self-pair is incompatible");
+        .as_contract(&id, || {
+            Settlement::settle(
+                env.clone(),
+                bytes(&env, PROOF_A),
+                bytes(&env, PI_A),
+                bytes(&env, PROOF_A),
+                bytes(&env, PI_A),
+            )
+        })
+        .expect_err("incompatible / self-pair");
     assert_eq!(err as u32, Error::NotCompatible as u32);
 }
 
@@ -353,7 +309,11 @@ fn unshield_pays_bound_recipient() {
     let (id, _admin) = deploy(&env);
     let (token, to) = setup_unshield(&env, &id);
 
-    SettlementClient::new(&env, &id).unshield(&to, &bytes(&env, UNSHIELD_PROOF), &bytes(&env, UNSHIELD_PI));
+    SettlementClient::new(&env, &id).unshield(
+        &to,
+        &bytes(&env, UNSHIELD_PROOF),
+        &bytes(&env, UNSHIELD_PI),
+    );
 
     let token_client = TokenClient::new(&env, &token);
     assert_eq!(token_client.balance(&to), UNSHIELD_AMOUNT);
@@ -419,7 +379,7 @@ fn unshield_rejects_unpublished_root() {
 fn unshield_rejects_missing_vk() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    // No set_vk(UNSHIELD_OP): the lift VK alone cannot verify an unshield proof.
+    // No set_vk(UNSHIELD_OP): the order VK alone cannot verify an unshield proof.
     let to = Address::from_string(&String::from_str(&env, UNSHIELD_TO));
     let err = env
         .as_contract(&id, || {
@@ -436,26 +396,32 @@ fn unshield_rejects_missing_vk() {
 
 // ===========================================================================
 // Budget sanity. Local host metering UNDER-counts relative to on-chain calibration
-// (local ~55M vs the authoritative testnet 81.16M, see docs/milestone-0-results.md),
-// so this is a regression guard, not the real budget number: it just confirms lift
-// stays well within one transaction.
+// (local ~55M/verify vs the authoritative testnet ~81M, see docs/milestone-0-results.md),
+// so this is a regression guard, not the real budget number: it confirms an atomic
+// two-verify settle stays well within the 400M per-tx budget.
 // ===========================================================================
 
 #[test]
-fn lift_fits_cpu_budget() {
+fn settle_fits_cpu_budget() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
     let client = SettlementClient::new(&env, &id);
     push_root(&client, &env, PI_A);
+    push_root(&client, &env, PI_B);
 
     env.cost_estimate().budget().reset_unlimited();
-    client.lift(&1, &bytes(&env, PROOF_A), &bytes(&env, PI_A));
+    client.settle(
+        &bytes(&env, PROOF_A),
+        &bytes(&env, PI_A),
+        &bytes(&env, PROOF_B),
+        &bytes(&env, PI_B),
+    );
     let cpu = env.cost_estimate().budget().cpu_instruction_cost();
-    std::println!("lift CPU instructions (local host): {cpu}");
+    std::println!("atomic settle (two verifies) CPU instructions (local host): {cpu}");
 
-    // ~100M is the per-transaction Soroban budget. The lift must fit in one tx.
+    // 400M is the per-transaction Soroban budget; two verifies must fit in one tx.
     assert!(
-        cpu < 100_000_000,
-        "lift CPU {cpu} exceeds the ~100M per-tx budget"
+        cpu < 400_000_000,
+        "settle CPU {cpu} exceeds the 400M per-tx budget"
     );
 }

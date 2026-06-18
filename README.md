@@ -13,25 +13,23 @@ Start with [docs/architecture.md](docs/architecture.md). Detailed references:
 
 ## Current status
 
-Milestone 0 validated the key cost constraint on Stellar testnet: one real UltraHonk
-verification fits, but two verifies in one transaction do not. The design therefore
-uses verify-at-lift and proof-free atomic settlement.
+A trade settles **atomically in one transaction** that verifies both sides' order proofs.
 
-Measured facts:
+Measured facts (Stellar testnet):
 
 - Verifier: `NethermindEth/rs-soroban-ultrahonk`.
-- One verify for the representative spend circuit: **79,922,355 CPU instructions**,
-  about 80% of the ~100M per-transaction Soroban budget.
-- Real lift with verify plus store: about **82%** of the budget.
-- Proof-free settle consuming two lifted entries: about **10-13%** of the budget.
-- Valid proofs were accepted on testnet; corrupted proofs were rejected.
+- The per-transaction CPU limit is **400,000,000 instructions** (testnet and mainnet).
+- One UltraHonk verify: ~**80M** (~20% of budget). Two verifies in one tx fit.
+- Atomic `settle` (verify both order proofs, cross, record nullifiers): **160.8M (~40%)**.
+- `unshield` (verify + recipient-bound payout): ~**81M** (~20%).
+- Valid proofs accepted on testnet; corrupted/tampered proofs and replays rejected.
 
-The production lift circuit (`circuits/lift`) binds every order field settlement trusts, and
-`contracts/settlement` `lift` now derives all of them from the verified public inputs (domain +
-published root + nullify-at-lift). Validated end-to-end on testnet at ~81.2% of budget: tampering any
-bound order field makes the proof fail; a proof-free `settle` then crosses two bound orders
-atomically. See [docs/lift-circuit-spec.md](docs/lift-circuit-spec.md) and
-[docs/milestone-0-results.md](docs/milestone-0-results.md).
+Each order proof (`circuits/lift`) binds every order field settlement trusts (asset/amount/price,
+`output_owner_tag`, membership root, nullifier, domain). `settle` verifies two crossing proofs and
+constructs proceeds from the bound tags; nothing the caller passes is trusted. Order matching is
+off-chain; settlement is on-chain and atomic. See
+[docs/architecture.md](docs/architecture.md), [docs/tx-instruction-limit-spike.md](docs/tx-instruction-limit-spike.md),
+and [docs/milestone-0-results.md](docs/milestone-0-results.md).
 
 ## Commands
 
@@ -41,17 +39,17 @@ Run the local prove/verify half:
 ./scripts/01_build_prove.sh
 ```
 
-Run the full lift -> settle integration test on the local Soroban host (real verifier, no testnet):
+Run the integration test on the local Soroban host (real verifier, no testnet):
 
 ```bash
 cd contracts/settlement && cargo test --test integration
 ```
 
-This exercises the full custody loop — `shield` (token custody), `lift` (binding every order field to
-the proof), proof-free `settle`, and `unshield` (asset-note spend with the payout recipient bound
-into the proof) — plus the negative cases (unpublished root, replayed nullifier, tampered order
-field, double settle, wrong unshield recipient). Proof fixtures live in
-`contracts/settlement/tests/fixtures/` (see `regen.sh`). 16 tests, all green.
+This exercises the full custody loop — `shield` (token custody), atomic `settle` (verify two
+crossing order proofs in one tx), and `unshield` (asset-note spend with the payout recipient bound
+into the proof) — plus the negative cases (unpublished root, replayed settle, tampered order
+field, incompatible orders, wrong unshield recipient). Proof fixtures live in
+`contracts/settlement/tests/fixtures/` (see `regen.sh`). 14 tests, all green.
 
 Current on-chain measurements are summarized in [docs/milestone-0-results.md](docs/milestone-0-results.md).
 `scripts/02_deploy_verify_testnet.sh` is the legacy verifier spike script.
@@ -82,8 +80,9 @@ Confirmed contract interface:
 
 ```
 circuits/spend/      Noir spend circuit (Milestone 0 sizing spike)
-circuits/lift/       production lift circuit (binds the full order; see docs/lift-circuit-spec.md)
-contracts/settlement settlement spike: verify at lift, proof-free settle
+circuits/lift/       order proof circuit (binds the full order; see docs/lift-circuit-spec.md)
+circuits/unshield/   unshield proof circuit (recipient-bound asset-note spend)
+contracts/settlement merged custody + matching: shield, atomic settle (2 verifies), unshield
 scripts/             01 = local prove/verify; 02 = legacy on-chain verify spike
 docs/                current design docs and measurement provenance
 vendor/              verifier dependencies (gitignored)

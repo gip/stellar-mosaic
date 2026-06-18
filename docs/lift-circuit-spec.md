@@ -2,8 +2,14 @@
 
 This is the production replacement for the Milestone 0 sizing spike (`circuits/spend`). It defines
 exactly what the `lift_order` proof binds, what the contract reads, and the soundness obligations on
-both sides. Read `note-types.md` for the note structures and `architecture.md` for where lift sits in
+both sides. Read `note-types.md` for the note structures and `architecture.md` for where it sits in
 the flow.
+
+> **NOTE (2026-06-18): this circuit is now the "order proof" consumed directly by the atomic
+> `settle` (two of them per trade), not a separate on-chain `lift` step.** The contract has no `lift`
+> entrypoint anymore. The public-input vector and all bindings below are unchanged and still correct;
+> only `order_leaf` (field 9) and `cancel_owner_tag` (field 8) are currently unused on-chain (there
+> is no on-chain order note to insert and no cancel entrypoint). See `architecture.md`.
 
 ## What lift does
 

@@ -80,6 +80,25 @@ and `unshield` (asset-note spend proof -> real token payout). VKs are per-operat
 - shield is exercised on the local host (real Stellar Asset Contract): tokens move into custody and a
   `shielded` event is emitted. Total integration suite: 16 tests green.
 
+## Atomic single settlement (validated 2026-06-18)
+
+After confirming the per-tx limit is 400M (not 100M; see `tx-instruction-limit-spike.md`), the
+verify-at-lift / settle-cheap split was collapsed into a single atomic `settle` that verifies BOTH
+parties' order proofs in one tx. The `lift` entrypoint, `PoolEntry` storage, and `DataKey::Entry`
+were removed; order matching moves off-chain, settlement stays on-chain and atomic.
+
+- `settle(proof_a, public_inputs_a, proof_b, public_inputs_b)`: verifies both order proofs, derives
+  each order from its verified public inputs, checks crossing (assets + price + distinct unspent
+  notes), records both nullifiers, emits proceeds stamped with each side's bound `output_owner_tag`.
+- **Measured on testnet (contract `CDITYAB32OQUS7ZR7EE3EVWPI5ZAIVUDTDAPFB4CGZ2UE57MTJOEY2L5`):
+  160,807,406 CPU instructions (~40.2% of the 400M budget)**, 0 disk read, 272 write bytes, resource
+  fee 311,655 stroops. The real two-proof settle submitted successfully and emitted a `settled` event
+  carrying the correct bound proceeds (A: 2000 of asset 2 -> tag 0x2329; B: 100 of asset 1 -> tag
+  0x232b); replaying the same settle was rejected with `Error(Contract, #3)` `NullifierUsed`.
+- Local integration suite reworked to the atomic flow: 14 tests green
+  (`settle_two_crossing_orders`, tampered-field -> #8, unpublished-root -> #10, wrong-pi-length ->
+  #9, incompatible -> #4, replay -> #3, plus the shield/unshield suites).
+
 ## Local proof spike (validated 2026-06-16)
 
 - Toolchain: nargo 1.0.0-beta.3, bb 0.82.2

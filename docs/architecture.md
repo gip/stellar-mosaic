@@ -1,8 +1,8 @@
-# Architecture: verify-at-lift, settle-cheap
+# Architecture: atomic settlement
 
 This is the entry-point design document for Stellar Mosaic. See `privacy-model.md` for the privacy
-model, `note-types.md` for concrete note structures, and `milestone-0-results.md` for measurement
-provenance.
+model, `note-types.md` for concrete note structures, `tx-instruction-limit-spike.md` for the budget,
+and `milestone-0-results.md` for measurement provenance.
 
 ## Current verdict
 
@@ -10,149 +10,105 @@ The v1 design is **owner-anonymous and amount-transparent**:
 
 - Public: note asset/amount, order pair/price/size, matches, fill amounts, and timing.
 - Hidden: the owner behind each note/order, the create-to-spend link, and which note a spend consumed.
-- Settlement is atomic and proof-free because value conservation is checked in plaintext.
-- UltraHonk is kept for spend/lift proofs, with no per-circuit trusted setup.
+- A trade settles **atomically in one transaction** that verifies both sides' order proofs.
+- UltraHonk is used for order/unshield proofs, with no per-circuit trusted setup.
 
 The privacy claim is "no direct owner/wallet linkage inside the pool," not amount privacy. Amounts
-and timing remain followable; standard denominations and delayed unshields are privacy
-mitigations, not complete fixes.
+and timing remain followable; standard denominations and delayed unshields are privacy mitigations,
+not complete fixes.
 
-## Measured constraint
+## Budget and the settlement shape
 
-> **SUPERSEDED (2026-06-18): the per-tx CPU limit is 400,000,000, not ~100M** (testnet and mainnet;
-> see `tx-instruction-limit-spike.md`). One verify (~80M) is ~20% of budget and **two verifies in one
-> tx (~160M) DO fit (~40%)**. This reopens the verify-at-lift/settle-cheap split below and the
-> off-chain-tree decision - both were chosen under the wrong ~100M assumption. Re-decision pending.
-
-One complete UltraHonk verify using Nethermind's native-BN254 Soroban verifier costs about
-**79.9M CPU instructions**, roughly 80% of the ~100M per-transaction Soroban budget. Two verifies in
-one transaction are infeasible.
-
-The design therefore decouples expensive verification from cheap settlement:
+The per-transaction CPU limit is **400,000,000 instructions** (testnet and mainnet; see
+`tx-instruction-limit-spike.md`). One UltraHonk verify is ~80M (~20%), so **two verifies in one tx
+(~160M, ~40%) fit comfortably**. A two-sided trade is therefore a single atomic transaction:
 
 ```
-TX 1: maker lift      verify one spend proof, store active order note
-TX 2: taker lift      verify one spend proof, store active order note
-TX 3: settle          no proof verify, consume two active order notes atomically
+TX: settle    verify order proof A + verify order proof B, check they cross,
+              record both nullifiers, emit proceeds  (measured 160.8M = ~40% of budget)
 ```
 
-Measured settlement-spike shape:
+This replaces the earlier verify-at-lift / settle-cheap design (a 3-tx maker-lift / taker-lift /
+settle dance with on-chain resting order entries), which existed only because we wrongly believed
+the limit was ~100M. With the real 400M budget the split is unnecessary.
 
-- Real lift with verifier plus store: about **82%** of the per-transaction budget.
-- Proof-free settle consuming two lifted entries: about **10-13%** of the budget.
-
-The spike validates cost and transaction shape. It is not final settlement soundness yet: the spike
-circuit binds only `[txbind, root, nullifier]`; the production lift circuit must bind every field
-settlement later trusts.
-
-Cost/UX reality: a cold two-party trade is multiple transactions, not one monolithic transaction.
-Each party shields and lifts separately, then settlement is cheap. LPs can pre-shield and pre-lift
-resting orders so the hot path is only the taker's lift plus settle.
+The **order book is off-chain**: a party generates an order proof (the lift circuit) and hands it to
+a matcher; the matcher pairs two crossing proofs and submits `settle`. Order data (pair/price/size)
+is public anyway, so a lit off-chain book preserves the "lit pool" property while settlement stays
+on-chain and atomic (the Renegade-style off-chain-book / on-chain-settlement shape).
 
 ## Contracts and state
 
-Use one logical note registry for all active/consumed asset and order notes.
+One merged contract, `contracts/settlement`, owns custody, the nullifier registry, matching, and
+settlement (registry-ownership DECIDED: a split Assets/Desk design would add a cross-contract call,
+and is not needed). Roles:
 
-**Registry ownership — DECIDED for v1: one merged contract.** `contracts/settlement` is the single
-contract owning custody, the note/nullifier registry, order matching, and settlement. Rationale:
-`lift` already uses ~81% of the per-transaction budget, so adding a cross-contract call into a
-separate Assets contract during `lift` risks exceeding the limit; a merged contract avoids that
-entirely. A later split (Assets + Desk) stays possible but must first measure cross-contract-call
-cost on top of a verify. The conceptual roles still hold:
-
-- **Custody role:** holds real Soroban tokens (`shield`/`unshield`), keyed by an admin-registered
-  asset-id -> token map; maintains the canonical commitment and nullifier registry.
-- **Desk role:** order matching (`lift`/`settle`).
-  Separate commitment/nullifier registries are NOT allowed (double-spend risk); one merged contract
-  keeps them unified by construction.
+- **Custody:** holds real Soroban tokens (`shield`/`unshield`), keyed by an admin-registered
+  asset-id -> token map; maintains the canonical nullifier registry and published roots.
+- **Desk:** atomic matching/settlement (`settle`).
 
 Supported assets are admin-gated. USDC and XLM can be native Stellar/Soroban assets. ETH and XRP
 require wrapped issuers or bridge integrations before they can be custodied.
 
 ## Flow
 
-1. **Shield** (IMPLEMENTED: `contracts/settlement` `shield` + `register_asset`)
-   - User transfers a supported asset into custody (`register_asset` maps an asset-id to a real
-     Soroban token; `shield` pulls the tokens in via the token contract).
-   - Contract mints an active `AssetNote { asset, amount, owner_tag }` and emits it as a `shielded`
-     event for the off-chain tree builder; the leaf `Poseidon(asset, amount, owner_tag)` is rebuilt
-     off-chain so the contract pays no on-chain Poseidon.
-   - Proof-free: the token transfer enforces the amount and amounts are public, so value
-     conservation needs no ZK. A proof that the shielder knows the owner secret could be added but
-     is not required. Validated by the local-host integration test.
+1. **Shield** (IMPLEMENTED: `shield` + `register_asset`)
+   - User transfers a supported asset into custody; the contract mints an active
+     `AssetNote { asset, amount, owner_tag }` and emits a `shielded` event for the off-chain tree
+     builder (leaf `Poseidon(asset, amount, owner_tag)` rebuilt off-chain; no on-chain Poseidon).
+   - Proof-free: the token transfer enforces the amount and amounts are public.
 
-2. **Lift order**
-   - User spends an active asset note.
-   - The lift proof verifies membership, ownership, nullifier correctness, and value conservation.
-   - The input asset note is nullified at lift.
-   - Contract creates an active order note. The offer is firm, so `cancel`/expiry is required.
-   - The proof must bind every order field settlement will use.
+2. **Order** (off-chain; proof = `circuits/lift`)
+   - A party generates an order proof: proves membership of an asset note in the tree, reveals its
+     nullifier, and binds the order terms (`asset_in`, `amount_in`, `asset_out`, `min_out`,
+     `output_owner_tag`). No on-chain step; the proof is handed to a matcher.
+   - The order is firm in the sense that the proof authorizes consuming that note; the maker
+     "cancels" by spending the note another way (e.g. `unshield`), which nullifies it and makes the
+     held proof unusable. No on-chain cancel entrypoint is needed.
 
-3. **Settle**
-   - Contract reads two active order notes.
-   - It checks asset compatibility, price compatibility, fill amount, and per-asset conservation in
-     plaintext.
-   - It nullifies both order notes.
-   - It creates active proceeds notes and, for partial fills, change notes.
-   - No proof is verified in `settle`.
+3. **Settle** (IMPLEMENTED: `settle`, atomic, two verifies)
+   - A matcher submits two crossing order proofs. The contract verifies BOTH, derives each order
+     from its verified public inputs, checks asset + price compatibility in plaintext, requires the
+     two notes to be distinct and unspent, records both nullifiers, and emits proceeds descriptors
+     stamped with each order's bound `output_owner_tag`.
+   - No proof-free pre-verified entries, no caller-supplied output commitments.
+   - Measured on testnet at **160.8M instructions (~40% of the 400M budget)**.
 
-4. **Cancel**
-   - User proves authority over an active order note.
-   - Contract nullifies the order note and creates an active asset note for the unfilled value.
-   - This path is required so firm resting offers do not trap funds.
-
-5. **Unshield** (IMPLEMENTED: `contracts/settlement` `unshield`, circuit `circuits/unshield`)
-   - User spends an active asset note with a proof (`circuits/unshield`: membership, ownership,
-     nullifier, and the public `asset`/`amount`, plus a domain separator distinct from lift).
-   - The proof binds the payout **recipient**: public input `[5]` must equal `sha256(to.to_xdr())`
-     (top byte zeroed to fit the field). So a relayer can submit the tx but cannot redirect the
-     funds. No caller auth is needed; the proof is the spend authority.
+4. **Unshield** (IMPLEMENTED: `unshield`, circuit `circuits/unshield`)
+   - User spends an asset note with a proof that binds the payout **recipient** (public input
+     `[5] == sha256(to.to_xdr())`, top byte zeroed), so a relayer can submit but cannot redirect.
    - Contract records the nullifier, then transfers the public `asset`/`amount` to `to`.
-   - Per-operation VKs: `set_vk(op, vk)` registers the unshield VK (op 2) alongside lift (op 1).
-   - Measured on testnet at ~81.3% of budget (~same as lift; verify dominates).
-   - Users hold the note secrets; losing those secrets means losing access unless a later recovery
-     design is added.
+   - Per-operation VKs: `set_vk(op, vk)` registers the unshield VK (op 2) alongside the order VK
+     (op 1, set at construction). Measured on testnet at ~81.3% of budget.
 
 ## Soundness invariants
 
-- **Full binding at lift:** the lift proof must bind the consumed nullifier, input asset/value,
-  output order fields, `output_owner_tag`, `cancel_owner_tag`, root, and domain separator.
-- **Canonical registry:** asset notes and order notes must share one logical commitment/nullifier
-  registry. Separate registries create double-spend risk.
-- **Only verified paths create active orders:** no function except the verified lift path may create
-  active order state.
-- **Settlement constructs outputs:** `settle` computes proceeds and change leaves itself from public
-  checked values. It must not accept arbitrary output commitments from a caller.
-- **Single-use notes:** every consumed asset or order note records a nullifier before outputs become
-  active.
-- **Cancel before production:** firm orders require cancellation or expiry.
+- **Full binding in the order proof:** each order proof binds its consumed nullifier, `asset_in`,
+  `amount_in`, `asset_out`, `min_out`, `output_owner_tag`, the membership `root`, and a domain
+  separator. `settle` trusts nothing the caller passes outside the verified public inputs.
+- **Both sides verified:** `settle` verifies both proofs before any state change.
+- **Distinct, unspent notes:** the two sides must have different nullifiers, both unused; both are
+  recorded before proceeds are emitted (single-use).
+- **Settlement constructs outputs:** proceeds are built from the bound `output_owner_tag` and the
+  matched fill amounts; the contract never accepts caller-supplied output commitments.
+- **Canonical registry:** one merged contract holds the single nullifier registry (no split
+  registries -> no double-spend risk).
+- **Published roots only:** proofs must be made against an admin-published Merkle root.
 
 ## Open implementation gaps
 
-- **Final lift circuit:** DRAFTED in `circuits/lift` (spec: `lift-circuit-spec.md`). Binds
-  `asset_in`, `amount_in`, `asset_out`, `min_out`, `output_owner_tag`, `cancel_owner_tag`, plus
-  membership `root`, `nullifier_in`, and a `lift` domain separator; promotes root/nullifier from
-  spike *outputs* to asserted public *inputs*. Compiles and is satisfiable (3,335 gates); tampering
-  any bound field fails the constraints. v1 = full consumption, no change at lift. **On-chain verify
-  measured on testnet 2026-06-18: 80,641,857 CPU (~80.6% of budget), +0.9% over the depth-5 spend
-  spike — fits.** DONE: `contracts/settlement` `lift` now asserts this exact public-input vector
-  (domain + published root + nullify-at-lift + every order field derived from the proof), validated
-  end-to-end on testnet at ~81.2% of budget. See `milestone-0-results.md`.
-- **Cancel design:** define the exact cancel proof, output asset-note construction, and cost. NEXT.
-- **Off-chain tree builder:** the component that ingests `shielded`/order events, maintains the
-  append-only Merkle tree, calls `push_root`, and hands wallets the membership paths that lift and
-  unshield proofs need. Does not exist yet; without it shield -> lift -> unshield cannot run as one
-  real flow (tests use synthetic trees). DESIGN DECIDED (see `poseidon-tree-spike.md`): off-chain
-  builder (Option B3) over an on-chain tree, because a native Poseidon depth-32 insert costs ~36M
-  instructions and a partial-fill `settle` (4 inserts ~138M) would overflow the per-tx budget. Leaf
-  hashing is reproducible on-chain and off (host `poseidon2` matches Noir byte-for-byte), so build
-  the builder with `stellar/rs-soroban-poseidon`. NEXT.
-- **Registry ownership:** DECIDED — one merged contract for v1 (see "Contracts and state"). A later
-  Assets/Desk split must first measure cross-contract-call cost alongside a verify.
-- **Asset-note layer:** shield -> asset note -> order is the default because one shield can back
-  several future orders. Direct shield-to-order can be added later if the UX needs it.
-- **Partial fills:** settle should emit two proceeds notes plus up to two change notes for the
-  unfilled side(s).
+- **Off-chain tree builder (NEXT):** ingests `shielded`/`settled` events, maintains the depth-32
+  append-only Merkle tree, calls `push_root`, and serves wallets the membership paths that order and
+  unshield proofs need. Does not exist yet; without it the flow cannot run end-to-end (tests use
+  synthetic trees). Leaf hashing is reproducible on-chain and off (host `poseidon2` matches Noir
+  byte-for-byte; build with `stellar/rs-soroban-poseidon`). NOTE: the 400M budget finding reopened
+  on-chain-tree (Option A) as viable (depth-32 insert ~9%); see `poseidon-tree-spike.md`. Decide A
+  vs off-chain B before building.
+- **Partial fills:** `settle` is full-fill (each side receives the other's offered amount). Partial
+  fills need fill-amount math plus proceeds + change notes per side.
+- **Order circuit naming:** `circuits/lift` is the order proof; the contract has no `lift`
+  entrypoint anymore. `order_leaf`/`cancel_owner_tag` public inputs are currently unused on-chain.
 - **Wrapped assets:** define issuers/bridges before advertising ETH/XRP support.
-- **Standalone build:** the settlement spike depends on a vendored Nethermind verifier path that is
-  gitignored; make it reproducible before treating the spike as a buildable package.
+- **Standalone build:** the contract depends on a vendored Nethermind verifier path that is
+  gitignored; make it reproducible before treating it as a buildable package.
+- **Recovery:** users hold note secrets; losing them loses access until a recovery design exists.

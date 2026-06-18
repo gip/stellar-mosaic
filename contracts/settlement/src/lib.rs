@@ -1,25 +1,24 @@
 #![no_std]
-//! Merged Desk + custody contract (the registry-ownership decision: one contract owns the single
-//! note/nullifier registry, so lift never pays a cross-contract call on top of its ~81% verify).
-//! See docs/architecture.md, docs/lift-circuit-spec.md.
+//! Merged Desk + custody contract. Single contract owns custody, the nullifier registry, matching,
+//! and settlement. See docs/architecture.md, docs/lift-circuit-spec.md.
 //!
-//! `shield`= move a real Soroban token into custody and mint an AssetNote. Proof-free: amounts are
-//!           public and the token transfer enforces the amount, so value conservation needs no ZK.
-//!           Emits the note fields; the off-chain tree builder ingests them and publishes the root.
-//! `lift`  = VERIFY the lift proof (UltraHonk, native BN254 host fns), then derive EVERY order
-//!           field from the proof's public inputs and store a validated order entry. Nothing the
-//!           caller passes is trusted: asset/amount/price/output_owner_tag/cancel_owner_tag all
-//!           come from the verified public-input vector, so settlement can trust them. The consumed
-//!           asset note's nullifier is recorded at lift (nullify-at-lift => firm offers).
-//! `settle`= consume TWO pre-verified order entries with NO proof verification: compatibility +
-//!           price check in plaintext, then construct proceeds by stamping each order's bound
-//!           `output_owner_tag` onto the matched fill amount. Atomic. No caller-supplied outputs.
-//! `unshield` (TODO, next): spend an asset note with a proof and transfer the real token out, with
-//!           the recipient bound into the proof so a relayer cannot redirect it.
+//! `shield`  = move a real Soroban token into custody and mint an AssetNote. Proof-free: amounts are
+//!             public and the token transfer enforces the amount, so conservation needs no ZK.
+//!             Emits the note fields; the off-chain tree builder ingests them and publishes the root.
+//! `settle`  = ATOMIC two-sided trade in ONE tx. Verifies BOTH parties' order proofs (the lift
+//!             circuit: each proves the party owns an asset note in the tree, reveals its nullifier,
+//!             and commits to its order terms), checks the orders cross in plaintext from the bound
+//!             public inputs, records both nullifiers, and emits proceeds. No resting on-chain order
+//!             entries, no separate lift step: two crossing order proofs are matched off-chain and
+//!             settled together here. Feasible because two UltraHonk verifies (~160M) fit the 400M
+//!             per-tx budget (see docs/tx-instruction-limit-spike.md).
+//! `unshield`= spend an asset note with a proof and transfer the real token out, with the recipient
+//!             bound into the proof so a relayer cannot redirect it.
 //!
-//! Public-input vector (10 x 32-byte big-endian field elements, see docs/lift-circuit-spec.md):
+//! Order-proof public-input vector (lift circuit, 10 x 32-byte big-endian field elements):
 //!   [0] domain  [1] root  [2] nullifier_in  [3] asset_in  [4] amount_in  [5] asset_out
 //!   [6] min_out [7] output_owner_tag  [8] cancel_owner_tag  [9] order_leaf
+//! settle uses [0..8]; cancel_owner_tag/order_leaf are unused here (no on-chain order note).
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient,
@@ -28,14 +27,14 @@ use soroban_sdk::{
 use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
 
 /// Operation ids: also index the per-operation verification keys (`DataKey::Vk(op)`) and match the
-/// circuit domain separators (lift circuit domain = 1, unshield circuit domain = 2).
+/// circuit domain separators (lift/order circuit domain = 1, unshield circuit domain = 2).
 const LIFT_OP: u32 = 1;
 const UNSHIELD_OP: u32 = 2;
 
-/// Number of 32-byte public inputs the lift circuit exposes, and the unshield circuit.
+/// Public-input lengths for the order (lift) circuit and the unshield circuit.
 const LIFT_PUBLIC_INPUTS_BYTES: u32 = 10 * 32;
 const UNSHIELD_PUBLIC_INPUTS_BYTES: u32 = 6 * 32;
-/// Domain separators as 32-byte big-endian field words: lift = 1, unshield = 2.
+/// Domain separators as 32-byte big-endian field words: order/lift = 1, unshield = 2.
 const LIFT_DOMAIN: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
 ];
@@ -47,38 +46,23 @@ const UNSHIELD_DOMAIN: [u8; 32] = [
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Error {
-    EntryNotFound = 1,
-    AlreadyConsumed = 2,
+    // 1 and 2 are reserved (formerly EntryNotFound / AlreadyConsumed from the two-phase
+    // lift+settle design, removed in the atomic-settle refactor). Kept to preserve discriminants.
+    Reserved1 = 1,
+    Reserved2 = 2,
     NullifierUsed = 3,
     NotCompatible = 4,
     VkNotSet = 5,
     VkInvalid = 6,
     ProofParseError = 7,
     VerificationFailed = 8,
-    // Production lift binding (appended; existing codes above stay stable).
     BadPublicInputs = 9, // wrong public-input length or wrong domain separator
     UnknownRoot = 10,    // root not in the published root history
     FieldOverflow = 11,  // a field element did not fit the expected u32/i128 range
-    // Custody layer (appended).
     AssetNotRegistered = 12, // no token contract mapped to this asset id
     InvalidAmount = 13,      // shield/unshield amount must be positive
     AssetAlreadyRegistered = 14, // asset id already mapped (admin must not silently rebind)
     RecipientMismatch = 15,  // unshield payout address does not match the proof-bound recipient
-}
-
-/// A validated resting order. Every field here is bound by the lift proof.
-#[contracttype]
-#[derive(Clone)]
-pub struct PoolEntry {
-    pub nullifier_in: BytesN<32>,     // consumed asset note's nullifier (recorded at lift)
-    pub asset_in: u32,                // offered asset
-    pub amount_in: i128,              // offered amount (full consumption)
-    pub asset_out: u32,               // wanted asset
-    pub min_out: i128,                // limit terms
-    pub output_owner_tag: BytesN<32>, // proceeds destination (settle stamps this)
-    pub cancel_owner_tag: BytesN<32>, // cancel authority
-    pub order_leaf: BytesN<32>,       // order note leaf (for the off-chain tree)
-    pub consumed: bool,
 }
 
 #[contracttype]
@@ -86,9 +70,18 @@ pub enum DataKey {
     Vk(u32), // verification key per operation (LIFT_OP / UNSHIELD_OP)
     Admin,
     Root(BytesN<32>),
-    Entry(u32),
     Nullifier(BytesN<32>),
     Asset(u32), // asset id -> token contract Address
+}
+
+/// One verified side of a trade, derived entirely from a verified order proof's public inputs.
+struct Order {
+    nullifier: BytesN<32>,
+    asset_in: u32,
+    amount_in: i128,
+    asset_out: u32,
+    min_out: i128,
+    output_owner_tag: BytesN<32>,
 }
 
 #[contract]
@@ -96,8 +89,8 @@ pub struct Settlement;
 
 #[contractimpl]
 impl Settlement {
-    /// Store the lift UltraHonk verification key (validated by parsing) and the admin. The unshield
-    /// VK is registered separately via `set_vk(UNSHIELD_OP, ..)` because it is a different circuit.
+    /// Store the order (lift) UltraHonk verification key (validated by parsing) and the admin. The
+    /// unshield VK is registered separately via `set_vk(UNSHIELD_OP, ..)` (a different circuit).
     pub fn __constructor(env: Env, vk_bytes: Bytes, admin: Address) -> Result<(), Error> {
         let _ = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
         env.storage().instance().set(&DataKey::Vk(LIFT_OP), &vk_bytes);
@@ -114,9 +107,9 @@ impl Settlement {
         Ok(())
     }
 
-    /// Publish a Merkle root produced by the off-chain tree rebuild. Lift proofs may be made against
-    /// any published root. Admin-gated (the off-chain tree publisher). Staleness/bounded-ring
-    /// eviction is a later refinement; double-spend safety comes from nullifiers, not root recency.
+    /// Publish a Merkle root produced by the off-chain tree rebuild. Order/unshield proofs may be
+    /// made against any published root. Admin-gated (the off-chain tree publisher). Staleness /
+    /// bounded-ring eviction is a later refinement; double-spend safety comes from nullifiers.
     pub fn push_root(env: Env, root: BytesN<32>) -> Result<(), Error> {
         Self::require_admin(&env)?;
         env.storage().persistent().set(&DataKey::Root(root), &true);
@@ -167,80 +160,26 @@ impl Settlement {
         Ok(())
     }
 
-    /// Lift: verify the lift proof, derive the order from its public inputs, nullify the consumed
-    /// asset note, and store a validated order entry. The caller supplies only the storage `id` and
-    /// the proof artifacts; every order field is taken from the verified public inputs.
-    pub fn lift(env: Env, id: u32, proof_bytes: Bytes, public_inputs: Bytes) -> Result<(), Error> {
-        // --- verification (the expensive part, ~80% of budget) ---
-        Self::verify_proof(
-            &env,
-            LIFT_OP,
-            &proof_bytes,
-            &public_inputs,
-            LIFT_PUBLIC_INPUTS_BYTES,
-        )?;
+    /// Settle: an atomic two-sided trade in one transaction. The caller (an off-chain matcher)
+    /// supplies both parties' order proofs. The contract verifies both, derives each order entirely
+    /// from its verified public inputs (nothing the caller passes is trusted), checks they cross,
+    /// records both nullifiers, and emits the proceeds descriptors stamped with each order's bound
+    /// `output_owner_tag`. No on-chain order entries; no caller-supplied output commitments.
+    pub fn settle(
+        env: Env,
+        proof_a: Bytes,
+        public_inputs_a: Bytes,
+        proof_b: Bytes,
+        public_inputs_b: Bytes,
+    ) -> Result<(), Error> {
+        // Verify BOTH order proofs (~80M each; ~160M total fits the 400M per-tx budget).
+        Self::verify_proof(&env, LIFT_OP, &proof_a, &public_inputs_a, LIFT_PUBLIC_INPUTS_BYTES)?;
+        Self::verify_proof(&env, LIFT_OP, &proof_b, &public_inputs_b, LIFT_PUBLIC_INPUTS_BYTES)?;
 
-        // --- bindings: everything below is now attested by the verified proof ---
-        // [0] domain separator must be the lift constant.
-        if read_word(&public_inputs, 0) != LIFT_DOMAIN {
-            return Err(Error::BadPublicInputs);
-        }
-        // [1] root must be a published root.
-        let root = BytesN::from_array(&env, &read_word(&public_inputs, 32));
-        if !env.storage().persistent().has(&DataKey::Root(root)) {
-            return Err(Error::UnknownRoot);
-        }
-        // [2] nullifier of the consumed asset note: must be unused, then record (nullify-at-lift).
-        let nullifier_in = BytesN::from_array(&env, &read_word(&public_inputs, 64));
-        let nf_key = DataKey::Nullifier(nullifier_in.clone());
-        if env.storage().persistent().has(&nf_key) {
-            return Err(Error::NullifierUsed);
-        }
-        // [3..7] order terms.
-        let asset_in = word_to_u32(&read_word(&public_inputs, 96))?;
-        let amount_in = word_to_i128(&read_word(&public_inputs, 128))?;
-        let asset_out = word_to_u32(&read_word(&public_inputs, 160))?;
-        let min_out = word_to_i128(&read_word(&public_inputs, 192))?;
-        // [7..10] output/cancel tags and the order leaf.
-        let output_owner_tag = BytesN::from_array(&env, &read_word(&public_inputs, 224));
-        let cancel_owner_tag = BytesN::from_array(&env, &read_word(&public_inputs, 256));
-        let order_leaf = BytesN::from_array(&env, &read_word(&public_inputs, 288));
+        // Derive each side from its verified public inputs (domain + published-root checked here).
+        let a = parse_order(&env, &public_inputs_a)?;
+        let b = parse_order(&env, &public_inputs_b)?;
 
-        // --- commit: nullify the asset note, then store the validated order ---
-        env.storage().persistent().set(&nf_key, &true);
-        let entry = PoolEntry {
-            nullifier_in,
-            asset_in,
-            amount_in,
-            asset_out,
-            min_out,
-            output_owner_tag,
-            cancel_owner_tag,
-            order_leaf,
-            consumed: false,
-        };
-        env.storage().persistent().set(&DataKey::Entry(id), &entry);
-        Ok(())
-    }
-
-    /// Settle: consume two pre-verified order entries. NO proof verification. Proceeds are
-    /// constructed from each order's bound `output_owner_tag` and the matched fill amount; the
-    /// contract never accepts caller-supplied output commitments.
-    pub fn settle(env: Env, id_a: u32, id_b: u32) -> Result<(), Error> {
-        let mut a: PoolEntry = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Entry(id_a))
-            .ok_or(Error::EntryNotFound)?;
-        let mut b: PoolEntry = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Entry(id_b))
-            .ok_or(Error::EntryNotFound)?;
-
-        if a.consumed || b.consumed {
-            return Err(Error::AlreadyConsumed);
-        }
         // Assets must cross: A offers what B wants and vice versa.
         if a.asset_in != b.asset_out || a.asset_out != b.asset_in {
             return Err(Error::NotCompatible);
@@ -250,29 +189,34 @@ impl Settlement {
         if a.amount_in < b.min_out || b.amount_in < a.min_out {
             return Err(Error::NotCompatible);
         }
+        // The two sides must be distinct notes (cannot cross a note against itself).
+        if a.nullifier == b.nullifier {
+            return Err(Error::NotCompatible);
+        }
 
-        // Order notes are single-use via the `consumed` flag (the asset-note nullifiers were
-        // already recorded at lift). Mark both consumed atomically.
-        a.consumed = true;
-        b.consumed = true;
-        env.storage().persistent().set(&DataKey::Entry(id_a), &a);
-        env.storage().persistent().set(&DataKey::Entry(id_b), &b);
+        // Both consumed notes must be unspent; record both nullifiers atomically before outputs.
+        let ka = DataKey::Nullifier(a.nullifier.clone());
+        let kb = DataKey::Nullifier(b.nullifier.clone());
+        if env.storage().persistent().has(&ka) || env.storage().persistent().has(&kb) {
+            return Err(Error::NullifierUsed);
+        }
+        env.storage().persistent().set(&ka, &true);
+        env.storage().persistent().set(&kb, &true);
 
-        // Construct proceeds from bound fields: (asset_out, fill_amount, output_owner_tag) per side.
-        // The proceeds leaf = Poseidon(asset_out, fill_amount, output_owner_tag) is rebuilt
+        // Proceeds: (asset_out, fill_amount, output_owner_tag) per side, stamped from the bound
+        // tags. The proceeds leaf Poseidon(asset_out, fill_amount, output_owner_tag) is rebuilt
         // off-chain by the indexer/wallet; the contract emits the authenticated descriptor.
         env.events().publish(
             (symbol_short!("settled"),),
             (
                 a.asset_out,
                 b.amount_in,
-                a.output_owner_tag.clone(),
+                a.output_owner_tag,
                 b.asset_out,
                 a.amount_in,
-                b.output_owner_tag.clone(),
+                b.output_owner_tag,
             ),
         );
-
         Ok(())
     }
 
@@ -341,7 +285,7 @@ impl Settlement {
 
 impl Settlement {
     /// Verify a proof for `op` against its stored VK, after length-checking the proof and public
-    /// inputs. Shared by `lift` and `unshield`.
+    /// inputs. Shared by `settle` (both sides) and `unshield`.
     fn verify_proof(
         env: &Env,
         op: u32,
@@ -379,6 +323,29 @@ impl Settlement {
     }
 }
 
+/// Derive one order side from a VERIFIED order-proof public-input blob. Checks the lift domain
+/// separator and that the membership root is published; parses the order terms the proof bound.
+/// Caller must have verified the proof first.
+fn parse_order(env: &Env, pi: &Bytes) -> Result<Order, Error> {
+    // [0] domain separator must be the order/lift constant.
+    if read_word(pi, 0) != LIFT_DOMAIN {
+        return Err(Error::BadPublicInputs);
+    }
+    // [1] root must be a published root.
+    let root = BytesN::from_array(env, &read_word(pi, 32));
+    if !env.storage().persistent().has(&DataKey::Root(root)) {
+        return Err(Error::UnknownRoot);
+    }
+    Ok(Order {
+        nullifier: BytesN::from_array(env, &read_word(pi, 64)),
+        asset_in: word_to_u32(&read_word(pi, 96))?,
+        amount_in: word_to_i128(&read_word(pi, 128))?,
+        asset_out: word_to_u32(&read_word(pi, 160))?,
+        min_out: word_to_i128(&read_word(pi, 192))?,
+        output_owner_tag: BytesN::from_array(env, &read_word(pi, 224)),
+    })
+}
+
 /// Deterministically map a payout address to the BN254 field the unshield proof must bind as its
 /// recipient. We hash the address's XDR with sha256 and zero the top byte so the value is < 2^248
 /// (safely below the field modulus). The wallet computes the identical value off-chain and bakes it
@@ -395,7 +362,7 @@ fn recipient_field(env: &Env, to: &Address) -> [u8; 32] {
 }
 
 /// Copy the 32-byte big-endian word at byte `off` out of the public-input blob.
-/// Callers must ensure `off + 32 <= public_inputs.len()` (lift checks the total length first).
+/// Callers must ensure `off + 32 <= public_inputs.len()` (verify_proof checks the total length).
 fn read_word(pi: &Bytes, off: u32) -> [u8; 32] {
     let mut buf = [0u8; 32];
     pi.slice(off..off + 32).copy_into_slice(&mut buf);
