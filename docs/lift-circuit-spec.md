@@ -98,7 +98,9 @@ asserted against witness-derived values; that promotion is the soundness upgrade
 
 ## Contract obligations (the other half of soundness)
 
-A proof is necessary but not sufficient. On a verifying `lift` the contract MUST:
+IMPLEMENTED in `contracts/settlement` `lift` and validated on testnet (2026-06-18); see
+`milestone-0-results.md`. A proof is necessary but not sufficient. On a verifying `lift` the
+contract MUST:
 
 - pin `public_inputs[0] == LIFT_DOMAIN`;
 - check `public_inputs[1]` (`root`) is in the root-history ring (tolerate recent roots, reject stale);

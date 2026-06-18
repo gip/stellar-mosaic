@@ -41,6 +41,28 @@ explain the verifier choice.
 - Conclusion unchanged: one verify per lift fits (~80.6%); two verifies in one tx (~161M) remain
   infeasible; verify-at-lift + proof-free settle stands at production depth.
 
+## Settlement contract wired to the lift vector (validated 2026-06-18)
+
+`contracts/settlement` `lift` now derives EVERY order field from the verified 10-field public-input
+vector (nothing the caller passes is trusted), checks the `lift` domain separator, requires the
+membership `root` to be admin-published (`push_root`), and records the consumed asset note's
+nullifier at lift (nullify-at-lift). `settle` consumes two entries with no proof, crossing the bound
+fields in plaintext and stamping each order's bound `output_owner_tag` onto the fill amount.
+
+- Deployed testnet `CAAYPMQ667KTHQRTZXGPZISXF4QZS46TN34HE447CKQNZMN7Y5AY7XN6` (lift VK + admin).
+- Full lift (verify + domain + root + nullifier + store) cost on a fresh instance
+  (`CD36BPNF...A4VSG`): **81,156,293 CPU (~81.2% of budget)**, 0 disk read, 640 write bytes, resource
+  fee 223,870 stroops. Only ~0.5% over pure verify (80.64M); the binding/storage logic is cheap.
+- End-to-end checks, all as expected:
+  - lift before the root is published -> `Error(Contract, #10)` `UnknownRoot`.
+  - lift with a valid proof -> `Ok`.
+  - re-lift the same proof (same nullifier) -> `#3` `NullifierUsed`.
+  - **lift a valid proof with one byte of `amount_in` tampered -> `#8` `VerificationFailed`** (the
+    proof binds every order field, so order terms cannot be substituted).
+  - two compatible orders (A: 100 of asset 1 wanting >=1500 of asset 2; B: 2000 of asset 2 wanting
+    >=50 of asset 1) -> `settle` `Ok`, emits both proceeds descriptors.
+  - re-settle the same pair -> `#2` `AlreadyConsumed`.
+
 ## Local proof spike (validated 2026-06-16)
 
 - Toolchain: nargo 1.0.0-beta.3, bb 0.82.2

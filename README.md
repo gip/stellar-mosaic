@@ -26,9 +26,12 @@ Measured facts:
 - Proof-free settle consuming two lifted entries: about **10-13%** of the budget.
 - Valid proofs were accepted on testnet; corrupted proofs were rejected.
 
-The current settlement spike validates cost and flow shape. It is not final settlement
-soundness yet: the spike circuit binds `[txbind, root, nullifier]`, but the production
-lift circuit must bind every order field settlement trusts.
+The production lift circuit (`circuits/lift`) binds every order field settlement trusts, and
+`contracts/settlement` `lift` now derives all of them from the verified public inputs (domain +
+published root + nullify-at-lift). Validated end-to-end on testnet at ~81.2% of budget: tampering any
+bound order field makes the proof fail; a proof-free `settle` then crosses two bound orders
+atomically. See [docs/lift-circuit-spec.md](docs/lift-circuit-spec.md) and
+[docs/milestone-0-results.md](docs/milestone-0-results.md).
 
 ## Commands
 

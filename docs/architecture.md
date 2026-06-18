@@ -113,7 +113,9 @@ require wrapped issuers or bridge integrations before they can be custodied.
   spike *outputs* to asserted public *inputs*. Compiles and is satisfiable (3,335 gates); tampering
   any bound field fails the constraints. v1 = full consumption, no change at lift. **On-chain verify
   measured on testnet 2026-06-18: 80,641,857 CPU (~80.6% of budget), +0.9% over the depth-5 spend
-  spike — fits.** Still TODO: have the contract `lift` assert this exact public-input vector.
+  spike — fits.** DONE: `contracts/settlement` `lift` now asserts this exact public-input vector
+  (domain + published root + nullify-at-lift + every order field derived from the proof), validated
+  end-to-end on testnet at ~81.2% of budget. See `milestone-0-results.md`.
 - **Cancel design:** define the exact cancel proof, output asset-note construction, and cost.
 - **Registry ownership:** choose merged contract vs Assets-owned registry plus Desk cross-contract
   calls; measure cross-contract cost alongside a verify.
