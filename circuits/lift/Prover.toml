@@ -1,0 +1,17 @@
+# Satisfying witness for the lift circuit. Public-input values (root,
+# nullifier_in, order_leaf) are Poseidon outputs computed from the witness;
+# see docs/lift-circuit-spec.md. Regenerate with the deriver if you change inputs.
+rho_in = "333333"
+sk_o = "424242"
+path = ["100", "101", "102", "103", "104", "105", "106", "107", "108", "109", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "120", "121", "122", "123", "124", "125", "126", "127", "128", "129", "130", "131"]
+index_bits = ["1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0", "1", "0"]
+domain = "1"
+root = "0x2ded9113e79d8d75a87cb33a4a3c350378ed122654b5378538f1ad458d4e0377"
+nullifier_in = "0x1e950dd7d2f744897e97fff48145a881da15f4f99a615d4b79e94acc802384fe"
+asset_in = "1"
+amount_in = "100"
+asset_out = "2"
+min_out = "1500"
+output_owner_tag = "9001"
+cancel_owner_tag = "9002"
+order_leaf = "0x137471aa3a68acac312f8676b7dfb4f0c7ed28e2f16d2e25f0b8036e979035d3"

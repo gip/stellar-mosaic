@@ -1,0 +1,6 @@
+[package]
+name = "lift"
+type = "bin"
+authors = ["stellar-mosaic"]
+
+[dependencies]

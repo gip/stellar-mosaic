@@ -2,63 +2,64 @@
 
 A privacy-preserving DEX on Stellar. Trade resting offers without leaking who owns
 what, with non-custodial atomic settlement. Built on Soroban smart contracts, Noir
-circuits, and the [indextree UltraHonk Soroban verifier](https://github.com/indextree/ultrahonk_soroban_contract).
+circuits, and a complete UltraHonk verifier using native BN254 Soroban host functions.
 
-Design doc and eng plan live in `~/.gstack/projects/stellar-mosaic/`.
+Start with [docs/architecture.md](docs/architecture.md). Detailed references:
 
-## Milestone 0 - on-chain verify spike (the gate)
+- [docs/privacy-model.md](docs/privacy-model.md) - owner-anonymous, amount-transparent privacy model.
+- [docs/note-types.md](docs/note-types.md) - asset and order note structures.
+- [docs/lift-circuit-spec.md](docs/lift-circuit-spec.md) - production lift circuit: public-input vector and bindings.
+- [docs/milestone-0-results.md](docs/milestone-0-results.md) - measurement/provenance log.
 
-The whole product rests on one unproven assumption: that a real-sized UltraHonk proof
-can be verified **on Stellar testnet** within Soroban's resource limits. Milestone 0
-proves (or disproves) that before any note/contract/app code gets written.
+## Current status
 
-`circuits/spend` is a representative spend circuit (sizing spike, not the final scheme):
-hash-lock authorization `owner_pk = Poseidon(sk)`, a depth-5 Merkle membership proof, a
-nullifier `N = Poseidon(serial, nk)`, and a txbind binding.
+Milestone 0 validated the key cost constraint on Stellar testnet: one real UltraHonk
+verification fits, but two verifies in one transaction do not. The design therefore
+uses verify-at-lift and proof-free atomic settlement.
 
-### Status
+Measured facts:
 
-| Step | State | Metric |
-|------|-------|--------|
-| Circuit compiles (nargo 1.0.0-beta.3) | DONE | - |
-| Circuit size | DONE | **818 gates**, 45 ACIR opcodes |
-| Prove + verify locally (bb 0.82.2) | DONE | proof **~14 KB**, vk **~1.8 KB** |
-| Reject corrupted proof locally | DONE | rejected as expected |
-| Verify on Stellar **testnet** | TODO | the actual gate |
-| Two-verify-in-one-tx cost | TODO | the real budget question |
+- Verifier: `NethermindEth/rs-soroban-ultrahonk`.
+- One verify for the representative spend circuit: **79,922,355 CPU instructions**,
+  about 80% of the ~100M per-transaction Soroban budget.
+- Real lift with verify plus store: about **82%** of the budget.
+- Proof-free settle consuming two lifted entries: about **10-13%** of the budget.
+- Valid proofs were accepted on testnet; corrupted proofs were rejected.
 
-Run the validated local half:
+The current settlement spike validates cost and flow shape. It is not final settlement
+soundness yet: the spike circuit binds `[txbind, root, nullifier]`, but the production
+lift circuit must bind every order field settlement trusts.
+
+## Commands
+
+Run the local prove/verify half:
 
 ```bash
 ./scripts/01_build_prove.sh
 ```
 
-Run the on-chain half (has 3 `TODO(indextree)` reconciliation points to fill from the
-verifier repo):
+Current on-chain measurements are summarized in [docs/milestone-0-results.md](docs/milestone-0-results.md).
+`scripts/02_deploy_verify_testnet.sh` is the legacy verifier spike script.
 
-```bash
-./scripts/02_deploy_verify_testnet.sh
-```
+### Version pinning
 
-### CRITICAL before the on-chain step: version pinning (CONFIRMED)
-
-The verifier (`vendor/ultrahonk_soroban_contract/tests/build_circuits.sh`) pins:
+The testnet-compatible artifact recipe uses:
 
 | | required | installed here |
 |--|----------|----------------|
 | nargo | **1.0.0-beta.9** | 1.0.0-beta.3 |
 | bb | **v0.87.0** | 0.82.2 |
 
-Both must be bumped. **bb's proof format differs across versions** - a mismatch makes valid
-proofs silently fail to verify. `scripts/02` installs the pinned pair into `~/.nargo` and
-`~/.bb` and puts them first on PATH (this changes your global toolchain).
+`bb` proof format differs across versions, so mismatches can make valid proofs fail
+verification. The legacy on-chain script installs the pinned pair into `~/.nargo`
+and `~/.bb` and puts them first on PATH.
 
-Confirmed artifact recipe (baked into `scripts/02`):
+Confirmed artifact recipe:
 - `bb prove/write_vk --scheme ultra_honk --oracle_hash keccak --output_format bytes_and_fields`
-  (the `bytes_and_fields` format emits the separate `public_inputs` file the contract needs).
+  (`bytes_and_fields` emits the separate `public_inputs` file the contract needs).
 
 Confirmed contract interface:
-- VK is set ONCE at deploy via the constructor: `--vk_bytes-file-path target/vk`.
+- VK is set once at deploy via the constructor: `--vk_bytes-file-path target/vk`.
 - Verify: `verify_proof --public_inputs-file-path ... --proof_bytes-file-path ...`.
 - Build: `stellar contract build --optimize`, target `wasm32v1-none`.
 
@@ -66,13 +67,10 @@ Confirmed contract interface:
 
 ```
 circuits/spend/      Noir spend circuit (Milestone 0 sizing spike)
-scripts/             01 = local prove/verify (validated); 02 = on-chain (TODO markers)
-docs/                milestone-0-results.md (record on-chain metrics here)
-vendor/              indextree verifier, cloned + pinned (gitignored)
+circuits/lift/       production lift circuit (binds the full order; see docs/lift-circuit-spec.md)
+contracts/settlement settlement spike: verify at lift, proof-free settle
+scripts/             01 = local prove/verify; 02 = legacy on-chain verify spike
+docs/                current design docs and measurement provenance
+vendor/              verifier dependencies (gitignored)
 artifacts/           proof + vk outputs (gitignored)
 ```
-
-## Not in scope yet
-
-Everything past Milestone 0: notes/pool/matching, relayer, web, iOS. See the eng plan's
-"NOT in scope" and "Open Questions" sections.
