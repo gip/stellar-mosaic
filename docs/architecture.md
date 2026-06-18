@@ -19,6 +19,11 @@ mitigations, not complete fixes.
 
 ## Measured constraint
 
+> **SUPERSEDED (2026-06-18): the per-tx CPU limit is 400,000,000, not ~100M** (testnet and mainnet;
+> see `tx-instruction-limit-spike.md`). One verify (~80M) is ~20% of budget and **two verifies in one
+> tx (~160M) DO fit (~40%)**. This reopens the verify-at-lift/settle-cheap split below and the
+> off-chain-tree decision - both were chosen under the wrong ~100M assumption. Re-decision pending.
+
 One complete UltraHonk verify using Nethermind's native-BN254 Soroban verifier costs about
 **79.9M CPU instructions**, roughly 80% of the ~100M per-transaction Soroban budget. Two verifies in
 one transaction are infeasible.

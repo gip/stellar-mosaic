@@ -69,7 +69,13 @@ a heavy ~36% tax on every note creation.
 
 ## Decision
 
-**Option B (off-chain builder + published root) - recommended.** Phase 1 changed the calculus: leaf
+> **REOPENED (2026-06-18): this analysis assumed a ~100M per-tx budget; the real limit is 400M**
+> (see `tx-instruction-limit-spike.md`). At 400M a depth-32 insert is ~9% and a 4-insert partial-fill
+> settle is ~35%, so the budget objection to an on-chain tree (Option A) no longer holds. The B-vs-A
+> choice should be re-decided on the 400M budget. The cost numbers below remain correct; only the
+> "% of budget" framing (which used 100M) changes.
+
+**Option B (off-chain builder + published root) - recommended (under the old 100M assumption).** Phase 1 changed the calculus: leaf
 hashing is now a *standardized, reproducible* function (official crate, matches Noir, verified
 byte-exact), so the old determinism fear for B is largely gone - any builder using
 `soroban-poseidon` computes identical leaves. B keeps zero hashing cost on-chain and never risks the
