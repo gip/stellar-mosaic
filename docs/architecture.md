@@ -111,9 +111,9 @@ require wrapped issuers or bridge integrations before they can be custodied.
   `asset_in`, `amount_in`, `asset_out`, `min_out`, `output_owner_tag`, `cancel_owner_tag`, plus
   membership `root`, `nullifier_in`, and a `lift` domain separator; promotes root/nullifier from
   spike *outputs* to asserted public *inputs*. Compiles and is satisfiable (3,335 gates); tampering
-  any bound field fails the constraints. v1 = full consumption, no change at lift. Still TODO:
-  re-measure on-chain verify cost at production `TREE_DEPTH`, then have the contract `lift` assert
-  this exact public-input vector.
+  any bound field fails the constraints. v1 = full consumption, no change at lift. **On-chain verify
+  measured on testnet 2026-06-18: 80,641,857 CPU (~80.6% of budget), +0.9% over the depth-5 spend
+  spike — fits.** Still TODO: have the contract `lift` assert this exact public-input vector.
 - **Cancel design:** define the exact cancel proof, output asset-note construction, and cost.
 - **Registry ownership:** choose merged contract vs Assets-owned registry plus Desk cross-contract
   calls; measure cross-contract cost alongside a verify.

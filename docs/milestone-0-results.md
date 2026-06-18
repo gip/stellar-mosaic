@@ -1,9 +1,47 @@
-# Milestone 0 - results
+# Milestone 0 - results and measurement log
 
-The kill-switch experiment: can a real-sized UltraHonk proof be verified on Stellar
-testnet within Soroban limits? Record findings here as they come in.
+This is the provenance log for the proof-verification and settlement-cost measurements. The current
+design conclusion is summarized first; historical failed paths are retained below because they
+explain the verifier choice.
 
-## Local (validated 2026-06-16)
+## Current conclusion
+
+- A complete, sound UltraHonk verifier fits on Stellar testnet when using
+  `NethermindEth/rs-soroban-ultrahonk`.
+- Nethermind's verifier is already native-BN254 and complete; the measured cost is the optimized
+  path, not a software fallback.
+- One verify for our spend circuit costs **79,922,355 CPU instructions** (~79.92% of the ~100M
+  per-transaction Soroban limit).
+- Two UltraHonk verifies in one transaction are infeasible.
+- The working architecture is therefore: one verifying `lift` per side, then proof-free atomic
+  `settle`.
+- The current settlement spike validates cost and transaction shape, but not final settlement
+  soundness. The spike circuit binds only `[txbind, root, nullifier]`; the final lift circuit must
+  bind all order fields that settlement trusts.
+- **The production lift circuit (`circuits/lift`, full order binding, `TREE_DEPTH=32`) was measured
+  and FITS: 80,641,857 CPU instructions (~80.6% of budget) — only +0.9% over the depth-5 spend
+  spike.** Depth and the extra order-leaf hash barely move verify cost because the UltraHonk proof is
+  padded to `CONST_PROOF_SIZE_LOG_N=28` regardless of actual circuit size. The budget headroom for
+  verify-at-lift therefore holds at production depth.
+
+## Production lift circuit on-chain (measured 2026-06-18)
+
+- Toolchain: nargo 1.0.0-beta.9, bb 0.87.0 (pinned), `--scheme ultra_honk --oracle_hash keccak
+  --output_format bytes_and_fields`.
+- Circuit: `circuits/lift` (depth-32 Merkle + Poseidon ownership/nullifier + 6-field order-leaf bind
+  + lift domain separator). 3,335 gates, 206 ACIR opcodes. Proof 14,592 bytes; 10 public inputs
+  (320-byte `public_inputs`); VK 1,760 bytes.
+- Verifier: `NethermindEth/rs-soroban-ultrahonk` wrapper contract, lift VK set at constructor.
+  Deployed testnet `CC6OVSTVKCFJLGF3O7FSDFZR3XQC2TRTFYT6WW6P4VMIENMM64YKZMHC`.
+- **Verify cost: 80,641,857 CPU instructions** (resources: 0 disk read/write bytes, resource fee
+  139,106 stroops; non-refundable 124,179). Read straight from the assembled tx `SorobanResources`
+  (the RPC `cost.cpu_insns` field reads 0 on this protocol version — decode the tx data instead).
+- Valid proof: ACCEPTED (return `null`/`Ok`). Corrupted proof (4 bytes flipped at offset 5000):
+  REJECTED on-chain with `Error(Contract, #4)` = `VerificationFailed`.
+- Conclusion unchanged: one verify per lift fits (~80.6%); two verifies in one tx (~161M) remain
+  infeasible; verify-at-lift + proof-free settle stands at production depth.
+
+## Local proof spike (validated 2026-06-16)
 
 - Toolchain: nargo 1.0.0-beta.3, bb 0.82.2
 - Circuit: `circuits/spend` (depth-5 Merkle + Poseidon hash-lock + nullifier + txbind)
@@ -13,150 +51,156 @@ testnet within Soroban limits? Record findings here as they come in.
 - Valid proof verifies locally: YES
 - Corrupted proof rejected locally: YES
 
-## On-chain (testnet) - measured 2026-06-16
+## First on-chain attempt: indextree verifier (measured 2026-06-16)
 
-- Verifier repo: indextree/ultrahonk_soroban_contract @ commit `5c32a28`
+- Verifier repo: `indextree/ultrahonk_soroban_contract` @ commit `5c32a28`
 - Toolchain pinned to match it: nargo **1.0.0-beta.9**, bb **v0.87.0**
 - Oracle hash: **keccak**, output format `bytes_and_fields`
-- Circuit: 967 gates; proof 14.6 KB; public_inputs 96 B (3 fields); vk 1.76 KB
-- Contract wasm: **50.9 KB** optimized -> well under the 128 KiB contract-size limit.
-  **Contract size is NOT the blocker.**
-- Local prove + verify: PASS. Corrupted proof rejected: PASS.
-- Deploy to testnet: **SUCCESS** (contract `CC5UPX27ZTQI52S3IWNSQPE2HSL4Z3S7EMH6S72NIYVWW6WLY2ICPW5O`,
-  VK set at construction).
-- Single on-chain `verify_proof` on testnet: **FAIL** -
-  `HostError: Error(Budget, ExceededLimit)`.
+- Circuit: 967 gates; proof 14.6 KB; public inputs 96 B (3 fields); VK 1.76 KB
+- Contract wasm: **50.9 KB** optimized, well under the 128 KiB contract-size limit
+- Local prove + verify: PASS
+- Corrupted proof rejected locally: PASS
+- Deploy to testnet: SUCCESS
+  - Contract: `CC5UPX27ZTQI52S3IWNSQPE2HSL4Z3S7EMH6S72NIYVWW6WLY2ICPW5O`
+  - VK set at construction
+- Single on-chain `verify_proof`: FAIL
+  - `HostError: Error(Budget, ExceededLimit)`
 
-### Verdict: GREEN - on-chain verification IS feasible on testnet. Verifier choice is the deciding factor.
+Verdict: contract size was not the blocker. This verifier implementation exceeded the Soroban
+transaction budget.
 
-A single UltraHonk verification fits inside Soroban's per-transaction budget on the public
-testnet - WHEN using an optimized verifier. The deciding variable is the verifier
-implementation, not Stellar's limits.
+## Nethermind verifier: default circuit pass
 
-| Verifier | Result on testnet |
-|----------|-------------------|
-| indextree/ultrahonk_soroban_contract (`ultrahonk_rust_verifier` rev 2a73c4ba) | FAIL - `Budget/ExceededLimit` at simulation |
-| **NethermindEth/rs-soroban-ultrahonk** (`crates/ultrahonk-soroban-verifier`) | **PASS - verified + submitted on testnet** |
+Nethermind run (commit `661db07`, same nargo 1.0.0-beta.9 / bb 0.87.0):
 
-Nethermind run (commit 661db07, same nargo 1.0.0-beta.9 / bb 0.87.0):
+- Verifier: `NethermindEth/rs-soroban-ultrahonk`
+  (`crates/ultrahonk-soroban-verifier`)
 - Deployed: `CAXLUR57WF67ACRMIS2W5TJWU3J6KFOSHV2BN443CU2NIGLLJIRULIFX`
-- Proof 14592 bytes, public_inputs 32 bytes (their default/tornado circuit)
-- `verify_proof` simulated (passed budget) AND submitted: tx
-  `e9a8261b0793c34a8c58c725e7ab40a212afca82ac456e60d1e7c248c826fb5f`
-- "Proof successfully verified on-chain!"
+- Proof: 14,592 bytes
+- Public inputs: 32 bytes (their default/tornado circuit)
+- `verify_proof` simulated within budget and submitted
+- Tx: `e9a8261b0793c34a8c58c725e7ab40a212afca82ac456e60d1e7c248c826fb5f`
+- Result: "Proof successfully verified on-chain!"
 
-So the earlier RED was an artifact of testing the LESS-optimized indextree verifier first.
-Use Nethermind's verifier crate. The foundation holds; the SDF / native-pairing dependency
-is NOT a blocker.
+This established that a single UltraHonk verification can fit on Stellar testnet when the verifier
+implementation is optimized.
 
-### OUR circuit on testnet (confirmed 2026-06-16) - PASS
+## Our spend circuit on Nethermind verifier (confirmed 2026-06-16)
 
-Deployed Nethermind verifier bound to OUR `circuits/spend` VK:
-`CAU63XJSNFZXFYDTNRLBOF3QFNUNKXPM5EXWCK36FFF5UOMVU65V67JA`
-- Valid proof (967-gate spend circuit, 3 public inputs / 96 bytes): **accepted + submitted**,
-  tx `4d11eb55555c06a2efa74af29e51cdf79260719a05b8574aa51ef743e02fcddb`.
-- Corrupted proof: **rejected** at simulation, `HostError: Error(Contract, #4)` (verifier's
-  invalid-proof error) - never submits. So it is genuinely verifying.
+Deployed Nethermind verifier bound to our `circuits/spend` VK:
 
-Our artifacts were format-compatible with no rebuild: Nethermind's `build_all.sh` uses the
-identical `--scheme ultra_honk --oracle_hash keccak --output_format bytes_and_fields`.
+- Contract: `CAU63XJSNFZXFYDTNRLBOF3QFNUNKXPM5EXWCK36FFF5UOMVU65V67JA`
+- Valid proof (967-gate spend circuit, 3 public inputs / 96 bytes): accepted and submitted
+- Tx: `4d11eb55555c06a2efa74af29e51cdf79260719a05b8574aa51ef743e02fcddb`
+- Corrupted proof: rejected at simulation
+  - `HostError: Error(Contract, #4)` (verifier invalid-proof error)
+  - Never submitted
 
-### Cost measured (2026-06-16, our spend circuit, Nethermind verifier)
+Our artifacts were format-compatible with no rebuild: Nethermind's `build_all.sh` uses the same
+`--scheme ultra_honk --oracle_hash keccak --output_format bytes_and_fields`.
+
+Cost measured for our spend circuit:
 
 | Metric | Value |
 |--------|-------|
 | CPU instructions (one verify) | **79,922,355 = 79.92% of the ~100M per-tx limit** |
-| Ledger read/write bytes | 0 (pure compute; the real settlement contract adds storage I/O) |
+| Ledger read/write bytes | 0 (pure compute; real contracts add storage I/O) |
 | Min resource fee | 137,525 stroops (~0.0138 XLM); actual charged ~122,888 (~0.0123 XLM) |
-| Tx envelope size | 15,052 bytes (proof 14,592 + pubs 96 + overhead) |
+| Tx envelope size | 15,052 bytes (proof 14,592 + public inputs 96 + overhead) |
 
-### CRITICAL implication: the locked two-verify settlement does NOT fit
+Implication: the old design that verified maker and taker proofs in one atomic settlement
+transaction would cost about 160M CPU instructions, or ~160% of the transaction limit. That path is
+not viable.
 
-One verify is ~80% of the budget. The settlement design we locked in the eng review
-(per-side proofs: verify BOTH maker and taker proofs in one atomic tx) needs ~2x ~= 160M
-instructions, which is ~160% of the limit. **Two verifies in one transaction is infeasible.**
-This forces a settlement-architecture change. Options to evaluate (M1 design):
-1. **Recursive aggregation** - combine the two spend proofs into ONE proof, verify once.
-   (Check feasibility: recursive UltraHonk verification on Soroban may be contract-size limited.)
-2. **Split settlement across two txs** - verify each side separately; recover atomicity with an
-   escrow/commit-reveal pattern. Loses single-tx atomicity; needs careful design.
-3. A cheaper verification scheme, or batched/folding schemes.
+## Settlement spike: verify-at-lift, settle-cheap (2026-06-17)
 
-Also note: even a SINGLE verify leaves only ~20% headroom, so adding the settlement contract's
-own storage I/O (nullifier checks, tree/root writes) on top of one verify must be measured -
-it may not fit alongside a verify either.
+First settlement contract spike (`contracts/settlement`) separated expensive verification from
+cheap settlement:
 
-### Resolved: the cost lever is native BN254 host functions (Protocol 25)
+- Deployed: `CDPW6NQHESKBHYERDY5XBPLMEICLM3H6V4ZB7A5F33RXUFEWCJLTYZTS`
+- Ran 2 lifts + 1 settle
+- `settle` succeeded and emitted the `settled` event with both output commitments
 
-Chased the salazarsebas/stellar-zk "~35M" claim. Findings:
-- Stellar **Protocol 25 introduced native BN254 host functions** (`g1_add`, `g1_mul`,
-  `g1_neg`, `fr_from_bytes`, `pairing_check`). A verifier that offloads pairing/MSM to these
-  is far cheaper than one doing BN254 in WASM. (Our testnet is Protocol 26 -> available.)
-- [CORRECTED - see FINAL CORRECTION below] Our measured **79.9M uses Nethermind's verifier,
-  which actually DOES use native BN254 host functions** (not arkworks; arkworks/software was
-  indextree, which exceeded 100M). So 79.9M is already the native, sound floor - there is no
-  software->native 2x left to gain on UltraHonk.
-- salazarsebas's **"~35M" is a STATIC COST-MODEL ESTIMATE**, not a measurement. Its
-  `stellar-zk-ultrahonk` crate is an OFF-CHAIN proving/estimator backend (no on-chain verifier
-  contract, no `pairing_check` calls; `estimate_cost()` -> `static_estimate()`). Their real,
-  demonstrated native-path number is **Groth16 ~12M**.
+Non-refundable resource fee, CPU-dominated:
 
-Three paths (cost vs trusted-setup):
-| Path | Per-verify | 2-in-1-tx | Status |
-|------|-----------|-----------|--------|
-| UltraHonk, software BN254 (Nethermind) | 79.9M measured | no | works today; needs settlement redesign |
-| UltraHonk, native BN254 host fns | ~35M modeled | yes (~70M) | NOT built/measured; needs verifier port |
-| Groth16, native BN254 host fns | ~12M (their real #) | yes (~24M) | proven path; needs per-circuit TRUSTED SETUP |
+| Operation | Non-refundable fee | vs one verify |
+|-----------|--------------------|---------------|
+| UltraHonk verify (measured) | 122,698 stroops | 100% (~79.9M CPU) |
+| lift (store entry, no verify) | 6,844 stroops | ~6% |
+| settle (consume two, no verify) | 15,955 stroops | ~13% |
 
-Open decision for M1: build/port a native-host-function UltraHonk verifier (~35M target, no
-trusted setup, unproven) vs adopt Groth16 (~12M proven, trusted setup). Only EC ops offload to
-host fns; sumcheck/field work stays in WASM, so ~35M is plausible but must be measured.
+Conclusion:
 
-### IMPORTANT correction: salazarsebas's UltraHonk verifier is an UNSOUND stub
+- `lift` transaction = verify (~80% budget) + store (~5-6%) -> fits.
+- `settle` transaction = no verify, about 10-13% of budget -> fits with large margin.
+- Two lifts in separate transactions plus one settle are feasible.
 
-Read `crates/stellar-zk-core/templates/contracts/ultrahonk_verifier/src/lib.rs.tmpl`. Its
-`verify()` does ONLY a final KZG pairing check on values read straight from the proof bytes
-(W, W', and an "aggregate commitment P at a known offset"). It has **no Fiat-Shamir transcript,
-no sumcheck verification, and no MSM** - it reads P from the prover-controlled proof instead of
-computing it. Its own comment says "simplified batched check." A malicious prover can forge a
-passing proof. So the ~35M is cheap because it SKIPS the security-critical work, not because
-native host functions made a real verifier cheap. NOT comparable to our 79.9M (a complete,
-sound verifier). Their Groth16 ~12M IS sound (Groth16 verification genuinely is a pairing check).
+## Real lift settlement spike (2026-06-17)
 
-Corrected landscape for UltraHonk:
-| Path | Sound | Cost | Status |
-|------|-------|------|--------|
-| Groth16 native | yes | ~12M | real; needs per-circuit trusted setup |
-| UltraHonk software (Nethermind) | yes | 79.9M measured | works today; 2-verify infeasible |
-| UltraHonk native, complete | yes | UNKNOWN (>35M, <?) | NOT built; port Nethermind's verifier to host fns |
-| UltraHonk native (salazarsebas) | NO | ~35M | unsound stub - do not use |
+The next spike made `lift` call Nethermind's verifier in-process and store the entry only if the
+proof verified. The stored nullifier was bound to the proof's public inputs.
 
-Takeaway: there is no off-the-shelf verifier that is BOTH cheap-enough-for-2-verify AND a
-sound UltraHonk verifier. Real options: (a) Groth16 (cheap+sound, trusted setup), or (b) build
-a native-host-function complete UltraHonk verifier and measure it.
-```
+- Contract: `contracts/settlement`
+- Deployed with our spend-circuit VK:
+  `CC23Q4KSMUDN5TBXXNSFXTWHTT2U3ZDYNLH3UH65JFKTP2MXEECL346E`
+- Lift A (verify proof A + store, id 1): submitted
+  - Non-refundable CPU fee: **126,454 stroops**
+  - One verify baseline: 122,698 stroops
+  - Delta is the pool-entry store
+  - About **82%** of the per-transaction budget
+- Lift with corrupted proof: rejected
+  - `Error(Contract, #8) = VerificationFailed`
+  - Nothing stored
+- Lift B (verify proof B + store, id 2): submitted
+- `settle(1, 2)` (no verify): submitted
+  - Emitted `settled` with both output commitments
+  - Non-refundable CPU fee: **16,549 stroops**
+  - About 13% of a verify, or about 10-11% of budget
 
-### FINAL CORRECTION: Nethermind's verifier is ALREADY native (and complete)
+Result: a complete two-sided private-trade shape is feasible as two verifying lift transactions
+(~82% budget each, separate transactions) plus one cheap settle (~11% budget).
 
-Read Nethermind's verifier source directly:
-- `crates/ultrahonk-soroban-verifier/Cargo.toml`: only dep is `soroban-sdk` (NO arkworks).
-- `field.rs`: `soroban_sdk::crypto::bn254::Bn254Fr` + `env().crypto().bn254()` field ops (native).
-- `ec.rs`: `env.crypto().bn254().g1_msm(...)` and `.pairing_check(...)` (native MSM + pairing).
-- Complete pipeline: `sumcheck.rs`, `shplemini.rs`, `relations.rs`, `transcript.rs`.
+Important caveat: this spike circuit binds only `[txbind, root, nullifier]`. Stored
+asset/amount/price/output fields are not yet proof-bound, so this validates cost and flow, not final
+settlement soundness. The settlement contract also depends on a vendored Nethermind verifier path
+that is gitignored, so it is not yet standalone-reproducible.
 
-So our measured **79.9M is a complete, SOUND, ALREADY-NATIVE UltraHonk verifier.** The
-native-host-function lever is already pulled. (My earlier "Nethermind = software arkworks" was
-wrong - that was indextree, whose yugocabrio verifier IS arkworks/software and exceeded 100M.)
+## Verifier landscape corrections
+
+Stellar Protocol 25 introduced native BN254 host functions:
+
+- `g1_add`
+- `g1_mul`
+- `g1_neg`
+- `fr_from_bytes`
+- `pairing_check`
+
+The final source review of Nethermind's verifier showed:
+
+- `crates/ultrahonk-soroban-verifier/Cargo.toml`: only dependency is `soroban-sdk`; no arkworks.
+- `field.rs`: uses `soroban_sdk::crypto::bn254::Bn254Fr` and `env().crypto().bn254()` field ops.
+- `ec.rs`: uses `env.crypto().bn254().g1_msm(...)` and `.pairing_check(...)`.
+- Complete pipeline exists: `sumcheck.rs`, `shplemini.rs`, `relations.rs`, `transcript.rs`.
+
+So the measured **79.9M** is a complete, sound, already-native UltraHonk verifier. There is no easy
+software-to-native 2x win left for UltraHonk.
+
+Final verifier table:
 
 | Verifier | EC backend | Sound | Cost |
-|----------|-----------|-------|------|
-| indextree (yugocabrio) | arkworks software (WASM) | yes | >100M (FAILED) |
-| Nethermind | native host fns | yes | 79.9M measured |
-| salazarsebas UltraHonk | native host fns | NO (stub) | ~35M modeled |
-| salazarsebas Groth16 | native host fns | yes | ~12M |
+|----------|------------|-------|------|
+| indextree / yugocabrio | arkworks software (WASM) | yes | >100M, failed |
+| Nethermind | native host functions | yes | 79.9M measured |
+| salazarsebas UltraHonk | native host functions | no, simplified stub | ~35M modeled |
+| salazarsebas Groth16 | native host functions | yes | ~12M |
 
-Implications (firmed up):
-- 79.9M is the real optimized floor for a sound UltraHonk verify on Soroban. No easy native win left.
-- Two separate verifies/tx (160M) is firmly infeasible.
-- Settlement options: (a) verify ONE recursively-aggregated proof per tx (~80M, fits) - keeps
-  no-trusted-setup + single-tx atomicity; or (b) Groth16 (~12M, two fit) + per-circuit trusted setup.
+The salazarsebas UltraHonk template was not a complete verifier: it performed only a simplified
+final KZG pairing check on prover-controlled proof bytes, with no Fiat-Shamir transcript, no
+sumcheck verification, and no MSM computation. The ~35M figure is therefore not comparable to the
+complete Nethermind verifier. Their Groth16 path is sound but requires a per-circuit trusted setup.
+
+Remaining alternatives are architectural, not an immediate verifier swap:
+
+- Keep UltraHonk and use verify-at-lift / proof-free settlement.
+- Use recursive aggregation if a single aggregated UltraHonk proof is later feasible.
+- Use Groth16 if the project accepts per-circuit trusted setup.

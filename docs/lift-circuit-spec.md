@@ -109,14 +109,16 @@ A proof is necessary but not sufficient. On a verifying `lift` the contract MUST
 - never accept a caller-supplied output commitment; `settle`/`cancel` construct their output leaves
   themselves from checked public values.
 
-## Cost caveat (must re-measure)
+## Cost (measured 2026-06-18)
 
-M0's 79.9M-CPU verify was the depth-5, ~967-gate spike. This circuit adds the order-leaf hash and
-uses production `TREE_DEPTH`, so verify cost will move. UltraHonk verifier cost grows roughly with
-log(circuit size) (sumcheck rounds) plus a fixed pairing/MSM cost, so the change should be modest,
-not linear in depth — but lift already sits near ~82% of budget, so **re-measure on testnet at
-production depth before treating the budget as settled.** `TREE_DEPTH` is a single global in the
-circuit; pick it deliberately (depth 32 ≈ 4B notes; depth 20 ≈ 1M) against the measured cost.
+Measured on testnet: this circuit at `TREE_DEPTH=32` verifies in **80,641,857 CPU instructions
+(~80.6% of the ~100M budget)** — only **+0.9%** over M0's depth-5 spend spike (79,922,355). Depth and
+the extra order-leaf hash barely move verify cost because the UltraHonk proof is padded to
+`CONST_PROOF_SIZE_LOG_N=28` regardless of actual circuit size, so verify is dominated by fixed
+pairing/MSM, not gate count. Verify-at-lift fits at production depth; two verifies in one tx (~161M)
+remain infeasible. Details + contract address in `milestone-0-results.md`. `TREE_DEPTH` stays a
+single global, but the measurement shows depth choice is essentially free for verify cost — pick it
+for the note-capacity headroom you want (32 ≈ 4B notes).
 
 ## Out of scope here (tracked in architecture.md)
 
