@@ -137,7 +137,11 @@ require wrapped issuers or bridge integrations before they can be custodied.
 - **Off-chain tree builder:** the component that ingests `shielded`/order events, maintains the
   append-only Merkle tree, calls `push_root`, and hands wallets the membership paths that lift and
   unshield proofs need. Does not exist yet; without it shield -> lift -> unshield cannot run as one
-  real flow (tests use synthetic trees).
+  real flow (tests use synthetic trees). DESIGN DECIDED (see `poseidon-tree-spike.md`): off-chain
+  builder (Option B3) over an on-chain tree, because a native Poseidon depth-32 insert costs ~36M
+  instructions and a partial-fill `settle` (4 inserts ~138M) would overflow the per-tx budget. Leaf
+  hashing is reproducible on-chain and off (host `poseidon2` matches Noir byte-for-byte), so build
+  the builder with `stellar/rs-soroban-poseidon`. NEXT.
 - **Registry ownership:** DECIDED — one merged contract for v1 (see "Contracts and state"). A later
   Assets/Desk split must first measure cross-contract-call cost alongside a verify.
 - **Asset-note layer:** shield -> asset note -> order is the default because one shield can back
