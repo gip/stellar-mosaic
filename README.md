@@ -41,6 +41,16 @@ Run the local prove/verify half:
 ./scripts/01_build_prove.sh
 ```
 
+Run the full lift -> settle integration test on the local Soroban host (real verifier, no testnet):
+
+```bash
+cd contracts/settlement && cargo test --test integration
+```
+
+This exercises deploy, `push_root`, `lift` (binding every order field to the proof), and proof-free
+`settle`, plus the negative cases (unpublished root, replayed nullifier, tampered order field,
+double settle). Proof fixtures live in `contracts/settlement/tests/fixtures/` (see `regen.sh`).
+
 Current on-chain measurements are summarized in [docs/milestone-0-results.md](docs/milestone-0-results.md).
 `scripts/02_deploy_verify_testnet.sh` is the legacy verifier spike script.
 
