@@ -46,24 +46,35 @@ resting orders so the hot path is only the taker's lift plus settle.
 
 ## Contracts and state
 
-Use one logical note registry for all active/consumed asset and order notes:
+Use one logical note registry for all active/consumed asset and order notes.
 
-- **Assets/custody contract:** holds real Soroban tokens, maintains the canonical commitment and
-  nullifier registry, and handles shield/unshield.
-- **Desk contract:** owns order matching and calls the registry to consume/create notes atomically.
-  A merged contract is also viable, but separate commitment/nullifier registries are not.
+**Registry ownership — DECIDED for v1: one merged contract.** `contracts/settlement` is the single
+contract owning custody, the note/nullifier registry, order matching, and settlement. Rationale:
+`lift` already uses ~81% of the per-transaction budget, so adding a cross-contract call into a
+separate Assets contract during `lift` risks exceeding the limit; a merged contract avoids that
+entirely. A later split (Assets + Desk) stays possible but must first measure cross-contract-call
+cost on top of a verify. The conceptual roles still hold:
+
+- **Custody role:** holds real Soroban tokens (`shield`/`unshield`), keyed by an admin-registered
+  asset-id -> token map; maintains the canonical commitment and nullifier registry.
+- **Desk role:** order matching (`lift`/`settle`).
+  Separate commitment/nullifier registries are NOT allowed (double-spend risk); one merged contract
+  keeps them unified by construction.
 
 Supported assets are admin-gated. USDC and XLM can be native Stellar/Soroban assets. ETH and XRP
 require wrapped issuers or bridge integrations before they can be custodied.
 
 ## Flow
 
-1. **Shield**
-   - User transfers a supported asset into custody.
-   - Contract creates an active `AssetNote { asset, amount, owner_tag }`.
-   - Under the public-note model, the contract can compute the leaf directly. A proof may still be
-     useful to prove the shielder knows the owner secret, but it is not required for value
-     conservation.
+1. **Shield** (IMPLEMENTED: `contracts/settlement` `shield` + `register_asset`)
+   - User transfers a supported asset into custody (`register_asset` maps an asset-id to a real
+     Soroban token; `shield` pulls the tokens in via the token contract).
+   - Contract mints an active `AssetNote { asset, amount, owner_tag }` and emits it as a `shielded`
+     event for the off-chain tree builder; the leaf `Poseidon(asset, amount, owner_tag)` is rebuilt
+     off-chain so the contract pays no on-chain Poseidon.
+   - Proof-free: the token transfer enforces the amount and amounts are public, so value
+     conservation needs no ZK. A proof that the shielder knows the owner secret could be added but
+     is not required. Validated by the local-host integration test.
 
 2. **Lift order**
    - User spends an active asset note.
@@ -116,11 +127,14 @@ require wrapped issuers or bridge integrations before they can be custodied.
   spike — fits.** DONE: `contracts/settlement` `lift` now asserts this exact public-input vector
   (domain + published root + nullify-at-lift + every order field derived from the proof), validated
   end-to-end on testnet at ~81.2% of budget. See `milestone-0-results.md`.
+- **Unshield circuit + contract path:** spend an asset note with a proof and transfer the real token
+  out, binding the recipient into the proof so a relayer cannot redirect funds (the vendored mixer
+  does not do this; design it on `Address::to_xdr` + `crypto().sha256` recipient binding). NEXT.
 - **Cancel design:** define the exact cancel proof, output asset-note construction, and cost.
-- **Registry ownership:** choose merged contract vs Assets-owned registry plus Desk cross-contract
-  calls; measure cross-contract cost alongside a verify.
-- **Asset-note layer:** keep shield -> asset note -> order as the default because one shield can
-  back several future orders. Direct shield-to-order can be added later if the UX needs it.
+- **Registry ownership:** DECIDED — one merged contract for v1 (see "Contracts and state"). A later
+  Assets/Desk split must first measure cross-contract-call cost alongside a verify.
+- **Asset-note layer:** shield -> asset note -> order is the default because one shield can back
+  several future orders. Direct shield-to-order can be added later if the UX needs it.
 - **Partial fills:** settle should emit two proceeds notes plus up to two change notes for the
   unfilled side(s).
 - **Wrapped assets:** define issuers/bridges before advertising ETH/XRP support.

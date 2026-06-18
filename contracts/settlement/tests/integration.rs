@@ -10,6 +10,7 @@
 use settlement::{DataKey, Error, PoolEntry, Settlement, SettlementClient};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
+    token::{StellarAssetClient, TokenClient},
     Address, Bytes, BytesN, Env,
 };
 
@@ -229,6 +230,89 @@ fn settle_rejects_incompatible_orders() {
         .as_contract(&id, || Settlement::settle(env.clone(), 1, 1))
         .expect_err("self-pair is incompatible");
     assert_eq!(err as u32, Error::NotCompatible as u32);
+}
+
+// ===========================================================================
+// Custody: shield moves a real token into the contract and mints an AssetNote.
+// ===========================================================================
+
+const ASSET_ID: u32 = 1;
+const TAG: [u8; 32] = [0xAB; 32];
+
+/// Register a Stellar Asset Contract, mint `amount` to a fresh user, and map it to ASSET_ID.
+fn setup_token(env: &Env, id: &Address, amount: i128) -> (Address, Address) {
+    let token_admin = Address::generate(env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let token = sac.address();
+    let user = Address::generate(env);
+    StellarAssetClient::new(env, &token).mint(&user, &amount);
+
+    let client = SettlementClient::new(env, id);
+    client.register_asset(&ASSET_ID, &token);
+    (token, user)
+}
+
+#[test]
+fn shield_moves_tokens_into_custody() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let (token, user) = setup_token(&env, &id, 100);
+    let client = SettlementClient::new(&env, &id);
+    let tag = BytesN::from_array(&env, &TAG);
+
+    client.shield(&user, &ASSET_ID, &100, &tag);
+
+    // A shielded event announced the new AssetNote for the off-chain tree builder. Filter to this
+    // contract (the token transfer emits its own event), and check first: env.events() reflects the
+    // latest invocation, and the balance reads below are cross-contract calls that replace the view.
+    assert_eq!(env.events().all().filter_by_contract(&id).events().len(), 1);
+
+    // Tokens left the user and now sit in the contract's custody.
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(token_client.balance(&user), 0);
+    assert_eq!(token_client.balance(&id), 100);
+}
+
+#[test]
+fn shield_rejects_unregistered_asset() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let user = Address::generate(&env);
+    let tag = BytesN::from_array(&env, &TAG);
+    let err = env
+        .as_contract(&id, || {
+            Settlement::shield(env.clone(), user.clone(), 99, 100, tag.clone())
+        })
+        .expect_err("unregistered asset");
+    assert_eq!(err as u32, Error::AssetNotRegistered as u32);
+}
+
+#[test]
+fn shield_rejects_nonpositive_amount() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let (_token, user) = setup_token(&env, &id, 100);
+    let tag = BytesN::from_array(&env, &TAG);
+    let err = env
+        .as_contract(&id, || {
+            Settlement::shield(env.clone(), user.clone(), ASSET_ID, 0, tag.clone())
+        })
+        .expect_err("zero amount");
+    assert_eq!(err as u32, Error::InvalidAmount as u32);
+}
+
+#[test]
+fn register_asset_rejects_rebind() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let (_token, _user) = setup_token(&env, &id, 100);
+    let other = Address::generate(&env);
+    let err = env
+        .as_contract(&id, || {
+            Settlement::register_asset(env.clone(), ASSET_ID, other.clone())
+        })
+        .expect_err("rebind");
+    assert_eq!(err as u32, Error::AssetAlreadyRegistered as u32);
 }
 
 // ===========================================================================

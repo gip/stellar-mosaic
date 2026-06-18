@@ -1,6 +1,11 @@
 #![no_std]
-//! Settlement: verify-at-lift, settle-cheap (see docs/architecture.md, docs/lift-circuit-spec.md).
+//! Merged Desk + custody contract (the registry-ownership decision: one contract owns the single
+//! note/nullifier registry, so lift never pays a cross-contract call on top of its ~81% verify).
+//! See docs/architecture.md, docs/lift-circuit-spec.md.
 //!
+//! `shield`= move a real Soroban token into custody and mint an AssetNote. Proof-free: amounts are
+//!           public and the token transfer enforces the amount, so value conservation needs no ZK.
+//!           Emits the note fields; the off-chain tree builder ingests them and publishes the root.
 //! `lift`  = VERIFY the lift proof (UltraHonk, native BN254 host fns), then derive EVERY order
 //!           field from the proof's public inputs and store a validated order entry. Nothing the
 //!           caller passes is trusted: asset/amount/price/output_owner_tag/cancel_owner_tag all
@@ -9,13 +14,16 @@
 //! `settle`= consume TWO pre-verified order entries with NO proof verification: compatibility +
 //!           price check in plaintext, then construct proceeds by stamping each order's bound
 //!           `output_owner_tag` onto the matched fill amount. Atomic. No caller-supplied outputs.
+//! `unshield` (TODO, next): spend an asset note with a proof and transfer the real token out, with
+//!           the recipient bound into the proof so a relayer cannot redirect it.
 //!
 //! Public-input vector (10 x 32-byte big-endian field elements, see docs/lift-circuit-spec.md):
 //!   [0] domain  [1] root  [2] nullifier_in  [3] asset_in  [4] amount_in  [5] asset_out
 //!   [6] min_out [7] output_owner_tag  [8] cancel_owner_tag  [9] order_leaf
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient, Address,
+    Bytes, BytesN, Env,
 };
 use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
 
@@ -43,6 +51,10 @@ pub enum Error {
     BadPublicInputs = 9, // wrong public-input length or wrong domain separator
     UnknownRoot = 10,    // root not in the published root history
     FieldOverflow = 11,  // a field element did not fit the expected u32/i128 range
+    // Custody layer (appended).
+    AssetNotRegistered = 12, // no token contract mapped to this asset id
+    InvalidAmount = 13,      // shield/unshield amount must be positive
+    AssetAlreadyRegistered = 14, // asset id already mapped (admin must not silently rebind)
 }
 
 /// A validated resting order. Every field here is bound by the lift proof.
@@ -67,6 +79,7 @@ pub enum DataKey {
     Root(BytesN<32>),
     Entry(u32),
     Nullifier(BytesN<32>),
+    Asset(u32), // asset id -> token contract Address
 }
 
 #[contract]
@@ -86,13 +99,52 @@ impl Settlement {
     /// any published root. Admin-gated (the off-chain tree publisher). Staleness/bounded-ring
     /// eviction is a later refinement; double-spend safety comes from nullifiers, not root recency.
     pub fn push_root(env: Env, root: BytesN<32>) -> Result<(), Error> {
-        let admin: Address = env
+        Self::require_admin(&env)?;
+        env.storage().persistent().set(&DataKey::Root(root), &true);
+        Ok(())
+    }
+
+    /// Map a supported asset id to its real Soroban token contract. Admin-gated; assets are not
+    /// silently rebindable (rebinding a live asset id would orphan custodied balances).
+    pub fn register_asset(env: Env, asset_id: u32, token: Address) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        if env.storage().instance().has(&DataKey::Asset(asset_id)) {
+            return Err(Error::AssetAlreadyRegistered);
+        }
+        env.storage().instance().set(&DataKey::Asset(asset_id), &token);
+        Ok(())
+    }
+
+    /// Shield: move `amount` of a registered asset into custody and mint an AssetNote
+    /// `{ asset_id, amount, owner_tag }`. Proof-free: the token transfer enforces the amount and
+    /// amounts are public, so value conservation needs no ZK. The minted note's leaf
+    /// `Poseidon(asset_id, amount, owner_tag)` is rebuilt off-chain from the emitted event; the
+    /// contract does not pay on-chain Poseidon. `owner_tag` is the caller's opaque one-time address;
+    /// choosing it wrongly only forfeits the caller's own ability to spend the note later.
+    pub fn shield(
+        env: Env,
+        from: Address,
+        asset_id: u32,
+        amount: i128,
+        owner_tag: BytesN<32>,
+    ) -> Result<(), Error> {
+        from.require_auth();
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        let token: Address = env
             .storage()
             .instance()
-            .get(&DataKey::Admin)
-            .ok_or(Error::VkNotSet)?;
-        admin.require_auth();
-        env.storage().persistent().set(&DataKey::Root(root), &true);
+            .get(&DataKey::Asset(asset_id))
+            .ok_or(Error::AssetNotRegistered)?;
+
+        // Pull the real tokens into custody. `from` authorized above; the token contract enforces
+        // the balance, so custody can never exceed what was actually shielded.
+        TokenClient::new(&env, &token).transfer(&from, &env.current_contract_address(), &amount);
+
+        // Announce the new AssetNote for the off-chain tree builder.
+        env.events()
+            .publish((symbol_short!("shielded"),), (asset_id, amount, owner_tag));
         Ok(())
     }
 
@@ -210,6 +262,19 @@ impl Settlement {
             ),
         );
 
+        Ok(())
+    }
+}
+
+impl Settlement {
+    /// Require the stored admin's authorization for a privileged call.
+    fn require_admin(env: &Env) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::VkNotSet)?;
+        admin.require_auth();
         Ok(())
     }
 }
