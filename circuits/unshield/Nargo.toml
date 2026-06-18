@@ -1,0 +1,6 @@
+[package]
+name = "unshield"
+type = "bin"
+authors = ["stellar-mosaic"]
+
+[dependencies]

@@ -34,3 +34,10 @@ echo "NOTE: this script assumes circuits/lift/Prover.toml is populated for each 
 echo "See the order parameters in the header; the committed fixtures were produced this way."
 echo "Regeneration is manual per order because the witness (sk_o, rho_in, path) is chosen by hand."
 echo "Build order A's Prover.toml, run 'prove a'; build order B's, run 'prove b'."
+echo
+echo "UNSHIELD fixtures (unshield_vk / unshield_proof / unshield_public_inputs):"
+echo " - produced from circuits/unshield with bb (same flags)."
+echo " - the proof binds recipient = sha256(to.to_xdr()) (top byte zeroed) for the fixed test"
+echo "   address UNSHIELD_TO in tests/integration.rs. To rebind to a different address, print that"
+echo "   address's recipient field with a one-off test (env.crypto().sha256(to.to_xdr()), zero byte"
+echo "   0), set it as circuits/unshield/Prover.toml recipient, regenerate, and update UNSHIELD_TO."

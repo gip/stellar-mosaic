@@ -47,9 +47,11 @@ Run the full lift -> settle integration test on the local Soroban host (real ver
 cd contracts/settlement && cargo test --test integration
 ```
 
-This exercises deploy, `push_root`, `lift` (binding every order field to the proof), and proof-free
-`settle`, plus the negative cases (unpublished root, replayed nullifier, tampered order field,
-double settle). Proof fixtures live in `contracts/settlement/tests/fixtures/` (see `regen.sh`).
+This exercises the full custody loop — `shield` (token custody), `lift` (binding every order field to
+the proof), proof-free `settle`, and `unshield` (asset-note spend with the payout recipient bound
+into the proof) — plus the negative cases (unpublished root, replayed nullifier, tampered order
+field, double settle, wrong unshield recipient). Proof fixtures live in
+`contracts/settlement/tests/fixtures/` (see `regen.sh`). 16 tests, all green.
 
 Current on-chain measurements are summarized in [docs/milestone-0-results.md](docs/milestone-0-results.md).
 `scripts/02_deploy_verify_testnet.sh` is the legacy verifier spike script.

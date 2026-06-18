@@ -1,0 +1,12 @@
+# Satisfying witness for the unshield circuit. recipient is the sha256-derived field of a
+# fixed test address (see tests/integration.rs). Regenerate via circuits/unshield + deriver.
+rho_in = "626262"
+sk_o = "515151"
+path = ["300", "301", "302", "303", "304", "305", "306", "307", "308", "309", "310", "311", "312", "313", "314", "315", "316", "317", "318", "319", "320", "321", "322", "323", "324", "325", "326", "327", "328", "329", "330", "331"]
+index_bits = ["1", "0", "0", "1", "0", "0", "1", "0", "0", "1", "0", "0", "1", "0", "0", "1", "0", "0", "1", "0", "0", "1", "0", "0", "1", "0", "0", "1", "0", "0", "1", "0"]
+domain = "2"
+root = "0x08daf2577ba5316ee2f65ea15e775c3b1026b6982dc1f0c1fe69a98f4493a948"
+nullifier = "0x27ed5eacff9490044ecb9483609ba15c94b28f7d5abab09488ad2966bacff171"
+asset = "1"
+amount = "100"
+recipient = "0x00415d19553c5d590306a4429847180a867cfcea9393db6b5a0e0635075ea936"

@@ -22,17 +22,25 @@
 //!   [6] min_out [7] output_owner_tag  [8] cancel_owner_tag  [9] order_leaf
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient, Address,
-    Bytes, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient,
+    xdr::ToXdr, Address, Bytes, BytesN, Env,
 };
 use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
 
-/// Number of 32-byte public inputs the lift circuit exposes.
-const NUM_PUBLIC_INPUTS: u32 = 10;
-const PUBLIC_INPUTS_BYTES: u32 = NUM_PUBLIC_INPUTS * 32;
-/// LIFT_DOMAIN constant from the circuit (Field value 1), as a 32-byte big-endian word.
+/// Operation ids: also index the per-operation verification keys (`DataKey::Vk(op)`) and match the
+/// circuit domain separators (lift circuit domain = 1, unshield circuit domain = 2).
+const LIFT_OP: u32 = 1;
+const UNSHIELD_OP: u32 = 2;
+
+/// Number of 32-byte public inputs the lift circuit exposes, and the unshield circuit.
+const LIFT_PUBLIC_INPUTS_BYTES: u32 = 10 * 32;
+const UNSHIELD_PUBLIC_INPUTS_BYTES: u32 = 6 * 32;
+/// Domain separators as 32-byte big-endian field words: lift = 1, unshield = 2.
 const LIFT_DOMAIN: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+];
+const UNSHIELD_DOMAIN: [u8; 32] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
 ];
 
 #[contracterror]
@@ -55,6 +63,7 @@ pub enum Error {
     AssetNotRegistered = 12, // no token contract mapped to this asset id
     InvalidAmount = 13,      // shield/unshield amount must be positive
     AssetAlreadyRegistered = 14, // asset id already mapped (admin must not silently rebind)
+    RecipientMismatch = 15,  // unshield payout address does not match the proof-bound recipient
 }
 
 /// A validated resting order. Every field here is bound by the lift proof.
@@ -74,7 +83,7 @@ pub struct PoolEntry {
 
 #[contracttype]
 pub enum DataKey {
-    Vk,
+    Vk(u32), // verification key per operation (LIFT_OP / UNSHIELD_OP)
     Admin,
     Root(BytesN<32>),
     Entry(u32),
@@ -87,11 +96,21 @@ pub struct Settlement;
 
 #[contractimpl]
 impl Settlement {
-    /// Store the UltraHonk verification key (validated by parsing) and the root publisher admin.
+    /// Store the lift UltraHonk verification key (validated by parsing) and the admin. The unshield
+    /// VK is registered separately via `set_vk(UNSHIELD_OP, ..)` because it is a different circuit.
     pub fn __constructor(env: Env, vk_bytes: Bytes, admin: Address) -> Result<(), Error> {
         let _ = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
-        env.storage().instance().set(&DataKey::Vk, &vk_bytes);
+        env.storage().instance().set(&DataKey::Vk(LIFT_OP), &vk_bytes);
         env.storage().instance().set(&DataKey::Admin, &admin);
+        Ok(())
+    }
+
+    /// Register the verification key for an operation (e.g. UNSHIELD_OP). Admin-gated and validated
+    /// by parsing. Each operation is a distinct circuit, so it needs its own VK.
+    pub fn set_vk(env: Env, op: u32, vk_bytes: Bytes) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        let _ = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
+        env.storage().instance().set(&DataKey::Vk(op), &vk_bytes);
         Ok(())
     }
 
@@ -153,21 +172,13 @@ impl Settlement {
     /// the proof artifacts; every order field is taken from the verified public inputs.
     pub fn lift(env: Env, id: u32, proof_bytes: Bytes, public_inputs: Bytes) -> Result<(), Error> {
         // --- verification (the expensive part, ~80% of budget) ---
-        if proof_bytes.len() as usize != PROOF_BYTES {
-            return Err(Error::ProofParseError);
-        }
-        if public_inputs.len() != PUBLIC_INPUTS_BYTES {
-            return Err(Error::BadPublicInputs);
-        }
-        let vk_bytes: Bytes = env
-            .storage()
-            .instance()
-            .get(&DataKey::Vk)
-            .ok_or(Error::VkNotSet)?;
-        let verifier = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
-        verifier
-            .verify(&env, &proof_bytes, &public_inputs)
-            .map_err(|_| Error::VerificationFailed)?;
+        Self::verify_proof(
+            &env,
+            LIFT_OP,
+            &proof_bytes,
+            &public_inputs,
+            LIFT_PUBLIC_INPUTS_BYTES,
+        )?;
 
         // --- bindings: everything below is now attested by the verified proof ---
         // [0] domain separator must be the lift constant.
@@ -264,9 +275,98 @@ impl Settlement {
 
         Ok(())
     }
+
+    /// Unshield: spend an asset note with a proof and transfer the real token out to `to`.
+    /// The proof binds the withdrawal recipient (public input [5] == sha256-derived field of `to`),
+    /// so a relayer can submit this without being able to redirect the funds. No caller auth is
+    /// needed: the proof is the spend authority and the recipient is fixed by the proof.
+    ///
+    /// Public inputs: [0] domain [1] root [2] nullifier [3] asset [4] amount [5] recipient.
+    pub fn unshield(
+        env: Env,
+        to: Address,
+        proof_bytes: Bytes,
+        public_inputs: Bytes,
+    ) -> Result<(), Error> {
+        Self::verify_proof(
+            &env,
+            UNSHIELD_OP,
+            &proof_bytes,
+            &public_inputs,
+            UNSHIELD_PUBLIC_INPUTS_BYTES,
+        )?;
+
+        // [0] domain separator must be the unshield constant.
+        if read_word(&public_inputs, 0) != UNSHIELD_DOMAIN {
+            return Err(Error::BadPublicInputs);
+        }
+        // [1] root must be a published root.
+        let root = BytesN::from_array(&env, &read_word(&public_inputs, 32));
+        if !env.storage().persistent().has(&DataKey::Root(root)) {
+            return Err(Error::UnknownRoot);
+        }
+        // [2] nullifier of the spent asset note: must be unused.
+        let nullifier = BytesN::from_array(&env, &read_word(&public_inputs, 64));
+        let nf_key = DataKey::Nullifier(nullifier.clone());
+        if env.storage().persistent().has(&nf_key) {
+            return Err(Error::NullifierUsed);
+        }
+        // [3..5] withdrawal terms.
+        let asset = word_to_u32(&read_word(&public_inputs, 96))?;
+        let amount = word_to_i128(&read_word(&public_inputs, 128))?;
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        // [5] recipient binding: the proof must commit to exactly this payout address.
+        if read_word(&public_inputs, 160) != recipient_field(&env, &to) {
+            return Err(Error::RecipientMismatch);
+        }
+
+        let token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Asset(asset))
+            .ok_or(Error::AssetNotRegistered)?;
+
+        // Record the nullifier BEFORE paying out (single-use; spend cannot be replayed), then
+        // transfer the public amount of the real token to the proof-bound recipient.
+        env.storage().persistent().set(&nf_key, &true);
+        TokenClient::new(&env, &token).transfer(&env.current_contract_address(), &to, &amount);
+
+        env.events()
+            .publish((symbol_short!("unshield"),), (asset, amount, nullifier));
+        Ok(())
+    }
 }
 
 impl Settlement {
+    /// Verify a proof for `op` against its stored VK, after length-checking the proof and public
+    /// inputs. Shared by `lift` and `unshield`.
+    fn verify_proof(
+        env: &Env,
+        op: u32,
+        proof_bytes: &Bytes,
+        public_inputs: &Bytes,
+        expected_pi_bytes: u32,
+    ) -> Result<(), Error> {
+        if proof_bytes.len() as usize != PROOF_BYTES {
+            return Err(Error::ProofParseError);
+        }
+        if public_inputs.len() != expected_pi_bytes {
+            return Err(Error::BadPublicInputs);
+        }
+        let vk_bytes: Bytes = env
+            .storage()
+            .instance()
+            .get(&DataKey::Vk(op))
+            .ok_or(Error::VkNotSet)?;
+        let verifier = UltraHonkVerifier::new(env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
+        verifier
+            .verify(env, proof_bytes, public_inputs)
+            .map_err(|_| Error::VerificationFailed)?;
+        Ok(())
+    }
+
     /// Require the stored admin's authorization for a privileged call.
     fn require_admin(env: &Env) -> Result<(), Error> {
         let admin: Address = env
@@ -277,6 +377,21 @@ impl Settlement {
         admin.require_auth();
         Ok(())
     }
+}
+
+/// Deterministically map a payout address to the BN254 field the unshield proof must bind as its
+/// recipient. We hash the address's XDR with sha256 and zero the top byte so the value is < 2^248
+/// (safely below the field modulus). The wallet computes the identical value off-chain and bakes it
+/// into the proof, so the contract can confirm the proof was made for exactly this `to`.
+fn recipient_field(env: &Env, to: &Address) -> [u8; 32] {
+    let h = env.crypto().sha256(&to.clone().to_xdr(env)).to_array();
+    let mut w = [0u8; 32];
+    let mut i = 1;
+    while i < 32 {
+        w[i] = h[i];
+        i += 1;
+    }
+    w
 }
 
 /// Copy the 32-byte big-endian word at byte `off` out of the public-input blob.

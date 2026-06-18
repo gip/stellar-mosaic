@@ -11,7 +11,7 @@ use settlement::{DataKey, Error, PoolEntry, Settlement, SettlementClient};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{StellarAssetClient, TokenClient},
-    Address, Bytes, BytesN, Env,
+    Address, Bytes, BytesN, Env, String,
 };
 
 const VK: &[u8] = include_bytes!("fixtures/vk");
@@ -19,6 +19,16 @@ const PROOF_A: &[u8] = include_bytes!("fixtures/proof_a");
 const PI_A: &[u8] = include_bytes!("fixtures/public_inputs_a");
 const PROOF_B: &[u8] = include_bytes!("fixtures/proof_b");
 const PI_B: &[u8] = include_bytes!("fixtures/public_inputs_b");
+
+// Unshield circuit fixtures (asset note spend -> token payout). The proof binds `recipient` to
+// UNSHIELD_TO below; regenerate both together (see fixtures/regen.sh).
+const UNSHIELD_VK: &[u8] = include_bytes!("fixtures/unshield_vk");
+const UNSHIELD_PROOF: &[u8] = include_bytes!("fixtures/unshield_proof");
+const UNSHIELD_PI: &[u8] = include_bytes!("fixtures/unshield_public_inputs");
+// The payout address the unshield proof's `recipient` field commits to (a fixed test address).
+const UNSHIELD_TO: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
+const UNSHIELD_OP: u32 = 2;
+const UNSHIELD_AMOUNT: i128 = 100;
 
 // Public-input word indices (see docs/lift-circuit-spec.md).
 const W_ROOT: usize = 1;
@@ -313,6 +323,115 @@ fn register_asset_rejects_rebind() {
         })
         .expect_err("rebind");
     assert_eq!(err as u32, Error::AssetAlreadyRegistered as u32);
+}
+
+// ===========================================================================
+// Unshield: spend an asset note with a proof and pay the bound recipient.
+// ===========================================================================
+
+/// Deploy, register the unshield VK, fund custody with the asset, publish the proof's root, and
+/// return (token, bound recipient address).
+fn setup_unshield(env: &Env, id: &Address) -> (Address, Address) {
+    let token_admin = Address::generate(env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let token = sac.address();
+    // Fund custody so the contract can pay out.
+    StellarAssetClient::new(env, &token).mint(id, &1000);
+
+    let client = SettlementClient::new(env, id);
+    client.register_asset(&ASSET_ID, &token);
+    client.set_vk(&UNSHIELD_OP, &bytes(env, UNSHIELD_VK));
+    client.push_root(&bytesn_at(env, UNSHIELD_PI, W_ROOT));
+
+    let to = Address::from_string(&String::from_str(env, UNSHIELD_TO));
+    (token, to)
+}
+
+#[test]
+fn unshield_pays_bound_recipient() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let (token, to) = setup_unshield(&env, &id);
+
+    SettlementClient::new(&env, &id).unshield(&to, &bytes(&env, UNSHIELD_PROOF), &bytes(&env, UNSHIELD_PI));
+
+    let token_client = TokenClient::new(&env, &token);
+    assert_eq!(token_client.balance(&to), UNSHIELD_AMOUNT);
+    assert_eq!(token_client.balance(&id), 1000 - UNSHIELD_AMOUNT);
+
+    // The spend nullifier is recorded: replaying the same proof is rejected.
+    let err = env
+        .as_contract(&id, || {
+            Settlement::unshield(
+                env.clone(),
+                to.clone(),
+                bytes(&env, UNSHIELD_PROOF),
+                bytes(&env, UNSHIELD_PI),
+            )
+        })
+        .expect_err("replayed unshield");
+    assert_eq!(err as u32, Error::NullifierUsed as u32);
+}
+
+#[test]
+fn unshield_rejects_wrong_recipient() {
+    // A relayer cannot redirect: paying anyone other than the proof-bound recipient fails.
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let (_token, _to) = setup_unshield(&env, &id);
+    let attacker = Address::generate(&env);
+
+    let err = env
+        .as_contract(&id, || {
+            Settlement::unshield(
+                env.clone(),
+                attacker.clone(),
+                bytes(&env, UNSHIELD_PROOF),
+                bytes(&env, UNSHIELD_PI),
+            )
+        })
+        .expect_err("redirected payout");
+    assert_eq!(err as u32, Error::RecipientMismatch as u32);
+}
+
+#[test]
+fn unshield_rejects_unpublished_root() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    // Register the VK but do NOT push the root.
+    SettlementClient::new(&env, &id).set_vk(&UNSHIELD_OP, &bytes(&env, UNSHIELD_VK));
+    let to = Address::from_string(&String::from_str(&env, UNSHIELD_TO));
+
+    let err = env
+        .as_contract(&id, || {
+            Settlement::unshield(
+                env.clone(),
+                to.clone(),
+                bytes(&env, UNSHIELD_PROOF),
+                bytes(&env, UNSHIELD_PI),
+            )
+        })
+        .expect_err("unpublished root");
+    assert_eq!(err as u32, Error::UnknownRoot as u32);
+}
+
+#[test]
+fn unshield_rejects_missing_vk() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    // No set_vk(UNSHIELD_OP): the lift VK alone cannot verify an unshield proof.
+    let to = Address::from_string(&String::from_str(&env, UNSHIELD_TO));
+    let err = env
+        .as_contract(&id, || {
+            Settlement::unshield(
+                env.clone(),
+                to.clone(),
+                bytes(&env, UNSHIELD_PROOF),
+                bytes(&env, UNSHIELD_PI),
+            )
+        })
+        .expect_err("missing unshield vk");
+    assert_eq!(err as u32, Error::VkNotSet as u32);
 }
 
 // ===========================================================================

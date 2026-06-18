@@ -96,9 +96,15 @@ require wrapped issuers or bridge integrations before they can be custodied.
    - Contract nullifies the order note and creates an active asset note for the unfilled value.
    - This path is required so firm resting offers do not trap funds.
 
-5. **Unshield**
-   - User spends an active asset note with a proof.
-   - Contract records the nullifier and transfers the public `asset` and `amount` out.
+5. **Unshield** (IMPLEMENTED: `contracts/settlement` `unshield`, circuit `circuits/unshield`)
+   - User spends an active asset note with a proof (`circuits/unshield`: membership, ownership,
+     nullifier, and the public `asset`/`amount`, plus a domain separator distinct from lift).
+   - The proof binds the payout **recipient**: public input `[5]` must equal `sha256(to.to_xdr())`
+     (top byte zeroed to fit the field). So a relayer can submit the tx but cannot redirect the
+     funds. No caller auth is needed; the proof is the spend authority.
+   - Contract records the nullifier, then transfers the public `asset`/`amount` to `to`.
+   - Per-operation VKs: `set_vk(op, vk)` registers the unshield VK (op 2) alongside lift (op 1).
+   - Measured on testnet at ~81.3% of budget (~same as lift; verify dominates).
    - Users hold the note secrets; losing those secrets means losing access unless a later recovery
      design is added.
 
@@ -127,10 +133,11 @@ require wrapped issuers or bridge integrations before they can be custodied.
   spike — fits.** DONE: `contracts/settlement` `lift` now asserts this exact public-input vector
   (domain + published root + nullify-at-lift + every order field derived from the proof), validated
   end-to-end on testnet at ~81.2% of budget. See `milestone-0-results.md`.
-- **Unshield circuit + contract path:** spend an asset note with a proof and transfer the real token
-  out, binding the recipient into the proof so a relayer cannot redirect funds (the vendored mixer
-  does not do this; design it on `Address::to_xdr` + `crypto().sha256` recipient binding). NEXT.
-- **Cancel design:** define the exact cancel proof, output asset-note construction, and cost.
+- **Cancel design:** define the exact cancel proof, output asset-note construction, and cost. NEXT.
+- **Off-chain tree builder:** the component that ingests `shielded`/order events, maintains the
+  append-only Merkle tree, calls `push_root`, and hands wallets the membership paths that lift and
+  unshield proofs need. Does not exist yet; without it shield -> lift -> unshield cannot run as one
+  real flow (tests use synthetic trees).
 - **Registry ownership:** DECIDED — one merged contract for v1 (see "Contracts and state"). A later
   Assets/Desk split must first measure cross-contract-call cost alongside a verify.
 - **Asset-note layer:** shield -> asset note -> order is the default because one shield can back

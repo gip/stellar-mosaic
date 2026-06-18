@@ -63,6 +63,23 @@ fields in plaintext and stamping each order's bound `output_owner_tag` onto the 
     >=50 of asset 1) -> `settle` `Ok`, emits both proceeds descriptors.
   - re-settle the same pair -> `#2` `AlreadyConsumed`.
 
+## Custody: shield + unshield (validated 2026-06-18)
+
+The merged contract gained `register_asset`, `shield` (proof-free token custody -> AssetNote event)
+and `unshield` (asset-note spend proof -> real token payout). VKs are per-operation:
+`DataKey::Vk(op)` with lift = op 1, unshield = op 2; the unshield VK is registered via `set_vk`.
+
+- `unshield` binds the payout recipient: public input `[5]` must equal `sha256(to.to_xdr())` with the
+  top byte zeroed (a field < 2^248). A relayer therefore cannot redirect funds; the local test
+  `unshield_rejects_wrong_recipient` -> `#15 RecipientMismatch` confirms it.
+- Real unshield on testnet (contract `CDZEWBXDDT44SRSZIZ2Z4S5DTRMVWLRAFG5D5WBT726CA4I3KPW6GK3N`,
+  native XLM as asset 1): **81,284,416 CPU (~81.3% of budget)**, 224 disk read, 584 write, resource
+  fee 281,421 stroops. Submitted successfully; emitted a `transfer` of 100 to the bound recipient
+  `CAAA...D2KM`. Cost is ~the same as lift: the ~80M verify dominates; sha256 + token transfer +
+  nullifier write add well under 1M.
+- shield is exercised on the local host (real Stellar Asset Contract): tokens move into custody and a
+  `shielded` event is emitted. Total integration suite: 16 tests green.
+
 ## Local proof spike (validated 2026-06-16)
 
 - Toolchain: nargo 1.0.0-beta.3, bb 0.82.2
