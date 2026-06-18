@@ -29,7 +29,7 @@ Rationale:
 - Standard denominations (1/10/100/1000 + change) are already the anonymity-set lever
   (`privacy-model.md`). Users hold exact-denomination notes, so full consumption is the normal case.
 - It removes a conservation subtraction and an extra output leaf from the circuit and the contract.
-- Splitting a note into a smaller offer is a separate concern (deposit smaller, or a future `split`).
+- Splitting a note into a smaller offer is a separate concern (shield smaller, or a future `split`).
 
 Change still happens at **settle** for partial fills (proceeds + change asset notes), which is
 plaintext and proof-free. Change-at-lift is a documented future extension (add a `change_leaf`
@@ -47,7 +47,7 @@ this exact tuple. All are BN254 field elements.
 
 | # | name               | who asserts / uses it | meaning |
 |---|--------------------|-----------------------|---------|
-| 0 | `domain`           | contract pins to the `lift` constant | domain separator; stops a withdraw/cancel proof of the same shape being replayed as a lift |
+| 0 | `domain`           | contract pins to the `lift` constant | domain separator; stops an unshield/cancel proof of the same shape being replayed as a lift |
 | 1 | `root`             | contract: must be in root-history ring | Merkle root the membership proof was made against |
 | 2 | `nullifier_in`     | contract: must be unused, then record | nullifier of the consumed asset note |
 | 3 | `asset_in`         | contract stores as order field; also = consumed note asset | offered asset |
@@ -125,6 +125,6 @@ for the note-capacity headroom you want (32 ≈ 4B notes).
 ## Out of scope here (tracked in architecture.md)
 
 - `cancel` circuit (reuses ownership + nullifier machinery; spends `cancel_owner_tag`).
-- `withdraw` circuit (asset-note spend, no order created).
+- `unshield` circuit (asset-note spend, no order created).
 - change-at-lift extension.
 - registry ownership (merged contract vs Assets-owned registry + Desk cross-calls).

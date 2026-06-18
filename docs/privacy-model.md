@@ -1,7 +1,7 @@
 # Privacy model: owner-anonymous, amount-transparent
 
 Decision (2026-06-17): **amounts are public, ownership is hidden.** This is what makes
-verify-free settlement and plaintext value-conservation possible (see full-flow-review B1).
+proof-free settlement and plaintext value conservation possible (see `architecture.md`).
 
 ## Note structure
 
@@ -42,12 +42,12 @@ conserved" — reveals N + public amounts, never which note or who.
 
 ## The catch: public amounts shrink the anonymity set
 
-- **Amount + timing correlation:** distinctive values (137.42 USDC deposit -> 137.42 order ->
-  137.42 withdraw) are followable even with hidden owners. Anonymity set per spend ≈ "notes of a
+- **Amount + timing correlation:** distinctive values (137.42 USDC shield -> 137.42 order ->
+  137.42 unshield) are followable even with hidden owners. Anonymity set per spend ≈ "notes of a
   compatible amount," not "all notes."
 - **Mitigation: standard denominations** (1/10/100/1000 + change notes) so many notes share each
   amount -> large anonymity set (Tornado-style). Main lever without hiding amounts.
-- **Edges leak:** deposits/withdrawals move real tokens to/from real accounts -> amounts +
+- **Edges leak:** shields/unshields move real tokens to/from real accounts -> amounts +
   accounts visible. Privacy is inside the pool; entry/exit is pseudonymous at best.
 
 ## One-liner

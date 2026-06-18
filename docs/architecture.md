@@ -14,7 +14,7 @@ The v1 design is **owner-anonymous and amount-transparent**:
 - UltraHonk is kept for spend/lift proofs, with no per-circuit trusted setup.
 
 The privacy claim is "no direct owner/wallet linkage inside the pool," not amount privacy. Amounts
-and timing remain followable; standard denominations and delayed withdrawals are privacy
+and timing remain followable; standard denominations and delayed unshields are privacy
 mitigations, not complete fixes.
 
 ## Measured constraint
@@ -41,7 +41,7 @@ circuit binds only `[txbind, root, nullifier]`; the production lift circuit must
 settlement later trusts.
 
 Cost/UX reality: a cold two-party trade is multiple transactions, not one monolithic transaction.
-Each party deposits and lifts separately, then settlement is cheap. LPs can pre-deposit and pre-lift
+Each party shields and lifts separately, then settlement is cheap. LPs can pre-shield and pre-lift
 resting orders so the hot path is only the taker's lift plus settle.
 
 ## Contracts and state
@@ -49,7 +49,7 @@ resting orders so the hot path is only the taker's lift plus settle.
 Use one logical note registry for all active/consumed asset and order notes:
 
 - **Assets/custody contract:** holds real Soroban tokens, maintains the canonical commitment and
-  nullifier registry, and handles deposit/withdraw.
+  nullifier registry, and handles shield/unshield.
 - **Desk contract:** owns order matching and calls the registry to consume/create notes atomically.
   A merged contract is also viable, but separate commitment/nullifier registries are not.
 
@@ -58,11 +58,11 @@ require wrapped issuers or bridge integrations before they can be custodied.
 
 ## Flow
 
-1. **Deposit**
+1. **Shield**
    - User transfers a supported asset into custody.
    - Contract creates an active `AssetNote { asset, amount, owner_tag }`.
    - Under the public-note model, the contract can compute the leaf directly. A proof may still be
-     useful to prove the depositor knows the owner secret, but it is not required for value
+     useful to prove the shielder knows the owner secret, but it is not required for value
      conservation.
 
 2. **Lift order**
@@ -85,7 +85,7 @@ require wrapped issuers or bridge integrations before they can be custodied.
    - Contract nullifies the order note and creates an active asset note for the unfilled value.
    - This path is required so firm resting offers do not trap funds.
 
-5. **Withdraw**
+5. **Unshield**
    - User spends an active asset note with a proof.
    - Contract records the nullifier and transfers the public `asset` and `amount` out.
    - Users hold the note secrets; losing those secrets means losing access unless a later recovery
@@ -119,8 +119,8 @@ require wrapped issuers or bridge integrations before they can be custodied.
 - **Cancel design:** define the exact cancel proof, output asset-note construction, and cost.
 - **Registry ownership:** choose merged contract vs Assets-owned registry plus Desk cross-contract
   calls; measure cross-contract cost alongside a verify.
-- **Asset-note layer:** keep deposit -> asset note -> order as the default because one deposit can
-  back several future orders. Direct deposit-to-order can be added later if the UX needs it.
+- **Asset-note layer:** keep shield -> asset note -> order as the default because one shield can
+  back several future orders. Direct shield-to-order can be added later if the UX needs it.
 - **Partial fills:** settle should emit two proceeds notes plus up to two change notes for the
   unfilled side(s).
 - **Wrapped assets:** define issuers/bridges before advertising ETH/XRP support.

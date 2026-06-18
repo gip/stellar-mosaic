@@ -11,7 +11,7 @@
 //   (3) `nullifier_in` is the correct nullifier for that note (double-spend guard)
 //   (4) `order_leaf` is exactly H(the public order fields) - so the contract can
 //       insert it without paying Poseidon, and settle/cancel can trust the fields
-//   (5) the proof is domain-separated to `lift` (not replayable as withdraw/cancel)
+//   (5) the proof is domain-separated to `lift` (not replayable as unshield/cancel)
 //
 // Unlike the spike, `root` and `nullifier_in` are public INPUTS asserted against
 // witness-derived values (the spike returned them as outputs, which any witness
@@ -27,7 +27,7 @@
 // depth 32 ~= 4.3B notes. Tune deliberately against the measured cost.
 global TREE_DEPTH: u32 = 32;
 
-// Domain separator for lift proofs. Distinct constants for withdraw/cancel keep
+// Domain separator for lift proofs. Distinct constants for unshield/cancel keep
 // same-shape proofs from being replayed across operations.
 global LIFT_DOMAIN: Field = 1;
 

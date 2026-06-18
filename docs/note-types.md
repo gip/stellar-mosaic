@@ -1,7 +1,8 @@
 # Note types: asset note and order note
 
 Two note types. Proceeds and change from a trade are just new asset notes, so these two cover
-everything. Model: **owner-anonymous, amount-transparent** (see privacy-model.md).
+everything. Model: **owner-anonymous, amount-transparent** (see `privacy-model.md` and
+`architecture.md`).
 
 ## Shared crypto
 
@@ -20,14 +21,14 @@ WHICH note (so a spend can't be linked to the note's creation). Only `sk_o` and 
 
 ```
   AssetNote {                 // ALL fields public
-    asset      : AssetId      // USDC=0, XLM=1, ETH=2, XRP=3
+    asset      : AssetId      // USDC/XLM native; ETH/XRP require wrapped issuers or bridges
     amount     : u128         // e.g. 100_000000 (100 USDC)
     owner_tag  : Field        // Poseidon(pk_o, rho)
   }
   leaf      = Poseidon(asset, amount, owner_tag)
   nullifier = Poseidon(sk_o, rho)     // when spent
 ```
-Created by: `deposit`, or `settle` (proceeds/change). Consumed by: `lift_order`, `withdraw`.
+Created by: `shield`, or `settle` (proceeds/change). Consumed by: `lift_order`, `unshield`.
 
 ## Order note (a resting limit order)
 
@@ -36,11 +37,11 @@ Created by: `deposit`, or `settle` (proceeds/change). Consumed by: `lift_order`,
     asset_in         : AssetId      // USDC offered  (side implied: in=USDC,out=XLM => buy XLM)
     amount_in        : u128         // 100 USDC max
     asset_out        : AssetId      // XLM wanted
-    price            : Field        // limit price, scaled integer (fixed-point)
+    min_out          : u128         // limit terms, scaled integer / fixed-point policy
     output_owner_tag : Field        // proceeds destination = Poseidon(pk_o, rho_out)
-    owner_tag        : Field        // cancel auth          = Poseidon(pk_o, rho_ord)
+    cancel_owner_tag : Field        // cancel auth          = Poseidon(pk_o, rho_ord)
   }
-  leaf      = Poseidon(asset_in, amount_in, asset_out, price, output_owner_tag, owner_tag)
+  leaf      = Poseidon(asset_in, amount_in, asset_out, min_out, output_owner_tag, cancel_owner_tag)
   nullifier = Poseidon(sk_o, rho_ord)   // when settled or cancelled
 ```
 Created by: `lift_order` (consuming an asset note). Consumed by: `settle` or `cancel`.
@@ -67,16 +68,16 @@ breaks at the proceeds' next spend via membership). To hide even that, use a sep
 ## Lifecycle
 
 ```
-  deposit            lift_order                      settle
+  shield            lift_order                      settle
   AssetNote(USDC,100) --consume--> OrderNote(buy XLM,100 USDC) --consume--> AssetNote(XLM,15000)
                                                                             + AssetNote(USDC,40) if partial
 ```
 
 ## Notes for circuit/contract design
-- `price` is a scaled integer (fixed-point), never a float, so the contract crosses orders in
+- Limit terms are scaled integers (fixed-point), never floats, so the contract crosses orders in
   plaintext. Choose the scale to avoid rounding leak/loss.
 - `amount` should snap to standard denominations (1/10/100/1000 + change) for a real anonymity
-  set (privacy-model.md).
+  set (`privacy-model.md`).
 - The `lift_order` proof's public inputs must bind: the consumed nullifier, value conservation
   (input note amount == amount_in + change), and the new order note's fields including
-  output_owner_tag.
+  `output_owner_tag` and `cancel_owner_tag`.
