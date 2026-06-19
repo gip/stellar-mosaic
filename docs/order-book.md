@@ -78,9 +78,11 @@ balances by exactly what it mints. The book test asserts this end to end.
 ## Cost & storage notes
 
 - Only the **incoming** order is verified per `submit_order` (~80M); resting orders were verified
-  when placed. With `MAX_FILLS_PER_SUBMIT = 4`, local-host metering shows ~185M for a 2-fill submit.
-  Raise the cap only after measuring on-chain — the binding constraint is **ledger read/write bytes**,
-  not CPU.
+  when placed. Measured on **testnet** (`scripts/06_book_budget_testnet.sh`):
+  `submit_order` resting (1 verify, no fill) **84.2M (~21%)**, `submit_order` worst case (verify +
+  2 fills / 4 proceeds inserts) **220.4M (~55%)**, `cancel_order` (verify + 1 return insert)
+  **115.2M (~28%)** — all within the 400M budget. Raise `MAX_FILLS_PER_SUBMIT` only after
+  re-measuring; watch **ledger read/write bytes**, not just CPU.
 - v1 stores each book side as a bounded `Vec<OrderEntry>` (≤64) under `DataKey::Book(pair, side)`,
   read-modify-written per op. The planned optimization is individually-keyed entries
   (`DataKey::Order(pair, side, slot)`) + a small price-sorted index, so a fill touches only the
