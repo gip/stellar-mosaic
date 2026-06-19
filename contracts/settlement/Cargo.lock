@@ -1282,6 +1282,7 @@ dependencies = [
 name = "settlement"
 version = "0.1.0"
 dependencies = [
+ "soroban-poseidon",
  "soroban-sdk",
  "ultrahonk_soroban_verifier",
 ]
@@ -1440,6 +1441,13 @@ dependencies = [
  "soroban-env-common",
  "soroban-env-host",
  "thiserror",
+]
+
+[[package]]
+name = "soroban-poseidon"
+version = "26.0.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]

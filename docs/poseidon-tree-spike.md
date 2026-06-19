@@ -69,13 +69,16 @@ a heavy ~36% tax on every note creation.
 
 ## Decision
 
-> **REOPENED (2026-06-18): this analysis assumed a ~100M per-tx budget; the real limit is 400M**
-> (see `tx-instruction-limit-spike.md`). At 400M a depth-32 insert is ~9% and a 4-insert partial-fill
-> settle is ~35%, so the budget objection to an on-chain tree (Option A) no longer holds. The B-vs-A
-> choice should be re-decided on the 400M budget. The cost numbers below remain correct; only the
-> "% of budget" framing (which used 100M) changes.
+> **RESOLVED (2026-06-18): Option A (on-chain tree) BUILT and validated on testnet.** Once the real
+> per-tx limit turned out to be 400M (not 100M, see `tx-instruction-limit-spike.md`), the budget
+> objection to an on-chain tree vanished. The contract now maintains the depth-32 tree itself.
+> Measured on testnet: `shield` (1 insert) ~38M (~9%); `settle` (2 verifies + 2 proceeds inserts)
+> 230.5M (~58%). Key implementation note: the Poseidon round-constant tables must be built ONCE per
+> tx and reused across all compressions (rebuilding per hash added ~80M; see commit history). The
+> on-chain `compress` is unit-tested byte-identical to Noir. The old Option-B analysis below is kept
+> for provenance.
 
-**Option B (off-chain builder + published root) - recommended (under the old 100M assumption).** Phase 1 changed the calculus: leaf
+**Option B (off-chain builder + published root) - the pre-400M recommendation, superseded.** Phase 1 changed the calculus: leaf
 hashing is now a *standardized, reproducible* function (official crate, matches Noir, verified
 byte-exact), so the old determinism fear for B is largely gone - any builder using
 `soroban-poseidon` computes identical leaves. B keeps zero hashing cost on-chain and never risks the

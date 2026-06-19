@@ -99,6 +99,24 @@ were removed; order matching moves off-chain, settlement stays on-chain and atom
   (`settle_two_crossing_orders`, tampered-field -> #8, unpublished-root -> #10, wrong-pi-length ->
   #9, incompatible -> #4, replay -> #3, plus the shield/unshield suites).
 
+## On-chain Merkle tree (Option A, validated 2026-06-18)
+
+The contract now maintains the depth-32 append-only note tree itself (no off-chain builder, no admin
+`push_root`). `shield` and `settle` insert leaves; the root advances and is accepted automatically.
+
+- On-chain `compress` = host `poseidon2_permutation` with `stellar/rs-soroban-poseidon` BN254 t=4
+  constants. Unit-tested byte-identical to Noir: `compress(1,2)`, `compress(0,0)`, and the full
+  hardcoded zeros ladder all match the circuit.
+- End-to-end on testnet: shield A (asset 1, 100, owner_tag_a) then shield B (asset 2, 2000,
+  owner_tag_b) produced on-chain root `19a1a766...1a93e` -- the EXACT root the order proofs were made
+  against (computed off-chain) -- and `settle` accepted both with no push_root.
+- Measured (testnet): `shield` (1 insert) = **37.7M (~9%)**; `settle` (2 verifies + 2 proceeds
+  inserts) = **230.5M (~58%)**. Real settle submitted; emitted correct bound proceeds; root advanced.
+- Performance lesson: build the Poseidon round-constant tables ONCE per tx (a `Hasher`) and reuse
+  across all compressions. Rebuilding them per hash cost ~80M extra (settle was 313M -> 230.5M).
+- Storage: VKs + tree state live in persistent storage (not instance), so tree writes don't
+  re-serialize the ~1.7KB VKs.
+
 ## Local proof spike (validated 2026-06-16)
 
 - Toolchain: nargo 1.0.0-beta.3, bb 0.82.2

@@ -20,14 +20,18 @@ Measured facts (Stellar testnet):
 - Verifier: `NethermindEth/rs-soroban-ultrahonk`.
 - The per-transaction CPU limit is **400,000,000 instructions** (testnet and mainnet).
 - One UltraHonk verify: ~**80M** (~20% of budget). Two verifies in one tx fit.
-- Atomic `settle` (verify both order proofs, cross, record nullifiers): **160.8M (~40%)**.
+- `shield` (token custody + 1 on-chain tree insert): **~38M (~9%)**.
+- Atomic `settle` (verify both order proofs, cross, record nullifiers, insert 2 proceeds notes):
+  **230.5M (~58%)**.
 - `unshield` (verify + recipient-bound payout): ~**81M** (~20%).
 - Valid proofs accepted on testnet; corrupted/tampered proofs and replays rejected.
 
-Each order proof (`circuits/lift`) binds every order field settlement trusts (asset/amount/price,
-`output_owner_tag`, membership root, nullifier, domain). `settle` verifies two crossing proofs and
-constructs proceeds from the bound tags; nothing the caller passes is trusted. Order matching is
-off-chain; settlement is on-chain and atomic. See
+The note commitment tree is maintained **on-chain** (depth-32 append-only; `shield`/`settle` insert,
+the root advances automatically, no admin publisher). The on-chain Poseidon `compress` is
+byte-identical to the circuits (host `poseidon2_permutation` with `stellar/rs-soroban-poseidon`
+constants, unit-tested against Noir). Each order proof (`circuits/lift`) binds every order field
+settlement trusts; `settle` verifies two crossing proofs against on-chain roots and constructs
+proceeds from the bound tags. Order matching is off-chain; settlement + the tree are on-chain. See
 [docs/architecture.md](docs/architecture.md), [docs/tx-instruction-limit-spike.md](docs/tx-instruction-limit-spike.md),
 and [docs/milestone-0-results.md](docs/milestone-0-results.md).
 

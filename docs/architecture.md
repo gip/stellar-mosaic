@@ -54,9 +54,10 @@ require wrapped issuers or bridge integrations before they can be custodied.
 
 1. **Shield** (IMPLEMENTED: `shield` + `register_asset`)
    - User transfers a supported asset into custody; the contract mints an active
-     `AssetNote { asset, amount, owner_tag }` and emits a `shielded` event for the off-chain tree
-     builder (leaf `Poseidon(asset, amount, owner_tag)` rebuilt off-chain; no on-chain Poseidon).
-   - Proof-free: the token transfer enforces the amount and amounts are public.
+     `AssetNote { asset, amount, owner_tag }` by inserting `Poseidon(asset, amount, owner_tag)` into
+     the **on-chain** Merkle tree (the root advances and is accepted), and emits a `shielded` event
+     so an off-chain client can rebuild membership paths.
+   - Proof-free: the token transfer enforces the amount and amounts are public. Measured ~38M (~9%).
 
 2. **Order** (off-chain; proof = `circuits/lift`)
    - A party generates an order proof: proves membership of an asset note in the tree, reveals its
@@ -71,8 +72,10 @@ require wrapped issuers or bridge integrations before they can be custodied.
      from its verified public inputs, checks asset + price compatibility in plaintext, requires the
      two notes to be distinct and unspent, records both nullifiers, and emits proceeds descriptors
      stamped with each order's bound `output_owner_tag`.
-   - No proof-free pre-verified entries, no caller-supplied output commitments.
-   - Measured on testnet at **160.8M instructions (~40% of the 400M budget)**.
+   - Proceeds are minted as new asset notes by inserting them into the on-chain tree (no
+     caller-supplied output commitments). No proof-free pre-verified entries.
+   - Measured on testnet at **230.5M instructions (~58% of the 400M budget)**: ~160M for the two
+     verifies plus ~70M for the two proceeds inserts.
 
 4. **Unshield** (IMPLEMENTED: `unshield`, circuit `circuits/unshield`)
    - User spends an asset note with a proof that binds the payout **recipient** (public input
@@ -97,13 +100,18 @@ require wrapped issuers or bridge integrations before they can be custodied.
 
 ## Open implementation gaps
 
-- **Off-chain tree builder (NEXT):** ingests `shielded`/`settled` events, maintains the depth-32
-  append-only Merkle tree, calls `push_root`, and serves wallets the membership paths that order and
-  unshield proofs need. Does not exist yet; without it the flow cannot run end-to-end (tests use
-  synthetic trees). Leaf hashing is reproducible on-chain and off (host `poseidon2` matches Noir
-  byte-for-byte; build with `stellar/rs-soroban-poseidon`). NOTE: the 400M budget finding reopened
-  on-chain-tree (Option A) as viable (depth-32 insert ~9%); see `poseidon-tree-spike.md`. Decide A
-  vs off-chain B before building.
+- **On-chain Merkle tree (DONE):** the contract maintains the depth-32 append-only tree itself
+  (`shield`/`settle` insert; root advances and is accepted automatically; no admin `push_root`). The
+  on-chain `compress` is byte-identical to the circuits (host `poseidon2_permutation` with the
+  `stellar/rs-soroban-poseidon` BN254 t=4 constants; unit-tested against Noir). Validated end-to-end
+  on testnet: shield A + shield B reproduce the exact root the order proofs were made against, then
+  `settle` accepts them with no push_root. The remaining off-chain piece is a **read-only path
+  server**: a client rebuilds membership paths from `shielded`/`settled` events (the tree stores only
+  filled subtrees on-chain, not all leaves). It is not a trust anchor — the on-chain root is.
+- **Path-server client (NEXT):** read-only indexer that derives each note's membership path from
+  events so wallets can generate order/unshield proofs against the current on-chain root.
+- **Root history is unbounded:** every produced root stays accepted (nullifiers prevent
+  double-spend regardless of root recency); a bounded ring is a later refinement.
 - **Partial fills:** `settle` is full-fill (each side receives the other's offered amount). Partial
   fills need fill-amount math plus proceeds + change notes per side.
 - **Order circuit naming:** `circuits/lift` is the order proof; the contract has no `lift`

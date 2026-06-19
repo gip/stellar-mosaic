@@ -1,12 +1,14 @@
-//! Integration test for the atomic settlement flow, run entirely in the local Soroban host (no
-//! testnet). The native BN254 host functions the UltraHonk verifier needs are part of the test
-//! `Env`, so verification is REAL, not mocked.
+//! Integration test for the atomic settlement flow over an ON-CHAIN Merkle tree, run entirely in
+//! the local Soroban host (no testnet). The native BN254/Poseidon host functions are part of the
+//! test `Env`, so verification AND the tree hashing are REAL, not mocked.
 //!
-//! Fixtures in tests/fixtures/ are real bb artifacts for the `circuits/lift` order circuit:
-//!   - order A: offer 100 of asset 1, want >= 1500 of asset 2 (tags 0x2329 / 0x232a)
-//!   - order B: offer 2000 of asset 2, want >= 50 of asset 1 (tags 0x2333 / 0x2334)
-//! A and B cross, so `settle` matches them in one atomic two-verify transaction. Regenerate with
-//! tests/fixtures/regen.sh.
+//! Fixtures (tests/fixtures/) are real bb artifacts whose membership proofs are made against the
+//! roots the on-chain tree actually produces:
+//!   - order A: shield asset 1 amount 100 (owner_tag_a) at index 0
+//!   - order B: shield asset 2 amount 2000 (owner_tag_b) at index 1  -> tree root R2
+//!   A and B cross; both order proofs prove membership against R2.
+//!   - unshield: shield asset 1 amount 100 (owner_tag_u) at index 0 -> root R_U; proof against R_U.
+//! Regenerate with tests/fixtures/regen.sh.
 
 use settlement::{Error, Settlement, SettlementClient};
 use soroban_sdk::{
@@ -20,19 +22,23 @@ const PROOF_A: &[u8] = include_bytes!("fixtures/proof_a");
 const PI_A: &[u8] = include_bytes!("fixtures/public_inputs_a");
 const PROOF_B: &[u8] = include_bytes!("fixtures/proof_b");
 const PI_B: &[u8] = include_bytes!("fixtures/public_inputs_b");
+const OTAG_A: &[u8] = include_bytes!("fixtures/owner_tag_a");
+const OTAG_B: &[u8] = include_bytes!("fixtures/owner_tag_b");
 
-// Unshield circuit fixtures (asset note spend -> token payout). The proof binds `recipient` to
-// UNSHIELD_TO below; regenerate both together (see fixtures/regen.sh).
 const UNSHIELD_VK: &[u8] = include_bytes!("fixtures/unshield_vk");
 const UNSHIELD_PROOF: &[u8] = include_bytes!("fixtures/unshield_proof");
 const UNSHIELD_PI: &[u8] = include_bytes!("fixtures/unshield_public_inputs");
+const OTAG_U: &[u8] = include_bytes!("fixtures/owner_tag_u");
 // The payout address the unshield proof's `recipient` field commits to (a fixed test address).
 const UNSHIELD_TO: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 const UNSHIELD_OP: u32 = 2;
-const UNSHIELD_AMOUNT: i128 = 100;
 
-// Public-input word index for the membership root (see docs/lift-circuit-spec.md).
-const W_ROOT: usize = 1;
+// Order A/B and unshield note parameters (must match the fixtures' proofs).
+const ASSET_1: u32 = 1;
+const ASSET_2: u32 = 2;
+const AMOUNT_A: i128 = 100; // order A offers 100 of asset 1
+const AMOUNT_B: i128 = 2000; // order B offers 2000 of asset 2
+const AMOUNT_U: i128 = 100; // unshield note: 100 of asset 1
 const W_AMOUNT_IN: usize = 4;
 
 fn test_env() -> Env {
@@ -43,7 +49,6 @@ fn test_env() -> Env {
     env
 }
 
-/// Register the settlement contract with the order (lift) VK and a generated admin.
 fn deploy(env: &Env) -> (Address, Address) {
     let admin = Address::generate(env);
     let vk = Bytes::from_slice(env, VK);
@@ -55,20 +60,23 @@ fn bytes(env: &Env, b: &[u8]) -> Bytes {
     Bytes::from_slice(env, b)
 }
 
-fn bytesn_at(env: &Env, pi: &[u8], word: usize) -> BytesN<32> {
-    let o = word * 32;
-    let mut a = [0u8; 32];
-    a.copy_from_slice(&pi[o..o + 32]);
-    BytesN::from_array(env, &a)
+fn tag(env: &Env, b: &[u8]) -> BytesN<32> {
+    BytesN::from_array(env, &b.try_into().unwrap())
 }
 
-/// Publish the membership root carried in a public-input blob.
-fn push_root(client: &SettlementClient, env: &Env, pi: &[u8]) {
-    client.push_root(&bytesn_at(env, pi, W_ROOT));
+/// Register a Stellar Asset Contract for `asset_id`, mint `amount` to a fresh holder, and return it.
+fn register_funded_asset(env: &Env, id: &Address, asset_id: u32, amount: i128) -> (Address, Address) {
+    let token_admin = Address::generate(env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin);
+    let token = sac.address();
+    let holder = Address::generate(env);
+    StellarAssetClient::new(env, &token).mint(&holder, &amount);
+    SettlementClient::new(env, id).register_asset(&asset_id, &token);
+    (token, holder)
 }
 
 // ===========================================================================
-// Happy path: settle two crossing orders atomically (both proofs verified in one tx).
+// Happy path: shield both notes into the on-chain tree, then settle atomically.
 // ===========================================================================
 
 #[test]
@@ -77,8 +85,12 @@ fn settle_two_crossing_orders() {
     let (id, _admin) = deploy(&env);
     let client = SettlementClient::new(&env, &id);
 
-    push_root(&client, &env, PI_A);
-    push_root(&client, &env, PI_B);
+    // Shield the two input notes -> the on-chain tree advances to root R2, which both order proofs
+    // were made against. No admin push_root: the root is produced by the inserts themselves.
+    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
+    client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
+    client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
 
     client.settle(
         &bytes(&env, PROOF_A),
@@ -87,11 +99,10 @@ fn settle_two_crossing_orders() {
         &bytes(&env, PI_B),
     );
 
-    // Exactly one settled event from this contract. Its proceeds are stamped from each order's
-    // bound output_owner_tag (derived from the verified public inputs).
+    // One settled event from this contract (the shields and token transfers emit their own).
     assert_eq!(env.events().all().filter_by_contract(&id).events().len(), 1);
 
-    // Both consumed-note nullifiers are now recorded: re-settling the same pair is rejected.
+    // Both nullifiers recorded: re-settling the same pair is rejected.
     let err = env
         .as_contract(&id, || {
             Settlement::settle(
@@ -111,10 +122,10 @@ fn settle_two_crossing_orders() {
 // ===========================================================================
 
 #[test]
-fn settle_rejects_unpublished_root() {
+fn settle_rejects_unknown_root() {
+    // Without shielding, the on-chain tree never produced R2, so the proofs' root is not accepted.
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    // Both proofs verify, but no root was published.
     let err = env
         .as_contract(&id, || {
             Settlement::settle(
@@ -125,20 +136,15 @@ fn settle_rejects_unpublished_root() {
                 bytes(&env, PI_B),
             )
         })
-        .expect_err("unpublished root");
+        .expect_err("unknown root");
     assert_eq!(err as u32, Error::UnknownRoot as u32);
 }
 
 #[test]
 fn settle_rejects_tampered_order_field() {
-    // The proof binds every order field: a valid proof with a tampered amount_in fails to verify,
-    // so a matcher cannot substitute order terms.
+    // The proof binds every order field: a valid proof with a tampered amount_in fails to verify.
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    let client = SettlementClient::new(&env, &id);
-    push_root(&client, &env, PI_A);
-    push_root(&client, &env, PI_B);
-
     let mut tampered = PI_A.to_vec();
     tampered[W_AMOUNT_IN * 32 + 31] ^= 0x01;
 
@@ -160,7 +166,7 @@ fn settle_rejects_tampered_order_field() {
 fn settle_rejects_wrong_public_input_length() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    let short = &PI_A[..PI_A.len() - 32]; // 9 words instead of 10
+    let short = &PI_A[..PI_A.len() - 32];
     let err = env
         .as_contract(&id, || {
             Settlement::settle(
@@ -177,12 +183,15 @@ fn settle_rejects_wrong_public_input_length() {
 
 #[test]
 fn settle_rejects_incompatible_orders() {
-    // Order A against itself does not cross (A offers asset 1 / wants asset 2, so asset_in != the
-    // other side's asset_out). Both proofs verify; the crossing check rejects.
+    // Order A against itself does not cross. Shield both notes so R2 is accepted and the crossing
+    // check is what rejects (not the root check).
     let env = test_env();
     let (id, _admin) = deploy(&env);
     let client = SettlementClient::new(&env, &id);
-    push_root(&client, &env, PI_A);
+    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
+    client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
+    client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
 
     let err = env
         .as_contract(&id, || {
@@ -199,44 +208,28 @@ fn settle_rejects_incompatible_orders() {
 }
 
 // ===========================================================================
-// Custody: shield moves a real token into the contract and mints an AssetNote.
+// Custody: shield moves a real token into the contract and inserts an AssetNote.
 // ===========================================================================
 
-const ASSET_ID: u32 = 1;
-const TAG: [u8; 32] = [0xAB; 32];
-
-/// Register a Stellar Asset Contract, mint `amount` to a fresh user, and map it to ASSET_ID.
-fn setup_token(env: &Env, id: &Address, amount: i128) -> (Address, Address) {
-    let token_admin = Address::generate(env);
-    let sac = env.register_stellar_asset_contract_v2(token_admin);
-    let token = sac.address();
-    let user = Address::generate(env);
-    StellarAssetClient::new(env, &token).mint(&user, &amount);
-
-    let client = SettlementClient::new(env, id);
-    client.register_asset(&ASSET_ID, &token);
-    (token, user)
-}
-
 #[test]
-fn shield_moves_tokens_into_custody() {
+fn shield_moves_tokens_into_custody_and_advances_root() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    let (token, user) = setup_token(&env, &id, 100);
     let client = SettlementClient::new(&env, &id);
-    let tag = BytesN::from_array(&env, &TAG);
+    let (token, holder) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
 
-    client.shield(&user, &ASSET_ID, &100, &tag);
+    let root_before = client.root();
+    client.shield(&holder, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
 
-    // A shielded event announced the new AssetNote for the off-chain tree builder. Filter to this
-    // contract (the token transfer emits its own event), and check first: env.events() reflects the
-    // latest invocation, and the balance reads below are cross-contract calls that replace the view.
+    // The shielded event announced the note; check before the cross-contract balance reads.
     assert_eq!(env.events().all().filter_by_contract(&id).events().len(), 1);
+    // The tree root advanced (a leaf was inserted).
+    assert_ne!(client.root(), root_before);
 
-    // Tokens left the user and now sit in the contract's custody.
-    let token_client = TokenClient::new(&env, &token);
-    assert_eq!(token_client.balance(&user), 0);
-    assert_eq!(token_client.balance(&id), 100);
+    // Tokens left the holder and now sit in custody.
+    let tc = TokenClient::new(&env, &token);
+    assert_eq!(tc.balance(&holder), 0);
+    assert_eq!(tc.balance(&id), AMOUNT_A);
 }
 
 #[test]
@@ -244,10 +237,9 @@ fn shield_rejects_unregistered_asset() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
     let user = Address::generate(&env);
-    let tag = BytesN::from_array(&env, &TAG);
     let err = env
         .as_contract(&id, || {
-            Settlement::shield(env.clone(), user.clone(), 99, 100, tag.clone())
+            Settlement::shield(env.clone(), user.clone(), 99, 100, tag(&env, OTAG_A))
         })
         .expect_err("unregistered asset");
     assert_eq!(err as u32, Error::AssetNotRegistered as u32);
@@ -257,11 +249,10 @@ fn shield_rejects_unregistered_asset() {
 fn shield_rejects_nonpositive_amount() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    let (_token, user) = setup_token(&env, &id, 100);
-    let tag = BytesN::from_array(&env, &TAG);
+    let (_t, holder) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
     let err = env
         .as_contract(&id, || {
-            Settlement::shield(env.clone(), user.clone(), ASSET_ID, 0, tag.clone())
+            Settlement::shield(env.clone(), holder.clone(), ASSET_1, 0, tag(&env, OTAG_A))
         })
         .expect_err("zero amount");
     assert_eq!(err as u32, Error::InvalidAmount as u32);
@@ -271,34 +262,27 @@ fn shield_rejects_nonpositive_amount() {
 fn register_asset_rejects_rebind() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    let (_token, _user) = setup_token(&env, &id, 100);
+    let (_t, _h) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
     let other = Address::generate(&env);
     let err = env
         .as_contract(&id, || {
-            Settlement::register_asset(env.clone(), ASSET_ID, other.clone())
+            Settlement::register_asset(env.clone(), ASSET_1, other.clone())
         })
         .expect_err("rebind");
     assert_eq!(err as u32, Error::AssetAlreadyRegistered as u32);
 }
 
 // ===========================================================================
-// Unshield: spend an asset note with a proof and pay the bound recipient.
+// Unshield: shield a note (advancing the tree), then spend it to the bound recipient.
 // ===========================================================================
 
-/// Deploy, register the unshield VK, fund custody with the asset, publish the proof's root, and
-/// return (token, bound recipient address).
+/// Deploy, register the unshield VK, shield the unshield note (funds custody + advances the tree to
+/// R_U, the root the proof was made against), and return (token, bound recipient).
 fn setup_unshield(env: &Env, id: &Address) -> (Address, Address) {
-    let token_admin = Address::generate(env);
-    let sac = env.register_stellar_asset_contract_v2(token_admin);
-    let token = sac.address();
-    // Fund custody so the contract can pay out.
-    StellarAssetClient::new(env, &token).mint(id, &1000);
-
+    let (token, holder) = register_funded_asset(env, id, ASSET_1, AMOUNT_U);
     let client = SettlementClient::new(env, id);
-    client.register_asset(&ASSET_ID, &token);
     client.set_vk(&UNSHIELD_OP, &bytes(env, UNSHIELD_VK));
-    client.push_root(&bytesn_at(env, UNSHIELD_PI, W_ROOT));
-
+    client.shield(&holder, &ASSET_1, &AMOUNT_U, &tag(env, OTAG_U));
     let to = Address::from_string(&String::from_str(env, UNSHIELD_TO));
     (token, to)
 }
@@ -315,11 +299,11 @@ fn unshield_pays_bound_recipient() {
         &bytes(&env, UNSHIELD_PI),
     );
 
-    let token_client = TokenClient::new(&env, &token);
-    assert_eq!(token_client.balance(&to), UNSHIELD_AMOUNT);
-    assert_eq!(token_client.balance(&id), 1000 - UNSHIELD_AMOUNT);
+    let tc = TokenClient::new(&env, &token);
+    assert_eq!(tc.balance(&to), AMOUNT_U);
+    assert_eq!(tc.balance(&id), 0);
 
-    // The spend nullifier is recorded: replaying the same proof is rejected.
+    // Replaying the same proof is rejected (nullifier recorded).
     let err = env
         .as_contract(&id, || {
             Settlement::unshield(
@@ -335,7 +319,6 @@ fn unshield_pays_bound_recipient() {
 
 #[test]
 fn unshield_rejects_wrong_recipient() {
-    // A relayer cannot redirect: paying anyone other than the proof-bound recipient fails.
     let env = test_env();
     let (id, _admin) = deploy(&env);
     let (_token, _to) = setup_unshield(&env, &id);
@@ -355,10 +338,10 @@ fn unshield_rejects_wrong_recipient() {
 }
 
 #[test]
-fn unshield_rejects_unpublished_root() {
+fn unshield_rejects_unknown_root() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    // Register the VK but do NOT push the root.
+    // Register the VK but do NOT shield, so R_U was never produced on-chain.
     SettlementClient::new(&env, &id).set_vk(&UNSHIELD_OP, &bytes(&env, UNSHIELD_VK));
     let to = Address::from_string(&String::from_str(&env, UNSHIELD_TO));
 
@@ -371,7 +354,7 @@ fn unshield_rejects_unpublished_root() {
                 bytes(&env, UNSHIELD_PI),
             )
         })
-        .expect_err("unpublished root");
+        .expect_err("unknown root");
     assert_eq!(err as u32, Error::UnknownRoot as u32);
 }
 
@@ -379,7 +362,6 @@ fn unshield_rejects_unpublished_root() {
 fn unshield_rejects_missing_vk() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    // No set_vk(UNSHIELD_OP): the order VK alone cannot verify an unshield proof.
     let to = Address::from_string(&String::from_str(&env, UNSHIELD_TO));
     let err = env
         .as_contract(&id, || {
@@ -395,10 +377,7 @@ fn unshield_rejects_missing_vk() {
 }
 
 // ===========================================================================
-// Budget sanity. Local host metering UNDER-counts relative to on-chain calibration
-// (local ~55M/verify vs the authoritative testnet ~81M, see docs/milestone-0-results.md),
-// so this is a regression guard, not the real budget number: it confirms an atomic
-// two-verify settle stays well within the 400M per-tx budget.
+// Budget sanity (local host metering under-counts vs on-chain; regression guard only).
 // ===========================================================================
 
 #[test]
@@ -406,8 +385,10 @@ fn settle_fits_cpu_budget() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
     let client = SettlementClient::new(&env, &id);
-    push_root(&client, &env, PI_A);
-    push_root(&client, &env, PI_B);
+    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
+    client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
+    client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
 
     env.cost_estimate().budget().reset_unlimited();
     client.settle(
@@ -417,11 +398,6 @@ fn settle_fits_cpu_budget() {
         &bytes(&env, PI_B),
     );
     let cpu = env.cost_estimate().budget().cpu_instruction_cost();
-    std::println!("atomic settle (two verifies) CPU instructions (local host): {cpu}");
-
-    // 400M is the per-transaction Soroban budget; two verifies must fit in one tx.
-    assert!(
-        cpu < 400_000_000,
-        "settle CPU {cpu} exceeds the 400M per-tx budget"
-    );
+    std::println!("atomic settle + 2 tree inserts CPU (local host): {cpu}");
+    assert!(cpu < 400_000_000, "settle CPU {cpu} exceeds the 400M budget");
 }

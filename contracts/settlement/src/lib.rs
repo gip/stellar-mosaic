@@ -21,10 +21,16 @@
 //! settle uses [0..8]; cancel_owner_tag/order_leaf are unused here (no on-chain order note).
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient,
-    xdr::ToXdr, Address, Bytes, BytesN, Env,
+    contract, contracterror, contractimpl, contracttype, crypto::bn254::Bn254Fr, symbol_short,
+    token::TokenClient, vec, xdr::ToXdr, Address, Bytes, BytesN, Env, Vec, U256,
 };
+use soroban_poseidon::{Field, Poseidon2Config, Poseidon2Sponge};
 use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
+
+/// Poseidon2 S-box degree (BN254). The crate's SBOX_D is pub(crate); the value is fixed at 5.
+const SBOX_D: u32 = 5;
+/// Poseidon2 state width used by the circuits (t = 4, rate 3).
+const POSEIDON_T: u32 = 4;
 
 /// Operation ids: also index the per-operation verification keys (`DataKey::Vk(op)`) and match the
 /// circuit domain separators (lift/order circuit domain = 1, unshield circuit domain = 2).
@@ -65,13 +71,56 @@ pub enum Error {
     RecipientMismatch = 15,  // unshield payout address does not match the proof-bound recipient
 }
 
+/// Depth of the on-chain append-only Merkle note tree (matches the circuits' TREE_DEPTH).
+const TREE_DEPTH: u32 = 32;
+
+/// Precomputed zero-subtree hashes (zeros[i]); zeros[0]=0, zeros[i]=compress(zeros[i-1],zeros[i-1]).
+/// Hardcoded so inserts don't pay a storage read every call; verified against the circuit in tests.
+const TREE_ZEROS: [[u8; 32]; 32] = [
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+    [0x18, 0xdf, 0xb8, 0xdc, 0x9b, 0x82, 0x22, 0x9c, 0xff, 0x97, 0x4e, 0xfe, 0xfc, 0x8d, 0xf7, 0x8b, 0x1c, 0xe9, 0x6d, 0x9d, 0x84, 0x42, 0x36, 0xb4, 0x96, 0x78, 0x5c, 0x69, 0x8b, 0xc6, 0x73, 0x2e],
+    [0x2c, 0x0d, 0x18, 0x4f, 0xc7, 0xa2, 0x5c, 0x12, 0x4a, 0x27, 0xa6, 0x7b, 0x2c, 0x46, 0x22, 0x0b, 0x03, 0x9b, 0x1a, 0x50, 0x72, 0xc3, 0xb6, 0x93, 0xa1, 0x8f, 0xfe, 0xe4, 0x58, 0xf6, 0x42, 0x5d],
+    [0x26, 0x8b, 0x2b, 0x93, 0xac, 0x5f, 0xe5, 0x40, 0xe6, 0x18, 0xa3, 0x78, 0xb8, 0xa7, 0x1b, 0x8f, 0x24, 0x07, 0x23, 0x27, 0x44, 0xd7, 0x1e, 0x50, 0x1c, 0xe8, 0x69, 0x99, 0x80, 0xb3, 0x06, 0xe5],
+    [0x2d, 0x43, 0x6f, 0x65, 0x4e, 0x14, 0xcc, 0x4f, 0xeb, 0xca, 0xfd, 0xf4, 0xa7, 0x53, 0xb1, 0x49, 0xdd, 0x8c, 0x88, 0xa7, 0x5d, 0xf9, 0xe5, 0xd6, 0x70, 0x7e, 0x83, 0xa8, 0x53, 0xb5, 0xf7, 0x91],
+    [0x0b, 0x66, 0xfd, 0xef, 0x5a, 0x7f, 0x00, 0xf6, 0xfb, 0x45, 0xd1, 0x49, 0x8b, 0x4d, 0x71, 0x31, 0x21, 0x8e, 0x69, 0xcc, 0xf0, 0xa2, 0x75, 0x1b, 0x6a, 0x1f, 0xb1, 0xbc, 0xd9, 0x82, 0x86, 0x7d],
+    [0x1d, 0x54, 0x2b, 0x47, 0x6c, 0x67, 0x1b, 0xb6, 0xf0, 0xd2, 0xab, 0x29, 0x39, 0x33, 0x5d, 0x7c, 0xba, 0xd0, 0x34, 0x76, 0xf1, 0xe3, 0xbc, 0xba, 0x70, 0x97, 0x3b, 0x1a, 0xdf, 0xe8, 0x8b, 0x91],
+    [0x06, 0x80, 0xc6, 0x38, 0x8c, 0x57, 0x98, 0xca, 0xf8, 0x06, 0x42, 0xa1, 0xe8, 0x43, 0x16, 0xb8, 0xb2, 0xf7, 0xca, 0xa9, 0x9d, 0xa0, 0x76, 0xf3, 0x05, 0x7d, 0x29, 0x62, 0xa4, 0x6c, 0x53, 0x58],
+    [0x03, 0xc5, 0x3c, 0xe5, 0x29, 0x6e, 0x3e, 0x89, 0x51, 0x71, 0xf8, 0x9a, 0xa0, 0x9f, 0x84, 0x21, 0x4e, 0x3f, 0xb0, 0x75, 0x5f, 0xe7, 0xa4, 0x23, 0xb8, 0x78, 0x88, 0xe4, 0xb3, 0xd7, 0x31, 0xb8],
+    [0x2d, 0xd4, 0xe2, 0x51, 0x0b, 0x33, 0x27, 0x53, 0x59, 0xbb, 0xa6, 0xed, 0xf7, 0x2e, 0x6b, 0xda, 0xca, 0xd2, 0x59, 0x95, 0x0b, 0x02, 0x4b, 0x2c, 0xc1, 0x9d, 0x63, 0xc3, 0xa5, 0xb7, 0x61, 0xdf],
+    [0x11, 0xcb, 0x22, 0x1f, 0x69, 0xd9, 0x54, 0xd5, 0x21, 0xfb, 0x53, 0x93, 0x76, 0x7e, 0x77, 0xfe, 0x4d, 0x14, 0x13, 0x37, 0x57, 0xa7, 0x06, 0xb3, 0x18, 0xe6, 0x2f, 0xa9, 0x84, 0xf9, 0x81, 0x57],
+    [0x03, 0x9d, 0x78, 0xba, 0xc8, 0xf8, 0x90, 0x78, 0x8e, 0xef, 0xe3, 0x9a, 0xf1, 0x5e, 0xee, 0x58, 0x25, 0x05, 0x66, 0x48, 0xf9, 0x92, 0x10, 0x05, 0x4f, 0xd0, 0x3c, 0x25, 0x21, 0x3f, 0x4d, 0xe7],
+    [0x0c, 0x55, 0xb8, 0x28, 0xa8, 0x30, 0x62, 0xa7, 0x7d, 0x2b, 0x3e, 0x0a, 0x66, 0xbb, 0xb5, 0x0c, 0xb6, 0x04, 0x09, 0x90, 0xd9, 0xf3, 0x68, 0xda, 0x8b, 0x24, 0xc0, 0xe8, 0x2b, 0x69, 0x23, 0x49],
+    [0x24, 0xc8, 0x66, 0xac, 0x88, 0x71, 0x58, 0x51, 0x26, 0x8d, 0x80, 0x84, 0x87, 0xe2, 0x0e, 0x69, 0x86, 0x08, 0x4f, 0xc2, 0x22, 0xd7, 0x18, 0x8e, 0x2a, 0x8e, 0x0f, 0x5b, 0x9f, 0x84, 0x57, 0xef],
+    [0x0f, 0x6a, 0x94, 0xe4, 0x37, 0xb9, 0xdf, 0xb3, 0x5c, 0xde, 0xdf, 0x41, 0xe2, 0xe1, 0x54, 0xc3, 0xae, 0x44, 0x9b, 0x7c, 0x04, 0xc1, 0x3a, 0xdd, 0x09, 0x96, 0xa7, 0xb5, 0x3c, 0xde, 0x54, 0x00],
+    [0x22, 0xaf, 0xe7, 0x69, 0x6b, 0x87, 0xcb, 0x78, 0x27, 0x42, 0xe2, 0xd3, 0xec, 0xb0, 0xf7, 0x49, 0xa9, 0xbe, 0xef, 0xbb, 0xb2, 0x15, 0x9d, 0x17, 0x8b, 0x09, 0x00, 0x0e, 0x55, 0xb2, 0x2c, 0xab],
+    [0x12, 0x1b, 0x01, 0x16, 0x4d, 0x32, 0xe9, 0xab, 0x84, 0x1b, 0xa8, 0xf5, 0x60, 0x2b, 0x0e, 0xc5, 0x8b, 0x57, 0x6e, 0x62, 0x55, 0x2c, 0x96, 0x91, 0x1d, 0x4d, 0x98, 0x8d, 0x49, 0x46, 0x8c, 0xdd],
+    [0x05, 0xf3, 0x81, 0x07, 0x07, 0xb1, 0x33, 0x6c, 0x95, 0x3b, 0x7d, 0xb1, 0x91, 0x21, 0x5d, 0xab, 0x2b, 0x57, 0x72, 0xf9, 0x30, 0x25, 0xaa, 0x34, 0x5b, 0x95, 0x4b, 0x43, 0x13, 0x5b, 0x62, 0x7b],
+    [0x28, 0x75, 0x15, 0xb2, 0xd5, 0x97, 0x5c, 0x74, 0xe3, 0xfd, 0x85, 0xa2, 0x0d, 0x68, 0x61, 0x1a, 0x46, 0x3f, 0xfe, 0x60, 0x5a, 0x1c, 0x54, 0xd8, 0x14, 0x0a, 0xb1, 0x6d, 0x1b, 0x77, 0xf5, 0x7b],
+    [0x27, 0x6f, 0xf1, 0x3f, 0xde, 0x3a, 0xfa, 0x1a, 0xdb, 0x26, 0x14, 0x9d, 0xdc, 0x3a, 0xa6, 0x72, 0x40, 0xd6, 0x03, 0xb6, 0xa9, 0x1d, 0xa5, 0xe4, 0x94, 0xc8, 0xe5, 0x87, 0x06, 0x38, 0x1a, 0x38],
+    [0x30, 0x39, 0xbc, 0xb2, 0x0f, 0x03, 0xfd, 0x9c, 0x86, 0x50, 0x13, 0x8e, 0xf2, 0xcf, 0xe6, 0x43, 0xed, 0xee, 0xd1, 0x52, 0xf9, 0xc2, 0x09, 0x99, 0xf4, 0x3a, 0xee, 0xd5, 0x4d, 0x79, 0xe3, 0x87],
+    [0x08, 0x7e, 0x5a, 0xf4, 0x39, 0x45, 0x0e, 0xf0, 0x9c, 0xe6, 0xf1, 0x2a, 0x47, 0x57, 0x19, 0x71, 0xd8, 0x33, 0x09, 0xbb, 0x6f, 0xd1, 0xe2, 0x80, 0xc2, 0x9b, 0xaf, 0x69, 0x25, 0x7f, 0x8a, 0x4f],
+    [0x18, 0x21, 0x49, 0x5b, 0x19, 0x19, 0xfa, 0x54, 0x39, 0xae, 0x4a, 0x31, 0x4f, 0xf9, 0x88, 0x43, 0x06, 0x73, 0x81, 0xa3, 0xc0, 0x15, 0xf7, 0x44, 0x59, 0x2b, 0xfd, 0x64, 0x10, 0x1d, 0xef, 0x1d],
+    [0x25, 0x78, 0x9f, 0x32, 0xf9, 0x58, 0x56, 0x83, 0x64, 0xc8, 0x13, 0x97, 0x71, 0xd7, 0x86, 0x4d, 0x93, 0xf9, 0x7e, 0xfb, 0x5b, 0xbb, 0x87, 0xcc, 0xe1, 0x95, 0x9e, 0x7e, 0x74, 0x43, 0xac, 0x80],
+    [0x25, 0xad, 0x08, 0x50, 0x41, 0x15, 0x51, 0x11, 0x5f, 0xd6, 0x97, 0xc4, 0xd9, 0x16, 0x68, 0xf9, 0x2d, 0xde, 0x52, 0x42, 0x1b, 0xe5, 0x96, 0x50, 0x35, 0x7c, 0xd5, 0x03, 0x63, 0x88, 0x05, 0x43],
+    [0x10, 0xb6, 0x04, 0xf3, 0x5a, 0x90, 0x24, 0x19, 0xa0, 0xfd, 0xcf, 0x8e, 0xe5, 0x71, 0x23, 0xe9, 0x2f, 0x0d, 0x65, 0x0a, 0xb0, 0x09, 0xb5, 0x10, 0x59, 0x16, 0xca, 0xc7, 0x81, 0x3c, 0x91, 0x37],
+    [0x1b, 0xb0, 0x7b, 0x96, 0xcd, 0xdd, 0xee, 0x48, 0x6a, 0xfb, 0x20, 0xc7, 0x8a, 0x3b, 0x82, 0x20, 0x8c, 0xb8, 0x0d, 0x2c, 0x55, 0xe5, 0x96, 0x89, 0x6f, 0xa1, 0x87, 0x91, 0x64, 0xa7, 0x51, 0xdb],
+    [0x04, 0xab, 0x93, 0xe9, 0xc4, 0x94, 0xb6, 0x71, 0x62, 0x06, 0x3e, 0x77, 0x96, 0x0c, 0xd3, 0x6f, 0x4e, 0x3e, 0x5c, 0xde, 0xe5, 0x38, 0x8a, 0x60, 0x3d, 0xc5, 0x5a, 0x03, 0x87, 0x5c, 0x72, 0xbb],
+    [0x0f, 0x9e, 0x7f, 0x4a, 0xd9, 0x48, 0xe7, 0xe4, 0x87, 0x83, 0x1c, 0x37, 0xfe, 0xf6, 0xe0, 0x32, 0xd6, 0x6a, 0xb2, 0xcd, 0x3d, 0x74, 0x2d, 0x02, 0x42, 0x74, 0x61, 0x2a, 0x86, 0xcc, 0x55, 0xed],
+    [0x2f, 0x1c, 0x69, 0x20, 0x64, 0x4c, 0xd6, 0x74, 0x37, 0x6a, 0x6d, 0x3b, 0xa4, 0xfd, 0x3c, 0xbe, 0x3a, 0x57, 0x16, 0x85, 0xaf, 0x0d, 0x9a, 0xb2, 0x8e, 0x14, 0x61, 0xe4, 0xc1, 0xd6, 0xfc, 0x0a],
+    [0x0d, 0xe2, 0xcd, 0x9d, 0xff, 0xe1, 0xe7, 0x10, 0x64, 0x7f, 0xdc, 0x17, 0x98, 0x84, 0xbd, 0x03, 0x67, 0x27, 0x66, 0x12, 0xef, 0x83, 0xd2, 0xae, 0xea, 0x0f, 0x7d, 0x8a, 0xec, 0xb9, 0xc3, 0xd7],
+    [0x00, 0x77, 0xed, 0x17, 0xda, 0xd4, 0xb5, 0x61, 0xa9, 0xb4, 0xa2, 0x1c, 0xf5, 0x87, 0x20, 0xef, 0x0c, 0x05, 0x76, 0x99, 0xfe, 0xc7, 0x2b, 0x92, 0xf2, 0xca, 0x26, 0xfd, 0xf6, 0xb4, 0x8a, 0x83],
+];
+
 #[contracttype]
 pub enum DataKey {
     Vk(u32), // verification key per operation (LIFT_OP / UNSHIELD_OP)
     Admin,
-    Root(BytesN<32>),
+    Root(BytesN<32>), // set membership: this root was produced by the on-chain tree (accepted)
     Nullifier(BytesN<32>),
     Asset(u32), // asset id -> token contract Address
+    TreeFilled, // Vec<U256> of length TREE_DEPTH: rightmost filled node per level
+    TreeNext,   // u32: number of leaves inserted so far
+    TreeRoot,   // U256: current tree root
 }
 
 /// One verified side of a trade, derived entirely from a verified order proof's public inputs.
@@ -93,8 +142,9 @@ impl Settlement {
     /// unshield VK is registered separately via `set_vk(UNSHIELD_OP, ..)` (a different circuit).
     pub fn __constructor(env: Env, vk_bytes: Bytes, admin: Address) -> Result<(), Error> {
         let _ = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
-        env.storage().instance().set(&DataKey::Vk(LIFT_OP), &vk_bytes);
+        env.storage().persistent().set(&DataKey::Vk(LIFT_OP), &vk_bytes);
         env.storage().instance().set(&DataKey::Admin, &admin);
+        tree_init(&env, &Hasher::new(&env));
         Ok(())
     }
 
@@ -103,27 +153,28 @@ impl Settlement {
     pub fn set_vk(env: Env, op: u32, vk_bytes: Bytes) -> Result<(), Error> {
         Self::require_admin(&env)?;
         let _ = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
-        env.storage().instance().set(&DataKey::Vk(op), &vk_bytes);
+        env.storage().persistent().set(&DataKey::Vk(op), &vk_bytes);
         Ok(())
     }
 
-    /// Publish a Merkle root produced by the off-chain tree rebuild. Order/unshield proofs may be
-    /// made against any published root. Admin-gated (the off-chain tree publisher). Staleness /
-    /// bounded-ring eviction is a later refinement; double-spend safety comes from nullifiers.
-    pub fn push_root(env: Env, root: BytesN<32>) -> Result<(), Error> {
-        Self::require_admin(&env)?;
-        env.storage().persistent().set(&DataKey::Root(root), &true);
-        Ok(())
+    /// Current on-chain Merkle tree root (the latest; any past root stays accepted too).
+    pub fn root(env: Env) -> BytesN<32> {
+        let r: U256 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TreeRoot)
+            .expect("tree initialized at construction");
+        u256_to_bytesn(&env, &r)
     }
 
     /// Map a supported asset id to its real Soroban token contract. Admin-gated; assets are not
     /// silently rebindable (rebinding a live asset id would orphan custodied balances).
     pub fn register_asset(env: Env, asset_id: u32, token: Address) -> Result<(), Error> {
         Self::require_admin(&env)?;
-        if env.storage().instance().has(&DataKey::Asset(asset_id)) {
+        if env.storage().persistent().has(&DataKey::Asset(asset_id)) {
             return Err(Error::AssetAlreadyRegistered);
         }
-        env.storage().instance().set(&DataKey::Asset(asset_id), &token);
+        env.storage().persistent().set(&DataKey::Asset(asset_id), &token);
         Ok(())
     }
 
@@ -146,7 +197,7 @@ impl Settlement {
         }
         let token: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Asset(asset_id))
             .ok_or(Error::AssetNotRegistered)?;
 
@@ -154,7 +205,12 @@ impl Settlement {
         // the balance, so custody can never exceed what was actually shielded.
         TokenClient::new(&env, &token).transfer(&from, &env.current_contract_address(), &amount);
 
-        // Announce the new AssetNote for the off-chain tree builder.
+        // Mint the AssetNote into the on-chain tree (leaf = Poseidon(asset, amount, owner_tag)),
+        // which advances and accepts the new root. The event lets the off-chain client rebuild
+        // membership paths (the tree stores only filled subtrees, not all leaves).
+        let h = Hasher::new(&env);
+        let leaf = asset_note_leaf(&env, &h, asset_id, amount, &owner_tag);
+        tree_insert(&env, &h, &leaf);
         env.events()
             .publish((symbol_short!("shielded"),), (asset_id, amount, owner_tag));
         Ok(())
@@ -203,9 +259,16 @@ impl Settlement {
         env.storage().persistent().set(&ka, &true);
         env.storage().persistent().set(&kb, &true);
 
-        // Proceeds: (asset_out, fill_amount, output_owner_tag) per side, stamped from the bound
-        // tags. The proceeds leaf Poseidon(asset_out, fill_amount, output_owner_tag) is rebuilt
-        // off-chain by the indexer/wallet; the contract emits the authenticated descriptor.
+        // Proceeds: mint each side's asset note (asset_out, fill_amount, output_owner_tag) into the
+        // on-chain tree, stamped from the bound tags. A receives b.amount_in of a.asset_out; B
+        // receives a.amount_in of b.asset_out. The leaves are computed on-chain so the tree stays
+        // canonical; the event lets the off-chain client rebuild paths.
+        let h = Hasher::new(&env);
+        let leaf_a = asset_note_leaf(&env, &h, a.asset_out, b.amount_in, &a.output_owner_tag);
+        let leaf_b = asset_note_leaf(&env, &h, b.asset_out, a.amount_in, &b.output_owner_tag);
+        tree_insert(&env, &h, &leaf_a);
+        tree_insert(&env, &h, &leaf_b);
+
         env.events().publish(
             (symbol_short!("settled"),),
             (
@@ -268,7 +331,7 @@ impl Settlement {
 
         let token: Address = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Asset(asset))
             .ok_or(Error::AssetNotRegistered)?;
 
@@ -301,7 +364,7 @@ impl Settlement {
         }
         let vk_bytes: Bytes = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::Vk(op))
             .ok_or(Error::VkNotSet)?;
         let verifier = UltraHonkVerifier::new(env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
@@ -361,6 +424,124 @@ fn recipient_field(env: &Env, to: &Address) -> [u8; 32] {
     w
 }
 
+/// Poseidon2 parameters (BN254 t=4) loaded once, then reused for every `compress` in an operation.
+/// Building the round-constant tables (256 field elements) is expensive, so we must NOT rebuild
+/// them per hash (a settle does ~68 compressions).
+struct Hasher {
+    m_diag: Vec<U256>,
+    rc: Vec<Vec<U256>>,
+    rounds_f: u32,
+    rounds_p: u32,
+    field: soroban_sdk::Symbol,
+}
+
+impl Hasher {
+    fn new(env: &Env) -> Self {
+        Hasher {
+            m_diag: <Poseidon2Sponge<4, Bn254Fr> as Poseidon2Config<4, Bn254Fr>>::get_m_diag(env),
+            rc: <Poseidon2Sponge<4, Bn254Fr> as Poseidon2Config<4, Bn254Fr>>::get_rc(env),
+            rounds_f: <Poseidon2Sponge<4, Bn254Fr> as Poseidon2Config<4, Bn254Fr>>::ROUNDS_F,
+            rounds_p: <Poseidon2Sponge<4, Bn254Fr> as Poseidon2Config<4, Bn254Fr>>::ROUNDS_P,
+            field: <Bn254Fr as Field>::symbol(),
+        }
+    }
+
+    /// 2-to-1 Poseidon2 compression, byte-identical to the circuits' `compress(a,b) =
+    /// poseidon2_permutation([a,b,0,0],4)[0]`. This is what lets the on-chain Merkle tree produce
+    /// the same leaves/nodes/roots the membership proofs are made against.
+    fn compress(&self, env: &Env, a: &U256, b: &U256) -> U256 {
+        let zero = U256::from_u32(env, 0);
+        let input: Vec<U256> = vec![env, a.clone(), b.clone(), zero.clone(), zero];
+        let out = env.crypto_hazmat().poseidon2_permutation(
+            &input,
+            self.field.clone(),
+            POSEIDON_T,
+            SBOX_D,
+            self.rounds_f,
+            self.rounds_p,
+            &self.m_diag,
+            &self.rc,
+        );
+        out.get_unchecked(0)
+    }
+}
+
+/// U256 (field element) to a 32-byte big-endian word, matching the proofs' public-input encoding.
+fn u256_to_bytesn(env: &Env, v: &U256) -> BytesN<32> {
+    let mut buf = [0u8; 32];
+    v.to_be_bytes().copy_into_slice(&mut buf);
+    BytesN::from_array(env, &buf)
+}
+
+fn bytesn_to_u256(env: &Env, b: &BytesN<32>) -> U256 {
+    U256::from_be_bytes(env, &Bytes::from_array(env, &b.to_array()))
+}
+
+/// AssetNote leaf = Poseidon(asset, amount, owner_tag), folded left-to-right like the circuit's
+/// `hash3`. asset/amount are public field elements; owner_tag is a field element (32-byte word).
+fn asset_note_leaf(env: &Env, h: &Hasher, asset: u32, amount: i128, owner_tag: &BytesN<32>) -> U256 {
+    let a = U256::from_u32(env, asset);
+    let m = U256::from_u128(env, amount as u128);
+    let ot = bytesn_to_u256(env, owner_tag);
+    let acc = h.compress(env, &a, &m);
+    h.compress(env, &acc, &ot)
+}
+
+/// The hardcoded zero-subtree hash at level `i` as a field element.
+fn zero_at(env: &Env, i: u32) -> U256 {
+    U256::from_be_bytes(env, &Bytes::from_array(env, &TREE_ZEROS[i as usize]))
+}
+
+/// Initialize the append-only Merkle tree: filled subtrees start at the zeros (hardcoded), next
+/// index 0, root = empty-tree root = compress(zeros[DEPTH-1], zeros[DEPTH-1]).
+fn tree_init(env: &Env, h: &Hasher) {
+    let mut filled: Vec<U256> = vec![env];
+    let mut i = 0u32;
+    while i < TREE_DEPTH {
+        filled.push_back(zero_at(env, i));
+        i += 1;
+    }
+    let empty_root = {
+        let z = zero_at(env, TREE_DEPTH - 1);
+        h.compress(env, &z, &z)
+    };
+    env.storage().persistent().set(&DataKey::TreeFilled, &filled);
+    env.storage().persistent().set(&DataKey::TreeNext, &0u32);
+    // empty-tree root (not marked accepted: no leaf to prove).
+    env.storage().persistent().set(&DataKey::TreeRoot, &empty_root);
+}
+
+/// Insert a leaf (Tornado-style incremental update: TREE_DEPTH compressions up the rightmost path).
+/// Advances the root and marks the new root accepted. Index bits are LSB-first; bit 0 => the
+/// running node is the LEFT child (sibling = zeros[level]), matching the circuit's membership fold.
+fn tree_insert(env: &Env, h: &Hasher, leaf: &U256) -> U256 {
+    let mut filled: Vec<U256> = env.storage().persistent().get(&DataKey::TreeFilled).unwrap();
+    let idx: u32 = env.storage().persistent().get(&DataKey::TreeNext).unwrap();
+
+    let mut cur = leaf.clone();
+    let mut i = 0u32;
+    while i < TREE_DEPTH {
+        if (idx >> i) & 1 == 0 {
+            filled.set(i, cur.clone());
+            cur = h.compress(env, &cur, &zero_at(env, i));
+        } else {
+            let left = filled.get_unchecked(i);
+            cur = h.compress(env, &left, &cur);
+        }
+        i += 1;
+    }
+
+    env.storage().persistent().set(&DataKey::TreeFilled, &filled);
+    env.storage().persistent().set(&DataKey::TreeNext, &(idx + 1));
+    env.storage().persistent().set(&DataKey::TreeRoot, &cur);
+    // Accept this root for membership proofs. Any past root stays accepted (nullifiers prevent
+    // double-spend regardless of root recency); bounded-ring eviction is a later refinement.
+    env.storage()
+        .persistent()
+        .set(&DataKey::Root(u256_to_bytesn(env, &cur)), &true);
+    cur
+}
+
 /// Copy the 32-byte big-endian word at byte `off` out of the public-input blob.
 /// Callers must ensure `off + 32 <= public_inputs.len()` (verify_proof checks the total length).
 fn read_word(pi: &Bytes, off: u32) -> [u8; 32] {
@@ -397,4 +578,58 @@ fn word_to_i128(w: &[u8; 32]) -> Result<i128, Error> {
         return Err(Error::FieldOverflow);
     }
     Ok(v)
+}
+
+#[cfg(test)]
+mod hash_equivalence {
+    use super::{zero_at, Hasher};
+    use soroban_sdk::{testutils::Ledger, Env, U256};
+
+    // Reference values from Noir's std::hash::poseidon2_permutation([a,b,0,0],4)[0]
+    // (the circuits' `compress`). If these match, the on-chain tree hashes identically.
+    #[test]
+    fn compress_matches_circuit() {
+        let env = Env::default();
+        env.ledger().set_protocol_version(26);
+        env.cost_estimate().budget().reset_unlimited();
+
+        let one = U256::from_u32(&env, 1);
+        let two = U256::from_u32(&env, 2);
+        let zero = U256::from_u32(&env, 0);
+
+        let h = Hasher::new(&env);
+        let c12 = h.compress(&env, &one, &two);
+        let expected_12 = U256::from_be_bytes(
+            &env,
+            &soroban_sdk::bytes!(
+                &env,
+                0x299bfccd7daf3c917e51291383929049ec0eaed800af245056cbf135f7dea636
+            ),
+        );
+        assert_eq!(c12, expected_12, "compress(1,2) must match Noir");
+
+        let c00 = h.compress(&env, &zero, &zero);
+        let expected_00 = U256::from_be_bytes(
+            &env,
+            &soroban_sdk::bytes!(
+                &env,
+                0x18dfb8dc9b82229cff974efefc8df78b1ce96d9d844236b496785c698bc6732e
+            ),
+        );
+        assert_eq!(c00, expected_00, "compress(0,0) must match Noir");
+
+        // The hardcoded zeros ladder must match the live computation: zeros[1] = compress(0,0),
+        // zeros[i+1] = compress(zeros[i], zeros[i]).
+        assert_eq!(zero_at(&env, 0), zero, "zeros[0] = 0");
+        let mut i = 0u32;
+        while i < 31 {
+            let zi = zero_at(&env, i);
+            assert_eq!(
+                zero_at(&env, i + 1),
+                h.compress(&env, &zi, &zi),
+                "hardcoded zeros ladder must match compress"
+            );
+            i += 1;
+        }
+    }
 }
