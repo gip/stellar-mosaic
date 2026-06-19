@@ -166,6 +166,11 @@ the recipient's balance rose by exactly the 2000 unshielded.
   `cancel_owner_tag`, `expiry`, `partial_allowed` by the order book; `settle` uses `[0..8]`).
 - **Book storage:** v1 stores each side as a bounded `Vec<OrderEntry>`; individually-keyed entries +
   a price-sorted index are the gas optimization, deferred until ledger-byte cost is measured.
+- **Storage durability:** all fund-critical state is in persistent/instance storage (never temporary,
+  so never deletable) and its TTL is bumped to max on write, with permissionless `keep_alive` /
+  `keep_alive_keys` heartbeats + restore as the backstop. Data cannot be lost or silently missed; see
+  [storage-durability.md](storage-durability.md). The only unbounded rent surface is the per-nullifier
+  set — an accumulator-root redesign is the long-term fix.
 - **Wrapped assets:** define issuers/bridges before advertising ETH/XRP support.
 - **Standalone build:** the contract depends on a vendored Nethermind verifier path that is
   gitignored; make it reproducible before treating it as a buildable package.

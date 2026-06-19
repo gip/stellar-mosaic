@@ -220,6 +220,8 @@ impl Settlement {
         env.storage().persistent().set(&DataKey::Vk(LIFT_OP), &vk_bytes);
         env.storage().instance().set(&DataKey::Admin, &admin);
         tree_init(&env, &Hasher::new(&env));
+        bump(&env, &DataKey::Vk(LIFT_OP));
+        bump_core(&env); // instance + tree singletons to max from the start
         Ok(())
     }
 
@@ -229,6 +231,7 @@ impl Settlement {
         Self::require_admin(&env)?;
         let _ = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
         env.storage().persistent().set(&DataKey::Vk(op), &vk_bytes);
+        bump(&env, &DataKey::Vk(op));
         Ok(())
     }
 
@@ -256,6 +259,7 @@ impl Settlement {
             return Err(Error::AssetAlreadyRegistered);
         }
         env.storage().persistent().set(&DataKey::Asset(asset_id), &token);
+        bump(&env, &DataKey::Asset(asset_id));
         Ok(())
     }
 
@@ -292,6 +296,8 @@ impl Settlement {
             &PairDef { base_asset, quote_asset },
         );
         env.storage().persistent().set(&DataKey::PairCount, &(count + 1));
+        bump(&env, &DataKey::Pair(pair_id));
+        bump(&env, &DataKey::PairCount);
         Ok(pair_id)
     }
 
@@ -330,6 +336,7 @@ impl Settlement {
         tree_insert(&env, &h, &leaf);
         env.events()
             .publish((symbol_short!("shielded"),), (asset_id, amount, owner_tag));
+        bump_core(&env);
         Ok(())
     }
 
@@ -375,6 +382,8 @@ impl Settlement {
         }
         env.storage().persistent().set(&ka, &true);
         env.storage().persistent().set(&kb, &true);
+        bump(&env, &ka);
+        bump(&env, &kb);
 
         // Proceeds: mint each side's asset note (asset_out, fill_amount, output_owner_tag) into the
         // on-chain tree, stamped from the bound tags. A receives b.amount_in of a.asset_out; B
@@ -397,6 +406,7 @@ impl Settlement {
                 b.output_owner_tag,
             ),
         );
+        bump_core(&env);
         Ok(())
     }
 
@@ -443,6 +453,8 @@ impl Settlement {
         }
         env.storage().persistent().set(&ka, &true);
         env.storage().persistent().set(&kb, &true);
+        bump(&env, &ka);
+        bump(&env, &kb);
 
         let h = Hasher::new(&env);
         let leaf_a = asset_note_leaf(&env, &h, a.asset_out, b.amount_in, &a.output_owner_tag);
@@ -461,6 +473,7 @@ impl Settlement {
                 b.output_owner_tag,
             ),
         );
+        bump_core(&env);
         Ok(())
     }
 
@@ -519,10 +532,12 @@ impl Settlement {
         // Record the nullifier BEFORE paying out (single-use; spend cannot be replayed), then
         // transfer the public amount of the real token to the proof-bound recipient.
         env.storage().persistent().set(&nf_key, &true);
+        bump(&env, &nf_key);
         TokenClient::new(&env, &token).transfer(&env.current_contract_address(), &to, &amount);
 
         env.events()
             .publish((symbol_short!("unshield"),), (asset, amount, nullifier));
+        bump_core(&env);
         Ok(())
     }
 
@@ -550,6 +565,7 @@ impl Settlement {
             return Err(Error::NullifierUsed);
         }
         env.storage().persistent().set(&nf, &true);
+        bump(&env, &nf);
 
         let (pair_id, taker_side) = pair_and_side(&env, taker.asset_in, taker.asset_out)?;
         let pair: PairDef = env.storage().persistent().get(&DataKey::Pair(pair_id)).unwrap();
@@ -635,6 +651,7 @@ impl Settlement {
                 mint_note(&env, &h, taker.asset_in, remaining_in, &taker.output_owner_tag);
             }
         }
+        bump_core(&env);
         Ok(())
     }
 
@@ -668,6 +685,7 @@ impl Settlement {
                 mint_note(&env, &h, asset_in, e.remaining_in, &return_owner_tag);
                 book.remove(i);
                 book_store(&env, pair_id, side, &book);
+                bump_core(&env);
                 return Ok(());
             }
             i += 1;
@@ -698,7 +716,52 @@ impl Settlement {
         if removed > 0 {
             book_store(&env, pair_id, side, &book);
         }
+        bump_core(&env);
         Ok(removed)
+    }
+
+    /// Permissionless storage heartbeat. Extends the TTL of all the BOUNDED structural state to the
+    /// network maximum: the contract instance, the incremental-tree singletons + current root, the
+    /// pair registry, and every pair's book sides. A keeper calls this periodically so nothing ever
+    /// archives in practice. (Unbounded sets — historical roots and nullifiers — are bumped on write
+    /// and can be refreshed individually via `keep_alive_keys`; archived entries remain restorable by
+    /// anyone, so funds can never be lost regardless.)
+    pub fn keep_alive(env: Env) {
+        bump_core(&env);
+        if let Some(pc) = env.storage().persistent().get::<DataKey, u32>(&DataKey::PairCount) {
+            bump(&env, &DataKey::PairCount);
+            let mut i = 0u32;
+            while i < pc {
+                bump(&env, &DataKey::Pair(i));
+                let bk = DataKey::Book(i, SIDE_BUY);
+                if env.storage().persistent().has(&bk) {
+                    bump(&env, &bk);
+                }
+                let sk = DataKey::Book(i, SIDE_SELL);
+                if env.storage().persistent().has(&sk) {
+                    bump(&env, &sk);
+                }
+                i += 1;
+            }
+        }
+    }
+
+    /// Permissionless targeted heartbeat for the UNBOUNDED sets: extend specific nullifier and root
+    /// entries to the maximum TTL. Lets a keeper (or a user about to spend an old note / prove against
+    /// an old root) refresh exactly the entries they care about. Missing entries are skipped.
+    pub fn keep_alive_keys(env: Env, nullifiers: Vec<BytesN<32>>, roots: Vec<BytesN<32>>) {
+        for nf in nullifiers.iter() {
+            let k = DataKey::Nullifier(nf);
+            if env.storage().persistent().has(&k) {
+                bump(&env, &k);
+            }
+        }
+        for r in roots.iter() {
+            let k = DataKey::Root(r);
+            if env.storage().persistent().has(&k) {
+                bump(&env, &k);
+            }
+        }
     }
 }
 
@@ -739,6 +802,39 @@ impl Settlement {
             .ok_or(Error::VkNotSet)?;
         admin.require_auth();
         Ok(())
+    }
+}
+
+/// Extend a persistent entry's TTL to the network maximum. The entry must already exist. This is how
+/// fund-critical state is kept live: persistent entries are never deleted (only archived, and
+/// archived entries are restorable + cannot be silently read as absent), so bumping to max + the
+/// permissionless `keep_alive`/restore backstop means data can never be lost and funds never stranded.
+fn bump(env: &Env, key: &DataKey) {
+    let max = env.storage().max_ttl();
+    env.storage().persistent().extend_ttl(key, max, max);
+}
+
+/// Extend the contract instance (and its instance storage, e.g. the admin) TTL to the maximum.
+fn bump_instance(env: &Env) {
+    let max = env.storage().max_ttl();
+    env.storage().instance().extend_ttl(max, max);
+}
+
+/// Refresh the always-present hot state every state-changing call touches: the instance and the
+/// incremental Merkle tree singletons, plus the current root's membership marker. Cheap and bounded
+/// (≤5 TTL bumps) so it is safe even on `submit_order`'s worst-case path. Unbounded sets (historical
+/// roots, nullifiers, per-pair books) are bumped on write and by `keep_alive`, and stay restorable.
+fn bump_core(env: &Env) {
+    bump_instance(env);
+    bump(env, &DataKey::TreeFilled);
+    bump(env, &DataKey::TreeNext);
+    bump(env, &DataKey::TreeRoot);
+    // Keep the latest root's set-membership marker live (proofs bind a published root).
+    if let Some(r) = env.storage().persistent().get::<DataKey, U256>(&DataKey::TreeRoot) {
+        let rk = DataKey::Root(u256_to_bytesn(env, &r));
+        if env.storage().persistent().has(&rk) {
+            bump(env, &rk);
+        }
     }
 }
 
@@ -873,9 +969,11 @@ fn book_load(env: &Env, pair_id: u32, side: u32) -> Vec<OrderEntry> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
-/// Persist a book side.
+/// Persist a book side and keep it live.
 fn book_store(env: &Env, pair_id: u32, side: u32, book: &Vec<OrderEntry>) {
-    env.storage().persistent().set(&DataKey::Book(pair_id, side), book);
+    let key = DataKey::Book(pair_id, side);
+    env.storage().persistent().set(&key, book);
+    bump(env, &key);
 }
 
 /// Is order `a` strictly ahead of `b` in priority for `side`? Asks (SELL) rank by ascending price

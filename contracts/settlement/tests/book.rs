@@ -8,7 +8,7 @@
 
 use settlement::{DataKey, Error, OrderEntry, Settlement, SettlementClient};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{storage::Persistent as _, Address as _, Ledger},
     token::StellarAssetClient,
     Address, Bytes, BytesN, Env,
 };
@@ -270,6 +270,72 @@ fn submit_order_cost_vs_book_depth() {
     );
     assert_eq!(sells_left, 60, "4 of 64 asks consumed (MAX_FILLS_PER_SUBMIT)");
     assert!(cpu < 400_000_000, "worst-case submit CPU {cpu} exceeds 400M");
+}
+
+#[test]
+fn critical_state_ttl_is_extended_and_kept_alive() {
+    // Fund-critical persistent state must be bumped to the network max TTL on write, and the
+    // permissionless keep_alive heartbeat must re-extend it after ledgers pass — so nothing archives
+    // in practice (and even if it did, persistent entries are restorable, never lost).
+    let env = test_env();
+    let id = deploy(&env);
+    setup_book(&env, &id); // shields (tree writes) + register_pair
+    let client = SettlementClient::new(&env, &id);
+    client.submit_order(&bytes(&env, P_S1), &bytes(&env, PI_S1)); // writes Book + nullifier
+
+    let max = env.as_contract(&id, || env.storage().max_ttl());
+    let crit = [
+        DataKey::TreeRoot,
+        DataKey::TreeNext,
+        DataKey::TreeFilled,
+        DataKey::PairCount,
+        DataKey::Pair(0),
+        DataKey::Book(0, SIDE_SELL),
+    ];
+
+    // (1) On write, every critical entry is at (essentially) max TTL.
+    env.as_contract(&id, || {
+        for k in crit.iter() {
+            let ttl = env.storage().persistent().get_ttl(k);
+            assert!(ttl >= max - 16, "fresh TTL {ttl} not ~max {max}");
+        }
+    });
+
+    // (2) Let many ledgers pass: TTL decays but the entry is still live.
+    let elapsed = 100_000u32;
+    env.ledger().set_sequence_number(env.ledger().sequence() + elapsed);
+    env.as_contract(&id, || {
+        let ttl = env.storage().persistent().get_ttl(&DataKey::TreeRoot);
+        assert!(ttl < max && ttl > 0, "TTL {ttl} should have decayed but stayed live");
+    });
+
+    // (3) keep_alive re-extends everything structural back to max.
+    client.keep_alive();
+    env.as_contract(&id, || {
+        for k in crit.iter() {
+            let ttl = env.storage().persistent().get_ttl(k);
+            assert!(ttl >= max - 16, "after keep_alive TTL {ttl} not back to ~max {max}");
+        }
+    });
+
+    // (4) keep_alive_keys re-extends a specific nullifier + root (the unbounded sets).
+    let onchain_root = client.root();
+    env.ledger().set_sequence_number(env.ledger().sequence() + elapsed);
+    let nf = BytesN::from_array(&env, &pi_word_nf(PI_S1));
+    let mut nfs = soroban_sdk::Vec::new(&env);
+    nfs.push_back(nf.clone());
+    let mut roots = soroban_sdk::Vec::new(&env);
+    roots.push_back(onchain_root.clone());
+    client.keep_alive_keys(&nfs, &roots);
+    env.as_contract(&id, || {
+        assert!(env.storage().persistent().get_ttl(&DataKey::Nullifier(nf)) >= max - 16);
+        assert!(env.storage().persistent().get_ttl(&DataKey::Root(onchain_root)) >= max - 16);
+    });
+}
+
+/// The nullifier (public input field [2]) of an order proof, as a 32-byte word.
+fn pi_word_nf(pi: &[u8]) -> [u8; 32] {
+    pi[2 * 32..3 * 32].try_into().unwrap()
 }
 
 #[test]
