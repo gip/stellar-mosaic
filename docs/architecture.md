@@ -50,6 +50,13 @@ and is not needed). Roles:
 Supported assets are admin-gated. USDC and XLM can be native Stellar/Soroban assets. ETH and XRP
 require wrapped issuers or bridge integrations before they can be custodied.
 
+**Trading pairs** are admin-registered in a canonical orientation via `register_pair(base, quote)`
+(e.g. `XLM/USDC`, never `USDC/XLM`). The orientation is fixed by the pair definition, so an order's
+side is well-defined regardless of how the user phrased its assets: SELL = give base / want quote,
+BUY = give quote / want base. Registering the reverse orientation of an existing pair is rejected
+(it is the same market). Pair ids are assigned sequentially from 0. Pairs are the basis for the
+Phase 2 on-chain order book; today they also gate `settle_exact`.
+
 ## Flow
 
 1. **Shield** (IMPLEMENTED: `shield` + `register_asset`)
@@ -63,9 +70,11 @@ require wrapped issuers or bridge integrations before they can be custodied.
    - A party generates an order proof: proves membership of an asset note in the tree, reveals its
      nullifier, and binds the order terms (`asset_in`, `amount_in`, `asset_out`, `min_out`,
      `output_owner_tag`). No on-chain step; the proof is handed to a matcher.
-   - The order is firm in the sense that the proof authorizes consuming that note; the maker
-     "cancels" by spending the note another way (e.g. `unshield`), which nullifies it and makes the
-     held proof unusable. No on-chain cancel entrypoint is needed.
+   - The order proof can be matched off-chain and atomically settled (`settle`/`settle_exact`), OR
+     rested in the **on-chain order book** via `submit_order` (see [order-book.md](order-book.md)).
+   - A resting order is cancelled on-chain with a cancel proof (`cancel_order`), or expires and is
+     pruned (`prune_expired`); a purely off-chain order is still "cancelled" by spending its note
+     another way (e.g. `unshield`), which nullifies it and makes the held proof unusable.
 
 3. **Settle** (IMPLEMENTED: `settle`, atomic, two verifies)
    - A matcher submits two crossing order proofs. The contract verifies BOTH, derives each order
@@ -76,6 +85,12 @@ require wrapped issuers or bridge integrations before they can be custodied.
      caller-supplied output commitments). No proof-free pre-verified entries.
    - Measured on testnet at **230.5M instructions (~58% of the 400M budget)**: ~160M for the two
      verifies plus ~70M for the two proceeds inserts.
+   - **`settle_exact`** (IMPLEMENTED) is the strict-equality sibling of `settle`: it requires the two
+     orders to be *exact reverses* (`a.amount_in == b.min_out && b.amount_in == a.min_out`) on a
+     registered canonical pair, so there is no surplus and no partial execution. It is the matching
+     primitive the Phase 2 order book settles against. The general crossing check (limit prices
+     overlap) is the `orders_cross` helper — an exact-integer `U256` cross-multiplication
+     `a.min_out * b.min_out <= a.amount_in * b.amount_in` — which the book uses for partial fills.
 
 4. **Unshield** (IMPLEMENTED: `unshield`, circuit `circuits/unshield`)
    - User spends an asset note with a proof that binds the payout **recipient** (public input
@@ -132,7 +147,8 @@ the recipient's balance rose by exactly the 2000 unshielded.
   filled subtrees on-chain, not all leaves). It is NOT a trust anchor — the on-chain root is. It
   reuses the contract's exact `compress` (host `poseidon2_permutation` + `soroban-poseidon` BN254
   t=4 constants, via a local `Env` as a hash engine), so its roots are byte-identical by
-  construction. API: `NoteTree::{ingest_shielded, ingest_settled, root, path, circuit_fold}`; the
+  construction. API: `NoteTree::{ingest_shielded, ingest_settled, ingest_note, root, path, circuit_fold}` (the book emits
+  one `noteins` event per minted leaf, replayed via `ingest_note`); the
   `witness` bin replays an event log on stdin and prints `Prover.toml` path/index_bits witnesses
   (this is what makes `tests/fixtures/regen.sh` reproducible and what a wallet calls before proving).
   Cross-checked in `contracts/settlement/tests/integration.rs`: the indexer's reconstructed root
@@ -141,10 +157,20 @@ the recipient's balance rose by exactly the 2000 unshielded.
   that root.
 - **Root history is unbounded:** every produced root stays accepted (nullifiers prevent
   double-spend regardless of root recency); a bounded ring is a later refinement.
-- **Partial fills:** `settle` is full-fill (each side receives the other's offered amount). Partial
-  fills need fill-amount math plus proceeds + change notes per side.
+- **Partial fills:** `settle`/`settle_exact` are full-fill. The on-chain **order book**
+  (`submit_order`) does support partial fills (per-order flag), executing in exact integer "lots" of
+  the maker's price ratio so no change note or rounding is needed — leftover stays locked as the
+  order's `remaining_in` and is returned on cancel/prune. See [order-book.md](order-book.md).
 - **Order circuit naming:** `circuits/lift` is the order proof; the contract has no `lift`
-  entrypoint anymore. `order_leaf`/`cancel_owner_tag` public inputs are currently unused on-chain.
+  entrypoint anymore. All 12 of its public inputs are used on-chain (`order_leaf`,
+  `cancel_owner_tag`, `expiry`, `partial_allowed` by the order book; `settle` uses `[0..8]`).
+- **Book storage:** v1 stores each side as a bounded `Vec<OrderEntry>`; individually-keyed entries +
+  a price-sorted index are the gas optimization, deferred until ledger-byte cost is measured.
+- **Storage durability:** all fund-critical state is in persistent/instance storage (never temporary,
+  so never deletable) and its TTL is bumped to max on write, with permissionless `keep_alive` /
+  `keep_alive_keys` heartbeats + restore as the backstop. Data cannot be lost or silently missed; see
+  [storage-durability.md](storage-durability.md). The only unbounded rent surface is the per-nullifier
+  set — an accumulator-root redesign is the long-term fix.
 - **Wrapped assets:** define issuers/bridges before advertising ETH/XRP support.
 - **Standalone build:** the contract depends on a vendored Nethermind verifier path that is
   gitignored; make it reproducible before treating it as a buildable package.
