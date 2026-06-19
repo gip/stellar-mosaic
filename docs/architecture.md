@@ -50,6 +50,13 @@ and is not needed). Roles:
 Supported assets are admin-gated. USDC and XLM can be native Stellar/Soroban assets. ETH and XRP
 require wrapped issuers or bridge integrations before they can be custodied.
 
+**Trading pairs** are admin-registered in a canonical orientation via `register_pair(base, quote)`
+(e.g. `XLM/USDC`, never `USDC/XLM`). The orientation is fixed by the pair definition, so an order's
+side is well-defined regardless of how the user phrased its assets: SELL = give base / want quote,
+BUY = give quote / want base. Registering the reverse orientation of an existing pair is rejected
+(it is the same market). Pair ids are assigned sequentially from 0. Pairs are the basis for the
+Phase 2 on-chain order book; today they also gate `settle_exact`.
+
 ## Flow
 
 1. **Shield** (IMPLEMENTED: `shield` + `register_asset`)
@@ -76,6 +83,12 @@ require wrapped issuers or bridge integrations before they can be custodied.
      caller-supplied output commitments). No proof-free pre-verified entries.
    - Measured on testnet at **230.5M instructions (~58% of the 400M budget)**: ~160M for the two
      verifies plus ~70M for the two proceeds inserts.
+   - **`settle_exact`** (IMPLEMENTED) is the strict-equality sibling of `settle`: it requires the two
+     orders to be *exact reverses* (`a.amount_in == b.min_out && b.amount_in == a.min_out`) on a
+     registered canonical pair, so there is no surplus and no partial execution. It is the matching
+     primitive the Phase 2 order book settles against. The general crossing check (limit prices
+     overlap) is the `orders_cross` helper — an exact-integer `U256` cross-multiplication
+     `a.min_out * b.min_out <= a.amount_in * b.amount_in` — which the book uses for partial fills.
 
 4. **Unshield** (IMPLEMENTED: `unshield`, circuit `circuits/unshield`)
    - User spends an asset note with a proof that binds the payout **recipient** (public input

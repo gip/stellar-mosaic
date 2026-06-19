@@ -69,6 +69,12 @@ pub enum Error {
     InvalidAmount = 13,      // shield/unshield amount must be positive
     AssetAlreadyRegistered = 14, // asset id already mapped (admin must not silently rebind)
     RecipientMismatch = 15,  // unshield payout address does not match the proof-bound recipient
+    PairNotRegistered = 16,  // (asset_in, asset_out) is not a registered canonical pair
+    OrderExpired = 17,       // order's validity time has passed (Phase 2)
+    BookFull = 18,           // no free slot on the order's side of the book (Phase 2)
+    OrderNotFound = 19,      // cancel/match referenced an order not present in the book (Phase 2)
+    NotPartialAllowed = 20,  // order forbids partial execution but could not fully fill (Phase 2)
+    PairAlreadyRegistered = 21, // canonical pair already defined (admin must not redefine)
 }
 
 /// Depth of the on-chain append-only Merkle note tree (matches the circuits' TREE_DEPTH).
@@ -121,6 +127,26 @@ pub enum DataKey {
     TreeFilled, // Vec<U256> of length TREE_DEPTH: rightmost filled node per level
     TreeNext,   // u32: number of leaves inserted so far
     TreeRoot,   // U256: current tree root
+    Pair(u32),  // pair id -> PairDef { base_asset, quote_asset } (canonical orientation)
+    PairCount,  // u32: number of registered pairs (pair ids are 0..PairCount)
+}
+
+/// A canonical trading pair. Orders are always specified base/quote in this orientation
+/// (e.g. XLM/USDC, never USDC/XLM); the reverse orientation is rejected at registration and
+/// when deriving an order's pair. SELL = give base / want quote; BUY = give quote / want base.
+#[contracttype]
+#[derive(Clone)]
+pub struct PairDef {
+    pub base_asset: u32,
+    pub quote_asset: u32,
+}
+
+/// Which side of the book an order sits on, derived from (asset_in, asset_out) vs the pair's
+/// canonical (base, quote). SELL gives base for quote; BUY gives quote for base.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Side {
+    Buy,
+    Sell,
 }
 
 /// One verified side of a trade, derived entirely from a verified order proof's public inputs.
@@ -176,6 +202,42 @@ impl Settlement {
         }
         env.storage().persistent().set(&DataKey::Asset(asset_id), &token);
         Ok(())
+    }
+
+    /// Register a canonical trading pair `base/quote` (e.g. XLM/USDC). Admin-gated. Both assets must
+    /// already be registered. The canonical orientation is fixed here: an order is matched against
+    /// this pair only when its assets are `{base, quote}`; the orientation itself is derived from the
+    /// pair definition, never from the order, so XLM/USDC and USDC/XLM are the same market. Returns
+    /// the assigned pair id. Pairs are not redefinable (would orphan resting orders).
+    pub fn register_pair(env: Env, base_asset: u32, quote_asset: u32) -> Result<u32, Error> {
+        Self::require_admin(&env)?;
+        if base_asset == quote_asset {
+            return Err(Error::PairNotRegistered);
+        }
+        if !env.storage().persistent().has(&DataKey::Asset(base_asset))
+            || !env.storage().persistent().has(&DataKey::Asset(quote_asset))
+        {
+            return Err(Error::AssetNotRegistered);
+        }
+        // Reject a duplicate in either orientation: the pair is canonical, so {a,b} == {b,a}.
+        let count: u32 = env.storage().persistent().get(&DataKey::PairCount).unwrap_or(0);
+        let mut i = 0u32;
+        while i < count {
+            let p: PairDef = env.storage().persistent().get(&DataKey::Pair(i)).unwrap();
+            if (p.base_asset == base_asset && p.quote_asset == quote_asset)
+                || (p.base_asset == quote_asset && p.quote_asset == base_asset)
+            {
+                return Err(Error::PairAlreadyRegistered);
+            }
+            i += 1;
+        }
+        let pair_id = count;
+        env.storage().persistent().set(
+            &DataKey::Pair(pair_id),
+            &PairDef { base_asset, quote_asset },
+        );
+        env.storage().persistent().set(&DataKey::PairCount, &(count + 1));
+        Ok(pair_id)
     }
 
     /// Shield: move `amount` of a registered asset into custody and mint an AssetNote
@@ -263,6 +325,70 @@ impl Settlement {
         // on-chain tree, stamped from the bound tags. A receives b.amount_in of a.asset_out; B
         // receives a.amount_in of b.asset_out. The leaves are computed on-chain so the tree stays
         // canonical; the event lets the off-chain client rebuild paths.
+        let h = Hasher::new(&env);
+        let leaf_a = asset_note_leaf(&env, &h, a.asset_out, b.amount_in, &a.output_owner_tag);
+        let leaf_b = asset_note_leaf(&env, &h, b.asset_out, a.amount_in, &b.output_owner_tag);
+        tree_insert(&env, &h, &leaf_a);
+        tree_insert(&env, &h, &leaf_b);
+
+        env.events().publish(
+            (symbol_short!("settled"),),
+            (
+                a.asset_out,
+                b.amount_in,
+                a.output_owner_tag,
+                b.asset_out,
+                a.amount_in,
+                b.output_owner_tag,
+            ),
+        );
+        Ok(())
+    }
+
+    /// Settle two orders that are EXACT reverses of each other, in one atomic transaction. This is
+    /// the strict-equality sibling of `settle`: where `settle` accepts any crossing pair (limits met
+    /// with `>=`), `settle_exact` requires each side to receive precisely what the other offered —
+    /// `a.amount_in == b.min_out && b.amount_in == a.min_out` — so there is no surplus and no partial
+    /// execution. Both assets must form a registered canonical pair, and the two sides must sit on
+    /// opposite sides of it. Like `settle`, both proofs are verified, both orders are derived purely
+    /// from their verified public inputs, both nullifiers are recorded, and the proceeds are minted
+    /// into the tree from the bound `output_owner_tag`s.
+    pub fn settle_exact(
+        env: Env,
+        proof_a: Bytes,
+        public_inputs_a: Bytes,
+        proof_b: Bytes,
+        public_inputs_b: Bytes,
+    ) -> Result<(), Error> {
+        Self::verify_proof(&env, LIFT_OP, &proof_a, &public_inputs_a, LIFT_PUBLIC_INPUTS_BYTES)?;
+        Self::verify_proof(&env, LIFT_OP, &proof_b, &public_inputs_b, LIFT_PUBLIC_INPUTS_BYTES)?;
+
+        let a = parse_order(&env, &public_inputs_a)?;
+        let b = parse_order(&env, &public_inputs_b)?;
+
+        // Assets must cross AND form a registered canonical pair on opposite sides.
+        let (pair_a, side_a) = pair_and_side(&env, a.asset_in, a.asset_out)?;
+        let (pair_b, side_b) = pair_and_side(&env, b.asset_in, b.asset_out)?;
+        if pair_a != pair_b || side_a == side_b {
+            return Err(Error::NotCompatible);
+        }
+        // Exact reverse: each side receives precisely what the other offered (no surplus, no partial).
+        if a.amount_in != b.min_out || b.amount_in != a.min_out {
+            return Err(Error::NotCompatible);
+        }
+        // The two sides must be distinct notes (cannot cross a note against itself).
+        if a.nullifier == b.nullifier {
+            return Err(Error::NotCompatible);
+        }
+
+        let ka = DataKey::Nullifier(a.nullifier.clone());
+        let kb = DataKey::Nullifier(b.nullifier.clone());
+        if env.storage().persistent().has(&ka) || env.storage().persistent().has(&kb) {
+            return Err(Error::NullifierUsed);
+        }
+        env.storage().persistent().set(&ka, &true);
+        env.storage().persistent().set(&kb, &true);
+
         let h = Hasher::new(&env);
         let leaf_a = asset_note_leaf(&env, &h, a.asset_out, b.amount_in, &a.output_owner_tag);
         let leaf_b = asset_note_leaf(&env, &h, b.asset_out, a.amount_in, &b.output_owner_tag);
@@ -384,6 +510,44 @@ impl Settlement {
         admin.require_auth();
         Ok(())
     }
+}
+
+/// Derive the canonical pair id and side for an order from its `(asset_in, asset_out)`. The pair's
+/// orientation comes from its registered definition, never from the order, so an order's BUY/SELL is
+/// well-defined regardless of how the user phrased it. SELL = give base / want quote (asset_in=base,
+/// asset_out=quote); BUY = give quote / want base. Returns `PairNotRegistered` if `{asset_in,
+/// asset_out}` is not a registered pair.
+fn pair_and_side(env: &Env, asset_in: u32, asset_out: u32) -> Result<(u32, Side), Error> {
+    let count: u32 = env.storage().persistent().get(&DataKey::PairCount).unwrap_or(0);
+    let mut i = 0u32;
+    while i < count {
+        let p: PairDef = env.storage().persistent().get(&DataKey::Pair(i)).unwrap();
+        if asset_in == p.base_asset && asset_out == p.quote_asset {
+            return Ok((i, Side::Sell));
+        }
+        if asset_in == p.quote_asset && asset_out == p.base_asset {
+            return Ok((i, Side::Buy));
+        }
+        i += 1;
+    }
+    Err(Error::PairNotRegistered)
+}
+
+/// Whether two opposite-side orders on the same pair cross (their limit prices overlap). With A the
+/// SELL side (offers `a.amount_in` base, wants at least `a.min_out` quote) and B the BUY side (offers
+/// `b.amount_in` quote, wants at least `b.min_out` base), A's floor price is `a.min_out / a.amount_in`
+/// (quote per base) and B's ceiling is `b.amount_in / b.min_out`. They cross iff
+/// `a.min_out/a.amount_in <= b.amount_in/b.min_out`, i.e. (cross-multiplied, all non-negative)
+/// `a.min_out * b.min_out <= a.amount_in * b.amount_in`. Each factor is `< 2^127`, so the products
+/// reach `~2^254` and must be computed in `U256` to avoid `i128` overflow. Caller must ensure the
+/// assets actually cross and the SELL/BUY orientation matches A/B.
+// Used by the Phase 2 matching engine; Phase 1 (`settle_exact`) uses strict equality directly.
+#[allow(dead_code)]
+fn orders_cross(env: &Env, a: &Order, b: &Order) -> bool {
+    let lhs = U256::from_u128(env, a.min_out as u128).mul(&U256::from_u128(env, b.min_out as u128));
+    let rhs =
+        U256::from_u128(env, a.amount_in as u128).mul(&U256::from_u128(env, b.amount_in as u128));
+    lhs <= rhs
 }
 
 /// Derive one order side from a VERIFIED order-proof public-input blob. Checks the lift domain
@@ -578,6 +742,66 @@ fn word_to_i128(w: &[u8; 32]) -> Result<i128, Error> {
         return Err(Error::FieldOverflow);
     }
     Ok(v)
+}
+
+#[cfg(test)]
+mod orders_cross_tests {
+    use super::{orders_cross, Order};
+    use soroban_sdk::{BytesN, Env};
+
+    fn order(env: &Env, asset_in: u32, amount_in: i128, asset_out: u32, min_out: i128) -> Order {
+        Order {
+            nullifier: BytesN::from_array(env, &[0u8; 32]),
+            asset_in,
+            amount_in,
+            asset_out,
+            min_out,
+            output_owner_tag: BytesN::from_array(env, &[0u8; 32]),
+        }
+    }
+
+    #[test]
+    fn exact_reverse_crosses() {
+        // A: sell 100 base, want >=2000 quote. B: buy (offer 2000 quote), want >=100 base.
+        // a.min_out*b.min_out = 2000*100 = 200000 == a.amount_in*b.amount_in = 100*2000. Crosses (==).
+        let env = Env::default();
+        let a = order(&env, 1, 100, 2, 2000);
+        let b = order(&env, 2, 2000, 1, 100);
+        assert!(orders_cross(&env, &a, &b));
+    }
+
+    #[test]
+    fn just_uncrossed_does_not_cross() {
+        // A wants one more unit of quote than B is willing to give: 2001*100 > 100*2000.
+        let env = Env::default();
+        let a = order(&env, 1, 100, 2, 2001);
+        let b = order(&env, 2, 2000, 1, 100);
+        assert!(!orders_cross(&env, &a, &b));
+    }
+
+    #[test]
+    fn favorable_prices_cross() {
+        // A wants only 1500 quote for 100 base; B offers 2000 quote for 100 base. 1500*100 < 100*2000.
+        let env = Env::default();
+        let a = order(&env, 1, 100, 2, 1500);
+        let b = order(&env, 2, 2000, 1, 100);
+        assert!(orders_cross(&env, &a, &b));
+    }
+
+    #[test]
+    fn large_values_do_not_overflow() {
+        // Factors near 2^126: the i128 products (~2^252) would overflow, but the U256 path must not.
+        let env = Env::default();
+        let big = 1i128 << 126;
+        // Equal cross-products -> crosses, exercises the boundary without panicking.
+        let a = order(&env, 1, big, 2, big);
+        let b = order(&env, 2, big, 1, big);
+        assert!(orders_cross(&env, &a, &b));
+        // Bump one limit so lhs > rhs at full scale; must still compute and return false.
+        let a2 = order(&env, 1, big, 2, big);
+        let b2 = order(&env, 2, big - 1, 1, big);
+        assert!(!orders_cross(&env, &a2, &b2));
+    }
 }
 
 #[cfg(test)]
