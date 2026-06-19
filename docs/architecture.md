@@ -84,6 +84,17 @@ require wrapped issuers or bridge integrations before they can be custodied.
    - Per-operation VKs: `set_vk(op, vk)` registers the unshield VK (op 2) alongside the order VK
      (op 1, set at construction). Measured on testnet at ~81.3% of budget.
 
+## End-to-end demo
+
+`scripts/03_demo_e2e.sh` + `contracts/settlement/tests/e2e_demo.rs` run the FULL lifecycle with real
+UltraHonk proofs whose membership witnesses are reconstructed by the path server: A shields asset 1,
+trades into asset 2 via an atomic `settle`, then **unshields the proceeds note `settle` created** —
+a note that exists only as a tree leaf, whose Merkle path the indexer rebuilds from the
+shield+settle event history (impossible without the path server). The script derives every
+`Prover.toml` field (owner tags, nullifiers, order leaf, recipient binding, path) via the `witness`
+tool; the test executes shield→settle→unshield against the contract on the local host and checks
+custody/recipient balances. Run: `./scripts/03_demo_e2e.sh` then `cargo test -p settlement`.
+
 ## Soundness invariants
 
 - **Full binding in the order proof:** each order proof binds its consumed nullifier, `asset_in`,

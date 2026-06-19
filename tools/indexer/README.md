@@ -38,14 +38,26 @@ assert_eq!(tree.circuit_fold(&tree.leaf(leaf_index).unwrap(), &p), root); // pat
 
 ## `witness` bin
 
-A scriptable path server / `Prover.toml` helper. It replays a line-based event log on stdin and
-prints membership witnesses (it refuses to print a path that does not fold to the current root):
+A scriptable path server **and** wallet crypto helper. It replays a line-based event log on stdin
+and prints membership witnesses + the field values a circuit `Prover.toml` needs.
+
+Tree / path commands (it refuses to print a path that does not fold to the current root):
 
 ```
 shield  <asset:u32> <amount:i128> <owner_tag:hex32>
 settled <a_asset_out> <b_amount_in> <a_tag> <b_asset_out> <a_amount_in> <b_tag>
-root
-path    <leaf_index>
+root                                  # prints `root = "0x.."`
+path    <leaf_index>                  # prints leaf/root/path/index_bits Prover.toml fragment
+```
+
+Wallet crypto helpers (each prints one bare `0x..` line; `<field>` is decimal or `0x..` hex):
+
+```
+compress   <a> <b>                    # 2-to-1 Poseidon2 compression
+notetag    <sk> <rho>                 # owner_tag = compress(compress(sk,0), rho)
+nullifier  <sk> <rho>                 # nullifier = compress(sk, rho)
+orderleaf  <asset_in> <amount_in> <asset_out> <min_out> <out_tag> <cancel_tag>   # hash6
+recipient  <strkey>                   # sha256(address.xdr), top byte zeroed (unshield binding)
 ```
 
 Example (reproduces the integration-test fixture root):
@@ -56,7 +68,8 @@ printf 'shield 1 100 <owner_tag_a_hex>\nshield 2 2000 <owner_tag_b_hex>\npath 1\
 ```
 
 Copy the printed `root` / `path` / `index_bits` lines straight into the circuit's `Prover.toml`.
-This is what makes `contracts/settlement/tests/fixtures/regen.sh` reproducible.
+This is what makes `contracts/settlement/tests/fixtures/regen.sh` reproducible, and what
+`scripts/03_demo_e2e.sh` uses to generate a full shield→order→settle→unshield proof set.
 
 ## Correctness
 

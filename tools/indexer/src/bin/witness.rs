@@ -5,22 +5,29 @@
 //! reproducible: instead of hand-choosing a Merkle path, you feed the real shield/settle history
 //! and copy the printed `path` / `index_bits` into the circuit's `Prover.toml`.
 //!
-//! Input grammar (one command per line; `#` comments and blank lines ignored):
+//! Tree / path commands (one per line; `#` comments and blank lines ignored):
 //!
 //!   shield  <asset:u32> <amount:i128> <owner_tag:hex32>
 //!   settled <a_asset_out:u32> <b_amount_in:i128> <a_tag:hex32> \
 //!           <b_asset_out:u32> <a_amount_in:i128> <b_tag:hex32>
-//!   root
-//!   path    <leaf_index:usize>
+//!   root                                  # prints `root = "0x.."` (Prover.toml line)
+//!   path    <leaf_index:usize>            # prints leaf/root/path/index_bits (Prover.toml fragment)
 //!
-//! `hex32` is a 32-byte field word, with or without a `0x` prefix. `shield`/`settled` mirror the
-//! contract's events and insert leaves in the exact on-chain order; `root` prints the current root;
-//! `path` prints the witness for a leaf (and asserts it folds back to the root).
+//! Wallet crypto-helper commands (compute the field values a Prover.toml needs; each prints one bare
+//! `0x..` line so a script can capture it). `<field>` is decimal or `0x..` hex:
+//!
+//!   compress   <a> <b>                    # 2-to-1 Poseidon2 compression
+//!   notetag    <sk> <rho>                 # owner_tag = compress(compress(sk,0), rho)
+//!   nullifier  <sk> <rho>                 # nullifier = compress(sk, rho)
+//!   orderleaf  <asset_in> <amount_in> <asset_out> <min_out> <out_tag> <cancel_tag>  # hash6
+//!   recipient  <strkey>                   # sha256(address.xdr), top byte zeroed (unshield binding)
+//!
+//! `shield`/`settled` mirror the contract's events and insert leaves in the exact on-chain order.
 
 use std::io::{BufRead, Write};
 
-use mosaic_indexer::{u256_hex, NoteTree, TREE_DEPTH};
-use soroban_sdk::Env;
+use mosaic_indexer::{u256_hex, word_to_u256, Hasher, NoteTree, TREE_DEPTH};
+use soroban_sdk::{xdr::ToXdr, Address, Env, String as SorobanString, U256};
 
 fn parse_hex32(s: &str) -> Result<[u8; 32], String> {
     let s = s.strip_prefix("0x").unwrap_or(s);
@@ -35,11 +42,38 @@ fn parse_hex32(s: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
+/// Parse a field value: `0x..` hex (any length up to 64 digits, left-padded) or a decimal u128.
+fn parse_field(env: &Env, s: &str) -> Result<U256, String> {
+    if let Some(hex) = s.strip_prefix("0x") {
+        if hex.is_empty() || hex.len() > 64 {
+            return Err(format!("hex field must be 1..=64 digits, got {}", hex.len()));
+        }
+        let padded = format!("{:0>64}", hex);
+        let w = parse_hex32(&padded)?;
+        Ok(word_to_u256(env, &w))
+    } else {
+        let v: u128 = s.parse().map_err(|_| format!("bad decimal field '{s}'"))?;
+        Ok(U256::from_u128(env, v))
+    }
+}
+
+/// 6-input left-to-right fold (the circuits' `hash6`), used for the order leaf.
+#[allow(clippy::too_many_arguments)]
+fn hash6(env: &Env, h: &Hasher, a: &U256, b: &U256, c: &U256, d: &U256, e: &U256, f: &U256) -> U256 {
+    let mut acc = h.compress(env, a, b);
+    acc = h.compress(env, &acc, c);
+    acc = h.compress(env, &acc, d);
+    acc = h.compress(env, &acc, e);
+    h.compress(env, &acc, f)
+}
+
 fn run() -> Result<(), String> {
     // A local Soroban host used purely as the Poseidon2 hashing engine (see lib.rs).
     let env = Env::default();
     env.cost_estimate().budget().reset_unlimited();
     let mut tree = NoteTree::new(&env);
+
+    let h = Hasher::new(&env);
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -131,6 +165,61 @@ fn run() -> Result<(), String> {
                     write!(out, "\"{}\"", p.index_bits[i]).map_err(|e| e.to_string())?;
                 }
                 writeln!(out, "]").map_err(|e| e.to_string())?;
+            }
+            "compress" => {
+                if tok.len() != 3 {
+                    return Err(ctx("compress needs: <a> <b>".into()));
+                }
+                let a = parse_field(&env, tok[1]).map_err(&ctx)?;
+                let b = parse_field(&env, tok[2]).map_err(&ctx)?;
+                writeln!(out, "{}", u256_hex(&h.compress(&env, &a, &b)))
+                    .map_err(|e| e.to_string())?;
+            }
+            "notetag" => {
+                if tok.len() != 3 {
+                    return Err(ctx("notetag needs: <sk> <rho>".into()));
+                }
+                let sk = parse_field(&env, tok[1]).map_err(&ctx)?;
+                let rho = parse_field(&env, tok[2]).map_err(&ctx)?;
+                let zero = U256::from_u32(&env, 0);
+                let pk = h.compress(&env, &sk, &zero);
+                writeln!(out, "{}", u256_hex(&h.compress(&env, &pk, &rho)))
+                    .map_err(|e| e.to_string())?;
+            }
+            "nullifier" => {
+                if tok.len() != 3 {
+                    return Err(ctx("nullifier needs: <sk> <rho>".into()));
+                }
+                let sk = parse_field(&env, tok[1]).map_err(&ctx)?;
+                let rho = parse_field(&env, tok[2]).map_err(&ctx)?;
+                writeln!(out, "{}", u256_hex(&h.compress(&env, &sk, &rho)))
+                    .map_err(|e| e.to_string())?;
+            }
+            "orderleaf" => {
+                if tok.len() != 7 {
+                    return Err(ctx(
+                        "orderleaf needs: <asset_in> <amount_in> <asset_out> <min_out> <out_tag> <cancel_tag>".into(),
+                    ));
+                }
+                let f: Result<Vec<U256>, String> =
+                    tok[1..7].iter().map(|t| parse_field(&env, t)).collect();
+                let f = f.map_err(&ctx)?;
+                writeln!(
+                    out,
+                    "{}",
+                    u256_hex(&hash6(&env, &h, &f[0], &f[1], &f[2], &f[3], &f[4], &f[5]))
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            "recipient" => {
+                if tok.len() != 2 {
+                    return Err(ctx("recipient needs: <strkey>".into()));
+                }
+                let addr = Address::from_string(&SorobanString::from_str(&env, tok[1]));
+                let hash = env.crypto().sha256(&addr.to_xdr(&env)).to_array();
+                let mut w = [0u8; 32];
+                w[1..32].copy_from_slice(&hash[1..32]); // zero the top byte -> field < 2^248
+                writeln!(out, "{}", u256_hex(&word_to_u256(&env, &w))).map_err(|e| e.to_string())?;
             }
             other => return Err(ctx(format!("unknown command '{other}'"))),
         }
