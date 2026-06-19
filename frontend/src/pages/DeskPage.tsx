@@ -5,7 +5,7 @@ import { useWallet } from '../WalletContext'
 import BookView from '../components/BookView'
 import ShieldForm from '../components/ShieldForm'
 import OrderForm from '../components/OrderForm'
-import { notesForDesk, type Note } from '../notes'
+import { notesForDesk, reconcile, type Note } from '../notes'
 
 export default function DeskPage() {
   const { deskId } = useParams()
@@ -41,6 +41,26 @@ export default function DeskPage() {
       clearInterval(h)
     }
   }, [deskId])
+
+  // Reconcile local notes against on-chain state every 7s so filled proceeds appear.
+  useEffect(() => {
+    if (!deskId) return
+    let alive = true
+    const tick = () =>
+      api
+        .getNotes(deskId)
+        .then(async (r) => {
+          if (!alive) return
+          if (await reconcile(deskId, r.notes)) reloadNotes()
+        })
+        .catch(() => {})
+    tick()
+    const h = setInterval(tick, 7000)
+    return () => {
+      alive = false
+      clearInterval(h)
+    }
+  }, [deskId, reloadNotes])
 
   if (error) return <p className="err">{error}</p>
   if (!desk) return <p className="muted">Loading…</p>

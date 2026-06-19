@@ -1,73 +1,31 @@
-# React + TypeScript + Vite
+# mosaic-frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Minimalist (black & white) web client for Stellar Mosaic. Vite + React + TypeScript, Freighter
+wallet, browser-side ZK proving, and local private notes in IndexedDB.
 
-Currently, two official plugins are available:
+## Run
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev            # http://localhost:5173, proxies /api -> backend (127.0.0.1:8787)
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The backend (`../backend`) must be running. Override its URL with `MOSAIC_BACKEND` (build-time) or
+the Soroban RPC with `VITE_SOROBAN_RPC` (defaults to testnet).
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## What it does
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+- `/` — list desks + pairs; create a new desk (deploys a contract via the backend) or import one.
+- `/desk/:id` — address book (desk contract/sponsor/token addresses + your notes), shield, place a
+  limit order, and a live order book. Auto-refreshes root/book/notes.
+
+## How proving works (no secrets leave the browser)
+
+- `note_tag` / `order_terms` Noir helpers run via `noir_js` to derive owner tags, nullifiers, and
+  order leaves — byte-identical to the contract's Poseidon2 (verified against the `witness` tool).
+- The lift (order) circuit is proved in-browser with `@aztec/bb.js` (`{ keccak: true }`). The full
+  proof + concatenated public inputs are accepted by the on-chain Nethermind verifier (validated
+  against the deployed VK).
+- `shield` is user-signed (Freighter); `submit_order` is relayed fully-sponsored by the backend.
+
+Compiled circuits live in `public/circuits/` — regenerate with `../scripts/08_build_web_artifacts.sh`.

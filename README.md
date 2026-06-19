@@ -89,9 +89,18 @@ Confirmed contract interface:
 circuits/spend/      Noir spend circuit (Milestone 0 sizing spike)
 circuits/lift/       order proof circuit (binds the full order; see docs/lift-circuit-spec.md)
 circuits/unshield/   unshield proof circuit (recipient-bound asset-note spend)
+circuits/wallet/     in-browser Noir helpers (note_tag, order_terms) for the web wallet
 contracts/settlement merged custody + matching: shield, atomic settle (2 verifies), unshield
-scripts/             01 = local prove/verify; 02 = legacy on-chain verify spike
-docs/                current design docs and measurement provenance
+backend/             web backend (Rust/axum): desk registry + fully-sponsored relayer
+frontend/            web client (Vite/React): wallet login, shield, order book, in-browser proving
+scripts/             01 = local prove/verify; 02 = legacy on-chain verify spike; 08 = web artifacts
+docs/                current design docs and measurement provenance (see web-app.md)
 vendor/              verifier dependencies (gitignored)
 artifacts/           proof + vk outputs (gitignored)
 ```
+
+## Web app
+
+A web frontend + Rust backend let users browse desks, log in with a Stellar wallet, shield USDC/XLM,
+and place limit orders — proofs generated in-browser, transactions relayed fully-sponsored. See
+[docs/web-app.md](docs/web-app.md).

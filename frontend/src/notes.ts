@@ -56,3 +56,32 @@ export async function updateNote(id: string, patch: Partial<Note>): Promise<void
   const cur = await d.get('notes', id)
   if (cur) await d.put('notes', { ...cur, ...patch })
 }
+
+/**
+ * Reconcile local notes against the on-chain note set (matched by owner_tag): stamp leaf_index,
+ * and promote a pending proceeds note to confirmed with its real filled amount once it appears.
+ * Returns true if anything changed.
+ */
+export async function reconcile(
+  deskId: string,
+  chain: { leaf_index: number; amount: string; owner_tag: string }[],
+): Promise<boolean> {
+  const byTag = new Map(chain.map((c) => [c.owner_tag.toLowerCase(), c]))
+  const local = await notesForDesk(deskId)
+  let changed = false
+  for (const n of local) {
+    const c = byTag.get(n.owner_tag.toLowerCase())
+    if (!c) continue
+    const patch: Partial<Note> = {}
+    if (n.leaf_index !== c.leaf_index) patch.leaf_index = c.leaf_index
+    if (n.status === 'pending') {
+      patch.status = 'confirmed'
+      patch.amount = c.amount
+    }
+    if (Object.keys(patch).length) {
+      await updateNote(n.id, patch)
+      changed = true
+    }
+  }
+  return changed
+}
