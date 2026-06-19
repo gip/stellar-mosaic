@@ -268,7 +268,7 @@ fn submit_order_cost_vs_book_depth() {
     std::println!(
         "submit_order: FULL 64 book + MAX_FILLS cap (WORST CASE) CPU (local): {cpu}; sells left {sells_left}"
     );
-    assert_eq!(sells_left, 61, "3 of 64 asks consumed (MAX_FILLS_PER_SUBMIT)");
+    assert_eq!(sells_left, 60, "4 of 64 asks consumed (MAX_FILLS_PER_SUBMIT)");
     assert!(cpu < 400_000_000, "worst-case submit CPU {cpu} exceeds 400M");
 }
 

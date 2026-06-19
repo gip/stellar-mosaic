@@ -84,15 +84,14 @@ balances by exactly what it mints. The book test asserts this end to end.
   monolithic `Vec` (de)serialization), independent of fills.
 - Cost model: `submit_order ≈ 80M (verify) + (2·fills + IOC?)·40M (inserts) + book load/store`.
   So the worst case is **full book + the fill cap**, not depth alone.
-- Measured on **testnet** (`scripts/06_book_budget_testnet.sh`, contract `CCDEYWPB…`):
-  `submit_order` resting (no fill) **84.2M (~21%)**, `submit_order` 2-fill **220.4M (~55%)**,
-  `cancel_order` **115.2M (~28%)**. Local worst-case (full 64 book + the cap): ~316M at
-  `MAX_FILLS=4`, ~251M at `MAX_FILLS=3`.
-- **`MAX_FILLS_PER_SUBMIT = 3`.** At 4 the worst case extrapolates to ~390M testnet — too close to
-  the 400M ceiling; at 3 it is ~300M (~75%), leaving headroom even if an IOC return adds one insert.
-  A full real-testnet worst-case measurement (needs ≥`MAX_FILLS` small crossing makers + a taker) is
-  the recommended follow-up before raising the cap; watch **ledger read/write bytes** too, not just
-  CPU.
+- Measured on **testnet**: `submit_order` resting (no fill) **84.2M (~21%)**, 2-fill **220.4M
+  (~55%)**, `cancel_order` **115.2M (~28%)** (`scripts/06_book_budget_testnet.sh`).
+- **`MAX_FILLS_PER_SUBMIT = 4`.** The ABSOLUTE worst case — a full 64-deep book + a taker filling the
+  4-fill cap (8 proceeds inserts) — was measured directly on testnet at **359.8M instructions
+  (~89% of 400M)** and was **accepted** (`scripts/07_book_worstcase_testnet.sh`; tx
+  `8306fbb31cecaba6365bab9c2eee51c5b30c24d61381e9a5eade0e85cdbe7f89`, contract `CBLRBC6A…`). It fits,
+  but the margin is ~11%: do not raise the cap without re-measuring, and watch **ledger read/write
+  bytes** too, not just CPU. (Local-host figures for reference: ~316M at cap 4, ~251M at cap 3.)
 - v1 stores each book side as a bounded `Vec<OrderEntry>` (≤64) under `DataKey::Book(pair, side)`,
   read-modify-written per op. The planned optimization is individually-keyed entries
   (`DataKey::Order(pair, side, slot)`) + a small price-sorted index, so a fill touches only the

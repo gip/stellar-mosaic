@@ -44,9 +44,10 @@ const BOOK_CAPACITY: u32 = 64;
 /// driver is proceeds inserts: each fill mints 2 asset notes (~2 depth-32 Poseidon chains), and on
 /// testnet each insert is ~40M instructions (derived from `settle` = 230M and a 2-fill `submit_order`
 /// = 220M). With the fixed verify (~80M), worst case ≈ 80M + (2*MAX_FILLS + 1 IOC)*40M + book
-/// load/store. At 3 that is ~80 + 280 + ~15 ≈ 375M < 400M; at 4 it reaches ~390M+ (too close). Book
-/// DEPTH is cheap (~58M local to load a full 64-deep side). See docs/order-book.md.
-const MAX_FILLS_PER_SUBMIT: u32 = 3;
+/// load/store. Book DEPTH is cheap (~58M local to load a full 64-deep side). The absolute worst case
+/// (full 64-deep book + this many fills) is measured on testnet by
+/// scripts/07_book_worstcase_testnet.sh. See docs/order-book.md.
+const MAX_FILLS_PER_SUBMIT: u32 = 4;
 /// Side encoding for `DataKey::Book(pair, side)`. Matches `Side`.
 const SIDE_BUY: u32 = 0;
 const SIDE_SELL: u32 = 1;
