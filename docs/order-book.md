@@ -77,12 +77,22 @@ balances by exactly what it mints. The book test asserts this end to end.
 
 ## Cost & storage notes
 
-- Only the **incoming** order is verified per `submit_order` (~80M); resting orders were verified
-  when placed. Measured on **testnet** (`scripts/06_book_budget_testnet.sh`):
-  `submit_order` resting (1 verify, no fill) **84.2M (~21%)**, `submit_order` worst case (verify +
-  2 fills / 4 proceeds inserts) **220.4M (~55%)**, `cancel_order` (verify + 1 return insert)
-  **115.2M (~28%)** — all within the 400M budget. Raise `MAX_FILLS_PER_SUBMIT` only after
-  re-measuring; watch **ledger read/write bytes**, not just CPU.
+- Only the **incoming** order is verified per `submit_order` (~80M, fixed — UltraHonk proof size is
+  constant). The real cost driver is **proceeds inserts**: each fill mints 2 asset notes, each a
+  depth-32 Poseidon chain (~40M instructions on testnet, derived from `settle` = 230M and a 2-fill
+  `submit_order` = 220M). Book **depth is cheap**: loading a full 64-deep side is ~58M local (the
+  monolithic `Vec` (de)serialization), independent of fills.
+- Cost model: `submit_order ≈ 80M (verify) + (2·fills + IOC?)·40M (inserts) + book load/store`.
+  So the worst case is **full book + the fill cap**, not depth alone.
+- Measured on **testnet** (`scripts/06_book_budget_testnet.sh`, contract `CCDEYWPB…`):
+  `submit_order` resting (no fill) **84.2M (~21%)**, `submit_order` 2-fill **220.4M (~55%)**,
+  `cancel_order` **115.2M (~28%)**. Local worst-case (full 64 book + the cap): ~316M at
+  `MAX_FILLS=4`, ~251M at `MAX_FILLS=3`.
+- **`MAX_FILLS_PER_SUBMIT = 3`.** At 4 the worst case extrapolates to ~390M testnet — too close to
+  the 400M ceiling; at 3 it is ~300M (~75%), leaving headroom even if an IOC return adds one insert.
+  A full real-testnet worst-case measurement (needs ≥`MAX_FILLS` small crossing makers + a taker) is
+  the recommended follow-up before raising the cap; watch **ledger read/write bytes** too, not just
+  CPU.
 - v1 stores each book side as a bounded `Vec<OrderEntry>` (≤64) under `DataKey::Book(pair, side)`,
   read-modify-written per op. The planned optimization is individually-keyed entries
   (`DataKey::Order(pair, side, slot)`) + a small price-sorted index, so a fill touches only the

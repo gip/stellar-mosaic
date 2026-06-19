@@ -6,7 +6,7 @@
 //! B1 crosses S1 (full) then S2 (partial 56), rests with 4 a2; S3 untouched. Then we cancel S2 and
 //! prune the (expired) S3.
 
-use settlement::{Error, Settlement, SettlementClient};
+use settlement::{DataKey, Error, OrderEntry, Settlement, SettlementClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::StellarAssetClient,
@@ -212,6 +212,64 @@ fn indexer_reproduces_book_root_after_fills() {
     let leaf = tree.leaf(5).unwrap(); // S1 maker's 1500 a2 proceeds
     let p = tree.path(5);
     assert_eq!(u256_to_word(&tree.circuit_fold(&leaf, &p)), onchain_root);
+}
+
+#[test]
+fn submit_order_cost_vs_book_depth() {
+    // How does submit_order cost scale with book DEPTH? With the v1 monolithic Vec<OrderEntry>, each
+    // submit deserializes + reserializes the whole opposing side. We measure two full-64-deep cases
+    // against the 2-entry baseline (~185M local): (a) depth only — non-crossing asks, B1 reads 64 and
+    // rests; (b) the true worst case — full book AND the 4-fill cap, B1 crosses 64 small asks, fills
+    // MAX_FILLS_PER_SUBMIT, then rests. Synthetic entries (plaintext book data; no proofs needed).
+    use soroban_sdk::Vec as SVec;
+
+    fn fill_sell_book(env: &Env, id: &Address, amount_in: i128, min_out: i128) {
+        env.as_contract(id, || {
+            let mut v: SVec<OrderEntry> = SVec::new(env);
+            for n in 0..64u32 {
+                v.push_back(OrderEntry {
+                    amount_in,
+                    min_out,
+                    remaining_in: amount_in,
+                    output_owner_tag: BytesN::from_array(env, &tag_word(40000 + n)),
+                    cancel_owner_tag: BytesN::from_array(env, &tag_word(50000 + n)),
+                    order_leaf: BytesN::from_array(env, &tag_word(60000 + n)),
+                    expiry: 9999999999,
+                    partial_allowed: true,
+                });
+            }
+            env.storage().persistent().set(&DataKey::Book(0, SIDE_SELL), &v);
+        });
+    }
+
+    // (a) depth only: 64 non-crossing asks priced at 25 (> B1's limit of 24).
+    {
+        let env = test_env();
+        let id = deploy(&env);
+        setup_book(&env, &id);
+        fill_sell_book(&env, &id, 100, 2500);
+        env.cost_estimate().budget().reset_unlimited();
+        SettlementClient::new(&env, &id).submit_order(&bytes(&env, P_B1), &bytes(&env, PI_B1));
+        let cpu = env.cost_estimate().budget().cpu_instruction_cost();
+        std::println!("submit_order: FULL 64 book, NO cross (depth only) CPU (local): {cpu}");
+        assert!(cpu < 400_000_000);
+    }
+
+    // (b) worst case: 64 small crossing asks (10 a1 @150, price 15) -> B1 fills the MAX_FILLS cap, rests.
+    let env = test_env();
+    let id = deploy(&env);
+    setup_book(&env, &id);
+    fill_sell_book(&env, &id, 10, 150);
+    let client = SettlementClient::new(&env, &id);
+    env.cost_estimate().budget().reset_unlimited();
+    client.submit_order(&bytes(&env, P_B1), &bytes(&env, PI_B1));
+    let cpu = env.cost_estimate().budget().cpu_instruction_cost();
+    let sells_left = client.book(&0, &SIDE_SELL).len();
+    std::println!(
+        "submit_order: FULL 64 book + MAX_FILLS cap (WORST CASE) CPU (local): {cpu}; sells left {sells_left}"
+    );
+    assert_eq!(sells_left, 61, "3 of 64 asks consumed (MAX_FILLS_PER_SUBMIT)");
+    assert!(cpu < 400_000_000, "worst-case submit CPU {cpu} exceeds 400M");
 }
 
 #[test]
