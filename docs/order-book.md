@@ -90,8 +90,14 @@ balances by exactly what it mints. The book test asserts this end to end.
   4-fill cap (8 proceeds inserts) — was measured directly on testnet at **359.8M instructions
   (~89% of 400M)** and was **accepted** (`scripts/07_book_worstcase_testnet.sh`; tx
   `8306fbb31cecaba6365bab9c2eee51c5b30c24d61381e9a5eade0e85cdbe7f89`, contract `CBLRBC6A…`). It fits,
-  but the margin is ~11%: do not raise the cap without re-measuring, and watch **ledger read/write
-  bytes** too, not just CPU. (Local-host figures for reference: ~316M at cap 4, ~251M at cap 3.)
+  but the margin is ~11%: do not raise the cap without re-measuring. (Local-host figures for
+  reference: ~316M at cap 4, ~251M at cap 3.)
+- **Non-CPU resources for that same worst-case tx** (decoded from its on-chain footprint):
+  `write_bytes` = **25,776** (~20% of the ~130 KB per-tx cap), `disk_read_bytes` = **0**. Under
+  Protocol 23's in-memory state model, TTL-live entries are read from memory and don't count against
+  the read-bytes limit — so keeping state bumped (see `storage-durability.md`) also keeps reads free.
+  The network only accepts a tx that is under EVERY per-tx cap (instructions, write/read bytes, entry
+  counts), so its acceptance confirms the worst case fits all resource limits, not just CPU.
 - v1 stores each book side as a bounded `Vec<OrderEntry>` (≤64) under `DataKey::Book(pair, side)`,
   read-modify-written per op. The planned optimization is individually-keyed entries
   (`DataKey::Order(pair, side, slot)`) + a small price-sorted index, so a fill touches only the
