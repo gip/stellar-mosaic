@@ -95,6 +95,16 @@ shield+settle event history (impossible without the path server). The script der
 tool; the test executes shield→settle→unshield against the contract on the local host and checks
 custody/recipient balances. Run: `./scripts/03_demo_e2e.sh` then `cargo test -p settlement`.
 
+`scripts/04_demo_e2e_testnet.sh` is the authoritative TESTNET version: it deploys the contract and
+submits the same flow as real transactions, reusing the local-host proofs unchanged (they bind the
+protocol asset-id and the Merkle root, not token addresses, and the on-chain tree is deterministic,
+so shielding the same notes reproduces the exact roots R2/R4 the proofs were made against). Both
+protocol asset-ids map to the native XLM SAC for a robust run (the protocol distinguishes them by
+id; two real tokens would only add issuance/trustline setup). Validated on testnet 2026-06-18: the
+on-chain root after the shields equalled proof A's bound root; **atomic settle = 230,529,644 CPU
+(~57% of 400M; ~160M two verifies + ~70M two proceeds inserts), unshield = 81,755,747 CPU (~20%)**;
+the recipient's balance rose by exactly the 2000 unshielded.
+
 ## Soundness invariants
 
 - **Full binding in the order proof:** each order proof binds its consumed nullifier, `asset_in`,
