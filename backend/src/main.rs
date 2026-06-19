@@ -1,5 +1,6 @@
 mod config;
 mod db;
+mod deploy;
 mod error;
 mod handlers;
 mod models;
@@ -43,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(handlers::health))
-        .route("/desks", get(handlers::list_desks))
+        .route("/desks", get(handlers::list_desks).post(handlers::create_desk))
         .route("/desks/import", post(handlers::import_desk))
         .route("/desks/:id", get(handlers::get_desk))
         .route("/desks/:id/root", get(handlers::get_root))

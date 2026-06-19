@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::models::{Desk, ImportDesk};
+use crate::models::{CreateDesk, Desk, ImportDesk};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
@@ -40,6 +40,18 @@ pub async fn import_desk(
         pairs: body.pairs,
     };
     st.db.insert_desk(&desk, None)?;
+    Ok(Json(desk))
+}
+
+/// Create a new desk: deploy a fresh settlement contract + sponsor account, register assets/pairs.
+/// The deploy pipeline makes several blocking testnet calls, so it runs on a blocking thread.
+pub async fn create_desk(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<CreateDesk>,
+) -> AppResult<Json<Desk>> {
+    let desk = tokio::task::spawn_blocking(move || crate::deploy::create_desk(&st, body))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
     Ok(Json(desk))
 }
 

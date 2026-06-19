@@ -57,4 +57,9 @@ export const api = {
     assets: Asset[]
     pairs: Pair[]
   }) => req<Desk>('/desks/import', { method: 'POST', body: JSON.stringify(body) }),
+  createDesk: (body: {
+    name: string
+    assets: { asset_id: number; symbol: string; token: string; decimals: number }[]
+    pairs: { base_asset: number; quote_asset: number }[]
+  }) => req<Desk>('/desks', { method: 'POST', body: JSON.stringify(body) }),
 }
