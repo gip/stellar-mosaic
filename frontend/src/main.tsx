@@ -1,3 +1,8 @@
+import { Buffer } from 'buffer'
+// stellar-sdk expects a global Buffer in the browser.
+const g = globalThis as unknown as { Buffer?: typeof Buffer }
+g.Buffer = g.Buffer ?? Buffer
+
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { createBrowserRouter, RouterProvider } from 'react-router-dom'
