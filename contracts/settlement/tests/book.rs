@@ -168,6 +168,52 @@ fn submit_order_fits_cpu_budget() {
     assert!(cpu < 400_000_000, "submit_order CPU {cpu} exceeds the 400M budget");
 }
 
+/// 32-byte big-endian field word for a small integer tag (matches how the fixtures encode the
+/// literal output_owner_tag values like 9011).
+fn tag_word(n: u32) -> [u8; 32] {
+    let mut w = [0u8; 32];
+    w[28..32].copy_from_slice(&n.to_be_bytes());
+    w
+}
+
+#[test]
+fn indexer_reproduces_book_root_after_fills() {
+    use mosaic_indexer::{u256_to_word, NoteTree};
+
+    let env = test_env();
+    let id = deploy(&env);
+    let client = SettlementClient::new(&env, &id);
+    setup_book(&env, &id);
+    client.submit_order(&bytes(&env, P_S1), &bytes(&env, PI_S1));
+    client.submit_order(&bytes(&env, P_S2), &bytes(&env, PI_S2));
+    client.submit_order(&bytes(&env, P_S3), &bytes(&env, PI_S3));
+    client.submit_order(&bytes(&env, P_B1), &bytes(&env, PI_B1));
+    let onchain_root = client.root().to_array();
+
+    // Rebuild the tree off-chain: the four shields, then the book's `noteins` mints in emission
+    // order. Fill of S1 mints (a1,100 -> B1 tag 9011) then (a2,1500 -> S1 tag 9001); fill of S2 mints
+    // (a1,56 -> 9011) then (a2,896 -> S2 tag 9006). output_owner_tags are the fixtures' literals.
+    let mut tree = NoteTree::new(&env);
+    tree.ingest_shielded(A1, 100, OT_S1.try_into().unwrap());
+    tree.ingest_shielded(A1, 100, OT_S2.try_into().unwrap());
+    tree.ingest_shielded(A2, 2400, OT_B1.try_into().unwrap());
+    tree.ingest_shielded(A1, 50, OT_S3.try_into().unwrap());
+    tree.ingest_note(A1, 100, &tag_word(9011));
+    tree.ingest_note(A2, 1500, &tag_word(9001));
+    tree.ingest_note(A1, 56, &tag_word(9011));
+    tree.ingest_note(A2, 896, &tag_word(9006));
+
+    assert_eq!(
+        u256_to_word(&tree.root()),
+        onchain_root,
+        "indexer root (shields + noteins replay) must equal the on-chain root"
+    );
+    // A proceeds note's reconstructed path folds to the root, so its owner could later unshield it.
+    let leaf = tree.leaf(5).unwrap(); // S1 maker's 1500 a2 proceeds
+    let p = tree.path(5);
+    assert_eq!(u256_to_word(&tree.circuit_fold(&leaf, &p)), onchain_root);
+}
+
 #[test]
 fn submit_rejects_expired_order() {
     // Same shields (so S3's proof root R4 is published), but the ledger is already past S3's expiry.

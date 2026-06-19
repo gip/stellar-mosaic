@@ -13,7 +13,10 @@ Start with [docs/architecture.md](docs/architecture.md). Detailed references:
 
 ## Current status
 
-A trade settles **atomically in one transaction** that verifies both sides' order proofs.
+A trade settles **atomically in one transaction** that verifies both sides' order proofs. In
+addition, the contract now keeps an **on-chain resting limit-order book** (owner-anonymous; up to 64
+orders per side per canonical pair) with cancellation, validity/expiry times, a per-order
+partial-execution flag, and auto-matching on submit. See [docs/order-book.md](docs/order-book.md).
 
 Measured facts (Stellar testnet):
 

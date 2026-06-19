@@ -62,8 +62,9 @@ echo "     OTA=\$(printf 'notetag 1001 2001\\n' | (cd ../../../../tools/indexer 
 echo "     OTB=\$(printf 'notetag 1003 2003\\n' | (cd ../../../../tools/indexer && cargo run -q --bin witness))"
 echo "     printf 'shield 1 100 %s\\nshield 2 2000 %s\\npath 0\\npath 1\\n' \"\$OTA\" \"\$OTB\" | (cd .../tools/indexer && cargo run -q --bin witness)"
 echo "     printf 'nullifier 1001 2001\\nnullifier 1003 2003\\n'                | (cd .../tools/indexer && cargo run -q --bin witness)"
-echo "     printf 'orderleaf 1 100 2 2000 9001 9002\\norderleaf 2 2000 1 100 9003 9004\\n' | (cd .../tools/indexer && cargo run -q --bin witness)"
-echo " - set circuits/lift/Prover.toml for each order, 'prove exa' / 'prove exb', and write owner_tag_exa/b"
+echo "     printf 'orderleaf 1 100 2 2000 9001 9002 9999999999 0\\norderleaf 2 2000 1 100 9003 9004 9999999999 0\\n' | (cd .../tools/indexer && cargo run -q --bin witness)"
+echo "   (orderleaf is now hash8: ... <out_tag> <cancel_tag> <expiry> <partial_allowed>; lift has 12 public inputs)"
+echo " - set circuits/lift/Prover.toml for each order (incl. expiry + partial_allowed), 'prove exa' / 'prove exb', and write owner_tag_exa/b"
 echo "   as the raw 32 bytes of OTA/OTB (xxd -r -p). The VK is identical to fixtures/vk (same circuit)."
 echo
 echo "UNSHIELD fixtures (unshield_vk / unshield_proof / unshield_public_inputs):"

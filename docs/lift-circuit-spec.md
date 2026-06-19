@@ -137,7 +137,9 @@ for the note-capacity headroom you want (32 ≈ 4B notes).
 
 ## Out of scope here (tracked in architecture.md)
 
-- `cancel` circuit (reuses ownership + nullifier machinery; spends `cancel_owner_tag`).
+- ~~`cancel` circuit~~ — IMPLEMENTED in `circuits/cancel` (domain 3); proves knowledge of the
+  order's `cancel_owner_tag` and binds `order_leaf` + `return_owner_tag`. No membership proof (the
+  resting order is plaintext on-chain). See `order-book.md`.
 - `unshield` circuit (asset-note spend, no order created).
 - change-at-lift extension.
 - registry ownership (merged contract vs Assets-owned registry + Desk cross-calls).

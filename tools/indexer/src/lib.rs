@@ -172,6 +172,14 @@ impl NoteTree {
         self.insert_asset_note(asset_id, amount, owner_tag)
     }
 
+    /// Ingest a `noteins` event `(asset, amount, owner_tag)` — one AssetNote leaf minted by the
+    /// order book (a fill's proceeds, or a cancel/prune/IOC return). The book emits exactly one such
+    /// event per leaf it inserts, in insertion order, so replaying them rebuilds the tree just like
+    /// `shielded`. Returns the new leaf's index.
+    pub fn ingest_note(&mut self, asset: u32, amount: i128, owner_tag: &[u8; 32]) -> usize {
+        self.insert_asset_note(asset, amount, owner_tag)
+    }
+
     /// Ingest a `settled` event. The contract emits, and inserts, in this order:
     ///   leaf_a = AssetNote(a.asset_out, b.amount_in, a.output_owner_tag)   (inserted first)
     ///   leaf_b = AssetNote(b.asset_out, a.amount_in, b.output_owner_tag)   (inserted second)
