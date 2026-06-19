@@ -63,6 +63,11 @@ export const api = {
     pairs: { base_asset: number; quote_asset: number }[]
   }) => req<Desk>('/desks', { method: 'POST', body: JSON.stringify(body) }),
   getNotes: (id: string) => req<{ notes: ChainNote[] }>(`/desks/${id}/notes`),
+  submitShield: (id: string, tx_xdr: string) =>
+    req<{ ok: boolean; result: string }>(`/desks/${id}/shield/submit`, {
+      method: 'POST',
+      body: JSON.stringify({ tx_xdr }),
+    }),
   getNoteProof: (id: string, ownerTag: string) =>
     req<NoteProof>(`/desks/${id}/note-proof?owner_tag=${ownerTag}`),
   relayOrder: (id: string, proof_b64: string, public_inputs_b64: string) =>

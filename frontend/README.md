@@ -26,6 +26,7 @@ the Soroban RPC with `VITE_SOROBAN_RPC` (defaults to testnet).
 - The lift (order) circuit is proved in-browser with `@aztec/bb.js` (`{ keccak: true }`). The full
   proof + concatenated public inputs are accepted by the on-chain Nethermind verifier (validated
   against the deployed VK).
-- `shield` is user-signed (Freighter); `submit_order` is relayed fully-sponsored by the backend.
+- `shield` is fully sponsored via auth-entry signing: the user signs only the Soroban auth entry in
+  Freighter, the sponsor is the tx source and pays the fee. `submit_order` is relayed sponsored too.
 
 Compiled circuits live in `public/circuits/` — regenerate with `../scripts/08_build_web_artifacts.sh`.

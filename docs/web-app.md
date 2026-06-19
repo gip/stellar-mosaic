@@ -21,9 +21,14 @@ A **desk** is its own deployed `settlement` contract + a friendbot-funded sponso
 - Note secrets (`sk`, `rho`) never leave the browser; owner tags, nullifiers, and order leaves are
   derived in-browser via tiny Noir helpers, and order proofs are generated in-browser. The backend
   only relays finished proofs.
-- `shield` moves the user's own tokens, so it is user-signed (Freighter). `submit_order` /
-  `unshield` / `cancel_order` are relayer-submittable (the proof is the spend authority), so the
-  desk sponsor is the sole source/fee payer = fully sponsored.
+- `submit_order` / `unshield` / `cancel_order` are relayer-submittable (the proof is the spend
+  authority), so the desk sponsor is the sole source/fee payer = fully sponsored.
+- `shield` moves the user's own tokens, so it needs the user's authorization — but it is **also
+  fully sponsored** via Soroban auth-entry signing: the frontend builds the tx with the sponsor as
+  source, simulates to get the `Address(user)` auth entry, the user signs **only that entry** in
+  Freighter (`signAuthEntry`, verified by `authorizeEntry`), and the backend adds the sponsor's
+  envelope signature (`stellar tx sign`/`tx send`). The user pays no fee and manages no sequence;
+  the signed entry binds the exact invocation, so the sponsor cannot redirect or replay it.
 
 ## Proof compatibility
 
@@ -49,5 +54,4 @@ the lift + wallet helper circuits (→ `frontend/public/circuits/`).
 
 The backend exposes `/relay/unshield` and `/relay/cancel` (with the unshield/cancel circuits and
 VKs in place), but the frontend does not yet build those proofs — withdraw + cancel are the natural
-next UI additions. Sponsored `shield` via Freighter auth-entry signing (vs. user-paid fee) is also
-a follow-up.
+next UI additions.

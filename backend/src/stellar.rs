@@ -242,6 +242,36 @@ fn parse_range(msg: &str) -> Option<(u64, u64)> {
     }
 }
 
+impl Stellar {
+    /// Add the sponsor's envelope signature to a frontend-built transaction (whose Soroban auth
+    /// entries are already user-signed) and submit it. Used for sponsored `shield`.
+    pub fn sign_and_send(&self, tx_xdr: &str, sponsor_secret: &str) -> AppResult<String> {
+        let signed = self.run(&[
+            "tx".into(),
+            "sign".into(),
+            tx_xdr.into(),
+            "--sign-with-key".into(),
+            sponsor_secret.into(),
+            "--network".into(),
+            self.network.clone(),
+        ])?;
+        let out = self.run(&[
+            "tx".into(),
+            "send".into(),
+            signed.trim().into(),
+            "--network".into(),
+            self.network.clone(),
+        ])?;
+        // `tx send` prints the full envelope JSON; return just status + hash.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+            let hash = v.get("tx_hash").and_then(|s| s.as_str()).unwrap_or("");
+            return Ok(format!("{status} {hash}").trim().to_string());
+        }
+        Ok(out)
+    }
+}
+
 fn is_contract_id(t: &str) -> bool {
     t.len() == 56 && t.starts_with('C') && t.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }

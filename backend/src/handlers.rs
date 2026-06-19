@@ -124,6 +124,30 @@ pub async fn get_note_proof(
     Ok(Json(serde_json::to_value(proof).unwrap()))
 }
 
+// ---- sponsored shield: frontend builds + user-signs the auth entry; sponsor signs envelope ----
+
+#[derive(Deserialize)]
+pub struct ShieldSubmit {
+    /// Frontend-built transaction XDR: source = sponsor, op auth = user-signed entry, unsigned envelope.
+    pub tx_xdr: String,
+}
+
+pub async fn shield_submit(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ShieldSubmit>,
+) -> AppResult<Json<Value>> {
+    let secret = st
+        .db
+        .sponsor_secret(&id)?
+        .ok_or_else(|| AppError::BadRequest("desk has no sponsor key (imported, read-only)".into()))?;
+    let tx_xdr = body.tx_xdr;
+    let out = tokio::task::spawn_blocking(move || st.stellar.sign_and_send(&tx_xdr, &secret))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(json!({ "ok": true, "result": out })))
+}
+
 // ---- fully-sponsored relays (no user signature; the ZK proof is the spend authority) ----
 
 #[derive(Deserialize)]

@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import type { Desk } from '../api'
+import { api, type Desk } from '../api'
 import { randomField, fieldToBytes32 } from '../crypto'
 import { noteTag } from '../noir'
-import { shield } from '../soroban'
+import { buildSponsoredShield } from '../soroban'
 import { addNote } from '../notes'
 
 /**
@@ -36,14 +36,18 @@ export default function ShieldForm({
       const rho = randomField()
       setStatus('Deriving owner tag…')
       const owner_tag = await noteTag(sk, rho)
-      setStatus('Awaiting signature + submission…')
-      const txHash = await shield(
+      setStatus('Authorize in wallet…')
+      const txXdr = await buildSponsoredShield(
         desk.contract_id,
+        desk.sponsor_pubkey,
         userPubkey,
         assetId,
         amount,
         fieldToBytes32(owner_tag),
       )
+      setStatus('Submitting (sponsored)…')
+      const { result } = await api.submitShield(desk.id, txXdr)
+      const txHash = result
       await addNote({
         id: crypto.randomUUID(),
         deskId: desk.id,
@@ -58,7 +62,7 @@ export default function ShieldForm({
         txHash,
         createdAt: Date.now(),
       })
-      setStatus(`Shielded. tx ${txHash.slice(0, 8)}…`)
+      setStatus(`Shielded (sponsored). ${result}`)
       onDone()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
