@@ -18,6 +18,9 @@ soroban-poseidon = { path = "../../vendor/rs-soroban-poseidon" }
 
 [dev-dependencies]
 soroban-sdk = { version = "26.0.1", default-features = false, features = ["testutils", "alloc", "hazmat-crypto"] }
+# Off-chain path server. The cross-check test asserts its reconstructed root + paths match the
+# on-chain tree and the committed proof fixtures (proving wallets can prove against the live root).
+mosaic-indexer = { path = "../../tools/indexer" }
 
 [profile.release]
 opt-level = "z"

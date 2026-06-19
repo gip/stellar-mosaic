@@ -1,14 +1,33 @@
 #!/usr/bin/env bash
-# Regenerate the integration-test proof fixtures from circuits/lift.
+# Regenerate the integration-test proof fixtures from circuits/lift + circuits/unshield.
 #
-# These are real UltraHonk artifacts (one VK + two proofs for two crossing orders) committed so
-# `cargo test` runs the genuine verifier with no Noir/bb toolchain. Re-run this only if the lift
-# circuit or its public-input layout changes. Requires the pinned toolchain (see README):
+# These are real UltraHonk artifacts (one VK + two crossing order proofs + one unshield proof)
+# committed so `cargo test` runs the genuine verifier with no Noir/bb toolchain. Re-run this only if
+# a circuit or its public-input layout changes. Requires the pinned toolchain (see README):
 #   nargo 1.0.0-beta.9, bb v0.87.0 on PATH.
 #
 # Order A: offer 100 of asset 1, want >= 1500 of asset 2   (tags 9001 / 9002)
 # Order B: offer 2000 of asset 2, want >= 50 of asset 1    (tags 9003 / 9004)
 # A and B cross. The two orders use different (sk_o, rho_in) so their nullifiers differ.
+#
+# THE TREE WITNESS IS NO LONGER HAND-BUILT. The `path` / `index_bits` in each Prover.toml are
+# derived by the off-chain path server (tools/indexer, the `witness` bin) from the SAME shield
+# sequence the on-chain tree sees, so the proofs are made against the exact root the contract
+# produces. To (re)derive a witness, replay the shields and ask for the leaf you are proving:
+#
+#   # owner_tag_a / owner_tag_b are the public note tags committed in the fixtures.
+#   OTA=$(xxd -p -c64 owner_tag_a); OTB=$(xxd -p -c64 owner_tag_b)
+#   printf 'shield 1 100 %s\nshield 2 2000 %s\npath 0\npath 1\n' "$OTA" "$OTB" \
+#     | ( cd ../../../../tools/indexer && cargo run -q --bin witness )
+#
+#   # path 0 -> order A's witness (leaf index 0); path 1 -> order B's witness (leaf index 1).
+#   # Copy the printed `root`, `path` and `index_bits` lines into the matching circuits/*/Prover.toml.
+#   # For the unshield note (shield 1 100 owner_tag_u, index 0):
+#   #   OTU=$(xxd -p -c64 owner_tag_u)
+#   #   printf 'shield 1 100 %s\npath 0\n' "$OTU" | ( cd ../../../../tools/indexer && cargo run -q --bin witness )
+#
+# The remaining witness fields (rho_in, sk_o, asset/amount/tags, nullifier_in, order_leaf, recipient)
+# are still chosen per order; the indexer only supplies the membership witness (path/index_bits/root).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 LIFT="$ROOT/circuits/lift"
@@ -30,13 +49,13 @@ prove() { # $1=label  (uses circuits/lift/Prover.toml already set to the order)
   cp target/vk "$OUT/vk"   # same circuit -> same VK for both orders
 }
 
-echo "NOTE: this script assumes circuits/lift/Prover.toml is populated for each order in turn."
-echo "See the order parameters in the header; the committed fixtures were produced this way."
-echo "Regeneration is manual per order because the witness (sk_o, rho_in, path) is chosen by hand."
-echo "Build order A's Prover.toml, run 'prove a'; build order B's, run 'prove b'."
+echo "1. Derive each order's membership witness with the path server (see the header comment),"
+echo "   and paste the printed root/path/index_bits into circuits/lift/Prover.toml for that order."
+echo "2. Set the rest of Prover.toml for the order, then run 'prove a' (order A) / 'prove b' (order B)."
 echo
 echo "UNSHIELD fixtures (unshield_vk / unshield_proof / unshield_public_inputs):"
-echo " - produced from circuits/unshield with bb (same flags)."
+echo " - produced from circuits/unshield with bb (same flags); membership witness derived the same"
+echo "   way via the witness bin (shield the unshield note, ask for its leaf index)."
 echo " - the proof binds recipient = sha256(to.to_xdr()) (top byte zeroed) for the fixed test"
 echo "   address UNSHIELD_TO in tests/integration.rs. To rebind to a different address, print that"
 echo "   address's recipient field with a one-off test (env.crypto().sha256(to.to_xdr()), zero byte"

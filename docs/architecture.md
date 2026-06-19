@@ -105,11 +105,19 @@ require wrapped issuers or bridge integrations before they can be custodied.
   on-chain `compress` is byte-identical to the circuits (host `poseidon2_permutation` with the
   `stellar/rs-soroban-poseidon` BN254 t=4 constants; unit-tested against Noir). Validated end-to-end
   on testnet: shield A + shield B reproduce the exact root the order proofs were made against, then
-  `settle` accepts them with no push_root. The remaining off-chain piece is a **read-only path
-  server**: a client rebuilds membership paths from `shielded`/`settled` events (the tree stores only
-  filled subtrees on-chain, not all leaves). It is not a trust anchor — the on-chain root is.
-- **Path-server client (NEXT):** read-only indexer that derives each note's membership path from
-  events so wallets can generate order/unshield proofs against the current on-chain root.
+  `settle` accepts them with no push_root.
+- **Path-server client (DONE):** `tools/indexer` (crate `mosaic-indexer`) is a read-only off-chain
+  indexer that rebuilds membership paths from `shielded`/`settled` events (the tree stores only
+  filled subtrees on-chain, not all leaves). It is NOT a trust anchor — the on-chain root is. It
+  reuses the contract's exact `compress` (host `poseidon2_permutation` + `soroban-poseidon` BN254
+  t=4 constants, via a local `Env` as a hash engine), so its roots are byte-identical by
+  construction. API: `NoteTree::{ingest_shielded, ingest_settled, root, path, circuit_fold}`; the
+  `witness` bin replays an event log on stdin and prints `Prover.toml` path/index_bits witnesses
+  (this is what makes `tests/fixtures/regen.sh` reproducible and what a wallet calls before proving).
+  Cross-checked in `contracts/settlement/tests/integration.rs`: the indexer's reconstructed root
+  equals the on-chain `root()` AND the root the committed order/unshield proofs were generated
+  against, and every indexer-derived path folds (via the circuit's membership algorithm) back to
+  that root.
 - **Root history is unbounded:** every produced root stays accepted (nullifiers prevent
   double-spend regardless of root recency); a bounded ring is a later refinement.
 - **Partial fills:** `settle` is full-fill (each side receives the other's offered amount). Partial

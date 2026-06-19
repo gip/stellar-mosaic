@@ -17,3 +17,4 @@ target/
 
 # misc
 .DS_Store
+.gstack/

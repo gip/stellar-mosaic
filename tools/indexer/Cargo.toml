@@ -1,0 +1,25 @@
+[package]
+name = "mosaic-indexer"
+version = "0.1.0"
+edition = "2021"
+description = "Off-chain read-only path server for the Stellar Mosaic note tree. Rebuilds membership paths from shield/settle events so wallets can prove against the live on-chain root."
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "witness"
+path = "src/bin/witness.rs"
+
+[dependencies]
+# Same soroban-sdk pin as the settlement contract + verifier workspace, so the host hash
+# functions (and U256/Bytes types) are identical. `testutils` gives us a local Soroban host
+# (`Env::default()`) to use purely as a hashing engine; `hazmat-crypto` exposes
+# poseidon2_permutation. This is an OFF-CHAIN tool, not a contract, so depending on the host for
+# hashing is the deliberate choice that guarantees byte-identical roots with zero second impl.
+soroban-sdk = { version = "26.0.1", features = ["testutils", "hazmat-crypto"] }
+# Stellar's Poseidon2 BN254 t=4 constants — the SAME ones the contract's compress uses.
+soroban-poseidon = { path = "../../vendor/rs-soroban-poseidon" }
+
+[dev-dependencies]
+soroban-sdk = { version = "26.0.1", features = ["testutils", "hazmat-crypto"] }

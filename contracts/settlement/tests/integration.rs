@@ -377,6 +377,89 @@ fn unshield_rejects_missing_vk() {
 }
 
 // ===========================================================================
+// Path server: the off-chain indexer reproduces the on-chain root and serves membership paths
+// that satisfy the circuit, against the SAME root the committed order proofs were made for.
+// ===========================================================================
+
+/// Read the 32-byte big-endian word at field index `w` of a public-input blob.
+fn pi_word(pi: &[u8], w: usize) -> [u8; 32] {
+    pi[w * 32..w * 32 + 32].try_into().unwrap()
+}
+
+#[test]
+fn indexer_reproduces_onchain_root_and_serves_valid_paths() {
+    use mosaic_indexer::{u256_to_word, NoteTree};
+
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let client = SettlementClient::new(&env, &id);
+
+    // Shield the two input notes on the REAL contract -> the on-chain tree advances to R2.
+    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
+    client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
+    client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
+    let onchain_root = client.root().to_array();
+
+    // Feed the SAME two shield events into the off-chain indexer (sharing the test's Env as the
+    // hash engine, so the U256s are comparable and the host hash is identical).
+    let mut tree = NoteTree::new(&env);
+    let ia = tree.ingest_shielded(ASSET_1, AMOUNT_A, OTAG_A.try_into().unwrap());
+    let ib = tree.ingest_shielded(ASSET_2, AMOUNT_B, OTAG_B.try_into().unwrap());
+    assert_eq!((ia, ib), (0, 1), "shields land at leaf indices 0 and 1");
+    let indexer_root = u256_to_word(&tree.root());
+
+    // (1) The indexer's root equals the on-chain root...
+    assert_eq!(
+        indexer_root, onchain_root,
+        "indexer root must equal the on-chain tree root"
+    );
+    // (2) ...and equals the membership root BOTH committed order proofs were generated against
+    //     (public input field [1] = root). This is the whole point: a wallet using the indexer's
+    //     view proves against exactly the root the contract will accept.
+    assert_eq!(pi_word(PI_A, 1), onchain_root, "order A proof root == on-chain root");
+    assert_eq!(pi_word(PI_B, 1), onchain_root, "order B proof root == on-chain root");
+
+    // (3) Every leaf's indexer-derived path folds (with the circuit's membership algorithm) back to
+    //     the root, so a proof built from that witness satisfies the lift circuit's membership
+    //     constraint without having to run bb here.
+    for i in 0..tree.len() {
+        let leaf = tree.leaf(i).unwrap();
+        let p = tree.path(i);
+        assert_eq!(
+            u256_to_word(&tree.circuit_fold(&leaf, &p)),
+            onchain_root,
+            "indexer path for leaf {i} must fold to the on-chain root"
+        );
+    }
+}
+
+#[test]
+fn indexer_reproduces_unshield_root() {
+    use mosaic_indexer::{u256_to_word, NoteTree};
+
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let (_token, _to) = setup_unshield(&env, &id);
+    let onchain_root = SettlementClient::new(&env, &id).root().to_array();
+
+    // The unshield note is a single shield of asset 1 / amount 100 / owner_tag_u at index 0.
+    let mut tree = NoteTree::new(&env);
+    tree.ingest_shielded(ASSET_1, AMOUNT_U, OTAG_U.try_into().unwrap());
+
+    assert_eq!(u256_to_word(&tree.root()), onchain_root, "indexer root == on-chain root");
+    assert_eq!(pi_word(UNSHIELD_PI, 1), onchain_root, "unshield proof root == on-chain root");
+
+    let leaf = tree.leaf(0).unwrap();
+    let p = tree.path(0);
+    assert_eq!(
+        u256_to_word(&tree.circuit_fold(&leaf, &p)),
+        onchain_root,
+        "indexer path for the unshield note must fold to the on-chain root"
+    );
+}
+
+// ===========================================================================
 // Budget sanity (local host metering under-counts vs on-chain; regression guard only).
 // ===========================================================================
 
