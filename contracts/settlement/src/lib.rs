@@ -38,7 +38,7 @@ const LIFT_OP: u32 = 1;
 const UNSHIELD_OP: u32 = 2;
 
 /// Public-input lengths for the order (lift) circuit and the unshield circuit.
-const LIFT_PUBLIC_INPUTS_BYTES: u32 = 10 * 32;
+const LIFT_PUBLIC_INPUTS_BYTES: u32 = 12 * 32;
 const UNSHIELD_PUBLIC_INPUTS_BYTES: u32 = 6 * 32;
 /// Domain separators as 32-byte big-endian field words: order/lift = 1, unshield = 2.
 const LIFT_DOMAIN: [u8; 32] = [
@@ -150,6 +150,8 @@ pub enum Side {
 }
 
 /// One verified side of a trade, derived entirely from a verified order proof's public inputs.
+// The book fields ([8..12]) are read by the Phase 2 order-book entrypoints, added next.
+#[allow(dead_code)]
 struct Order {
     nullifier: BytesN<32>,
     asset_in: u32,
@@ -157,6 +159,12 @@ struct Order {
     asset_out: u32,
     min_out: i128,
     output_owner_tag: BytesN<32>,
+    // Order-book fields (lift public inputs [8..12]). `settle`/`settle_exact` ignore these; the book
+    // (`submit_order`/`cancel_order`) trusts them because the proof bound them into `order_leaf`.
+    cancel_owner_tag: BytesN<32>,
+    expiry: u64,
+    partial_allowed: bool,
+    order_leaf: BytesN<32>,
 }
 
 #[contract]
@@ -563,6 +571,13 @@ fn parse_order(env: &Env, pi: &Bytes) -> Result<Order, Error> {
     if !env.storage().persistent().has(&DataKey::Root(root)) {
         return Err(Error::UnknownRoot);
     }
+    // [10] partial_allowed must be the boolean 0 or 1 (the circuit constrains it, but re-check).
+    let partial_word = read_word(pi, 320);
+    let partial_allowed = match word_to_u32(&partial_word)? {
+        0 => false,
+        1 => true,
+        _ => return Err(Error::BadPublicInputs),
+    };
     Ok(Order {
         nullifier: BytesN::from_array(env, &read_word(pi, 64)),
         asset_in: word_to_u32(&read_word(pi, 96))?,
@@ -570,6 +585,10 @@ fn parse_order(env: &Env, pi: &Bytes) -> Result<Order, Error> {
         asset_out: word_to_u32(&read_word(pi, 160))?,
         min_out: word_to_i128(&read_word(pi, 192))?,
         output_owner_tag: BytesN::from_array(env, &read_word(pi, 224)),
+        cancel_owner_tag: BytesN::from_array(env, &read_word(pi, 256)), // [8]
+        expiry: word_to_u64(&read_word(pi, 288))?,                      // [9]
+        partial_allowed,                                                // [10]
+        order_leaf: BytesN::from_array(env, &read_word(pi, 352)),       // [11]
     })
 }
 
@@ -726,6 +745,20 @@ fn word_to_u32(w: &[u8; 32]) -> Result<u32, Error> {
     Ok(u32::from_be_bytes([w[28], w[29], w[30], w[31]]))
 }
 
+/// Interpret a field-element word as a u64, rejecting anything that does not fit the low 8 bytes.
+fn word_to_u64(w: &[u8; 32]) -> Result<u64, Error> {
+    let mut i = 0;
+    while i < 24 {
+        if w[i] != 0 {
+            return Err(Error::FieldOverflow);
+        }
+        i += 1;
+    }
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&w[24..32]);
+    Ok(u64::from_be_bytes(b))
+}
+
 /// Interpret a field-element word as a non-negative i128, rejecting anything outside [0, 2^127).
 fn word_to_i128(w: &[u8; 32]) -> Result<i128, Error> {
     let mut i = 0;
@@ -757,6 +790,10 @@ mod orders_cross_tests {
             asset_out,
             min_out,
             output_owner_tag: BytesN::from_array(env, &[0u8; 32]),
+            cancel_owner_tag: BytesN::from_array(env, &[0u8; 32]),
+            expiry: 0,
+            partial_allowed: false,
+            order_leaf: BytesN::from_array(env, &[0u8; 32]),
         }
     }
 
