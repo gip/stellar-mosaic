@@ -1,0 +1,149 @@
+/* Minimalist black & white. System font, thin borders, no color except status text. */
+:root {
+  --fg: #111;
+  --bg: #fff;
+  --muted: #777;
+  --line: #ddd;
+  --line-strong: #111;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+}
+a:hover {
+  border-bottom-color: var(--fg);
+}
+
+header.topbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--line-strong);
+}
+header.topbar h1 {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+header.topbar h1 a {
+  border: none;
+}
+
+main {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+h2 {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 6px;
+  margin: 28px 0 12px;
+}
+
+button {
+  font: inherit;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--fg);
+  padding: 6px 14px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  background: var(--fg);
+  color: var(--bg);
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+input,
+select {
+  font: inherit;
+  border: 1px solid var(--line-strong);
+  padding: 6px 8px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+label {
+  display: block;
+  font-size: 13px;
+  color: var(--muted);
+  margin: 8px 0 2px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+th,
+td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+.muted {
+  color: var(--muted);
+}
+.row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.card {
+  border: 1px solid var(--line);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.card h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+.err {
+  color: #b00;
+}
+.ok {
+  color: #060;
+}
+.pill {
+  border: 1px solid var(--line-strong);
+  padding: 1px 8px;
+  font-size: 12px;
+  margin-right: 6px;
+  white-space: nowrap;
+}

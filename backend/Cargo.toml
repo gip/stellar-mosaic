@@ -1,0 +1,22 @@
+[package]
+name = "mosaic-backend"
+version = "0.1.0"
+edition = "2021"
+description = "Web backend for Stellar Mosaic: desk registry + fully-sponsored relayer for the settlement contract."
+
+[[bin]]
+name = "mosaic-backend"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
