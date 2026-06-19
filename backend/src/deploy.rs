@@ -29,12 +29,16 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<Desk> {
     let desk_id = Uuid::new_v4().to_string();
     let key_name = format!("desk-{}", &desk_id[..8]);
 
+    // resolve token addresses ("native" -> XLM SAC)
+    let xlm_sac = st.stellar.xlm_sac()?;
+
+    // Stamp the current latest ledger so later event scans start near this desk's activity.
+    let from_ledger = st.stellar.latest_ledger(&xlm_sac).ok();
+
     // 1. sponsor key
     let (sponsor_pubkey, sponsor_secret) = st.stellar.generate_funded_key(&key_name)?;
     tracing::info!(%sponsor_pubkey, "funded sponsor account");
 
-    // resolve token addresses ("native" -> XLM SAC)
-    let xlm_sac = st.stellar.xlm_sac()?;
     let assets: Vec<Asset> = body
         .assets
         .iter()
@@ -109,7 +113,7 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<Desk> {
         assets,
         pairs,
     };
-    st.db.insert_desk(&desk, Some(&sponsor_secret))?;
+    st.db.insert_desk(&desk, Some(&sponsor_secret), from_ledger)?;
     Ok(desk)
 }
 

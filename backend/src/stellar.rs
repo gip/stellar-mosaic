@@ -148,6 +148,59 @@ impl Stellar {
             .ok_or_else(|| AppError::Stellar(format!("no contract id in deploy output: {out}")))
     }
 
+    /// Fetch one page of contract events as JSONL (one event object per line). Provide either a
+    /// `start_ledger` or a `cursor`. Returns raw stdout.
+    pub fn events_page(
+        &self,
+        contract_id: &str,
+        start_ledger: Option<u64>,
+        cursor: Option<&str>,
+        count: u32,
+    ) -> AppResult<String> {
+        let mut args = vec![
+            "events".into(),
+            "--network".into(),
+            self.network.clone(),
+            "--id".into(),
+            contract_id.into(),
+            "--output".into(),
+            "json".into(),
+            "--count".into(),
+            count.to_string(),
+        ];
+        if let Some(c) = cursor {
+            args.push("--cursor".into());
+            args.push(c.into());
+        } else {
+            args.push("--start-ledger".into());
+            args.push(start_ledger.unwrap_or(1).to_string());
+        }
+        self.run(&args)
+    }
+
+    /// The oldest ledger currently retained by the RPC (parsed from the out-of-range error).
+    pub fn oldest_ledger(&self, contract_id: &str) -> AppResult<u64> {
+        match self.events_page(contract_id, Some(1), None, 1) {
+            Ok(_) => Ok(1),
+            Err(AppError::Stellar(msg)) => parse_range(&msg)
+                .map(|(o, _)| o)
+                .ok_or_else(|| AppError::Stellar(format!("cannot parse ledger range from: {msg}"))),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The latest ledger known to the RPC (parsed from the out-of-range error). Used to stamp a
+    /// desk's `from_ledger` at creation so later event scans start near its activity.
+    pub fn latest_ledger(&self, contract_id: &str) -> AppResult<u64> {
+        match self.events_page(contract_id, Some(1), None, 1) {
+            Ok(_) => Ok(1),
+            Err(AppError::Stellar(msg)) => parse_range(&msg)
+                .map(|(_, l)| l)
+                .ok_or_else(|| AppError::Stellar(format!("cannot parse ledger range from: {msg}"))),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Submit a state-changing contract call signed by `source`. `call_args` is the function name
     /// and its `--flag value` pairs. Returns trimmed stdout (the call's return value, if any).
     pub fn invoke_write(
@@ -171,6 +224,21 @@ impl Stellar {
         ];
         args.extend(call_args.iter().cloned());
         self.run(&args)
+    }
+}
+
+/// Parse `(oldest, latest)` from an RPC error like
+/// "startLedger must be within the ledger range: 3057139 - 3178098", tolerating trailing junk.
+fn parse_range(msg: &str) -> Option<(u64, u64)> {
+    let after = msg.split("ledger range:").nth(1)?;
+    let nums: Vec<u64> = after
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    match nums.as_slice() {
+        [oldest, latest, ..] => Some((*oldest, *latest)),
+        _ => None,
     }
 }
 

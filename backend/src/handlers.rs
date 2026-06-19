@@ -39,7 +39,7 @@ pub async fn import_desk(
         assets: body.assets,
         pairs: body.pairs,
     };
-    st.db.insert_desk(&desk, None)?;
+    st.db.insert_desk(&desk, None, None)?;
     Ok(Json(desk))
 }
 
@@ -86,6 +86,169 @@ pub async fn get_book(
         "side": q.side,
         "orders": book,
     })))
+}
+
+// ---- note discovery + membership paths (indexer) ----
+
+pub async fn get_notes(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let desk = st.db.get_desk(&id)?;
+    let from = st.db.from_ledger(&id)?;
+    let notes = tokio::task::spawn_blocking(move || {
+        crate::indexer::notes(&st.stellar, &desk.contract_id, from)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(json!({ "notes": notes })))
+}
+
+#[derive(Deserialize)]
+pub struct ProofQuery {
+    pub owner_tag: String,
+}
+
+pub async fn get_note_proof(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<ProofQuery>,
+) -> AppResult<Json<Value>> {
+    let desk = st.db.get_desk(&id)?;
+    let from = st.db.from_ledger(&id)?;
+    let proof = tokio::task::spawn_blocking(move || {
+        crate::indexer::note_proof(&st.stellar, &desk.contract_id, from, &q.owner_tag)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(serde_json::to_value(proof).unwrap()))
+}
+
+// ---- fully-sponsored relays (no user signature; the ZK proof is the spend authority) ----
+
+#[derive(Deserialize)]
+pub struct RelayOrder {
+    pub proof_b64: String,
+    pub public_inputs_b64: String,
+}
+
+pub async fn relay_order(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RelayOrder>,
+) -> AppResult<Json<Value>> {
+    relay(st, id, body.proof_b64, body.public_inputs_b64, |proof, pi| {
+        vec![
+            "submit_order".into(),
+            "--proof-file-path".into(),
+            proof,
+            "--public_inputs-file-path".into(),
+            pi,
+        ]
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct RelayUnshield {
+    pub to: String,
+    pub proof_b64: String,
+    pub public_inputs_b64: String,
+}
+
+pub async fn relay_unshield(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RelayUnshield>,
+) -> AppResult<Json<Value>> {
+    let to = body.to;
+    relay(st, id, body.proof_b64, body.public_inputs_b64, move |proof, pi| {
+        vec![
+            "unshield".into(),
+            "--to".into(),
+            to,
+            "--proof_bytes-file-path".into(),
+            proof,
+            "--public_inputs-file-path".into(),
+            pi,
+        ]
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct RelayCancel {
+    pub pair_id: u32,
+    pub side: u32,
+    pub proof_b64: String,
+    pub public_inputs_b64: String,
+}
+
+pub async fn relay_cancel(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RelayCancel>,
+) -> AppResult<Json<Value>> {
+    let (pair, side) = (body.pair_id, body.side);
+    relay(st, id, body.proof_b64, body.public_inputs_b64, move |proof, pi| {
+        vec![
+            "cancel_order".into(),
+            "--pair_id".into(),
+            pair.to_string(),
+            "--side".into(),
+            side.to_string(),
+            "--proof-file-path".into(),
+            proof,
+            "--public_inputs-file-path".into(),
+            pi,
+        ]
+    })
+    .await
+}
+
+/// Shared relay: decode proof + public inputs, write temp files, submit the call signed by the
+/// desk's sponsor (fully sponsored), and clean up.
+async fn relay(
+    st: Arc<AppState>,
+    desk_id: String,
+    proof_b64: String,
+    pi_b64: String,
+    build_args: impl FnOnce(String, String) -> Vec<String> + Send + 'static,
+) -> AppResult<Json<Value>> {
+    use base64::Engine;
+    let secret = st
+        .db
+        .sponsor_secret(&desk_id)?
+        .ok_or_else(|| AppError::BadRequest("desk has no sponsor key (imported, read-only)".into()))?;
+    let desk = st.db.get_desk(&desk_id)?;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let proof = b64
+        .decode(proof_b64.trim())
+        .map_err(|e| AppError::BadRequest(format!("proof_b64: {e}")))?;
+    let pi = b64
+        .decode(pi_b64.trim())
+        .map_err(|e| AppError::BadRequest(format!("public_inputs_b64: {e}")))?;
+
+    let out = tokio::task::spawn_blocking(move || -> AppResult<String> {
+        let dir = std::env::temp_dir();
+        let stem = Uuid::new_v4().to_string();
+        let proof_path = dir.join(format!("{stem}.proof"));
+        let pi_path = dir.join(format!("{stem}.pi"));
+        std::fs::write(&proof_path, &proof).map_err(|e| AppError::Other(e.into()))?;
+        std::fs::write(&pi_path, &pi).map_err(|e| AppError::Other(e.into()))?;
+        let args = build_args(
+            proof_path.to_string_lossy().into(),
+            pi_path.to_string_lossy().into(),
+        );
+        let res = st.stellar.invoke_write(&desk.contract_id, &secret, &args);
+        let _ = std::fs::remove_file(&proof_path);
+        let _ = std::fs::remove_file(&pi_path);
+        res
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+
+    Ok(Json(json!({ "ok": true, "result": out })))
 }
 
 /// Source account for read-only simulations: the desk's sponsor, falling back to the configured

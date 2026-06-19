@@ -22,18 +22,25 @@ impl Db {
     }
 
     /// Insert a desk and its assets/pairs. `sponsor_secret` is stored only for desks we deploy.
-    pub fn insert_desk(&self, desk: &Desk, sponsor_secret: Option<&str>) -> AppResult<()> {
+    /// `from_ledger` is the ledger near which the desk's events begin (for indexer scans).
+    pub fn insert_desk(
+        &self,
+        desk: &Desk,
+        sponsor_secret: Option<&str>,
+        from_ledger: Option<u64>,
+    ) -> AppResult<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(anyhow_err)?;
         tx.execute(
-            "INSERT INTO desks (id, name, contract_id, sponsor_pubkey, sponsor_secret)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO desks (id, name, contract_id, sponsor_pubkey, sponsor_secret, from_ledger)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 desk.id,
                 desk.name,
                 desk.contract_id,
                 desk.sponsor_pubkey,
-                sponsor_secret
+                sponsor_secret,
+                from_ledger,
             ],
         )
         .map_err(anyhow_err)?;
@@ -74,6 +81,23 @@ impl Db {
     pub fn get_desk(&self, id: &str) -> AppResult<Desk> {
         let conn = self.conn.lock().unwrap();
         load_desk(&conn, id)
+    }
+
+    /// Returns the stored `from_ledger` for a desk (None for imported desks).
+    pub fn from_ledger(&self, id: &str) -> AppResult<Option<u64>> {
+        let conn = self.conn.lock().unwrap();
+        let res = conn.query_row(
+            "SELECT from_ledger FROM desks WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, Option<i64>>(0),
+        );
+        match res {
+            Ok(v) => Ok(v.map(|x| x as u64)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                Err(crate::error::AppError::NotFound(format!("desk {id}")))
+            }
+            Err(e) => Err(anyhow_err(e).into()),
+        }
     }
 
     /// Returns the sponsor secret (S...) for a desk, if we hold it (deployed desks).
@@ -166,7 +190,8 @@ CREATE TABLE IF NOT EXISTS desks (
     name            TEXT NOT NULL,
     contract_id     TEXT NOT NULL,
     sponsor_pubkey  TEXT NOT NULL,
-    sponsor_secret  TEXT
+    sponsor_secret  TEXT,
+    from_ledger     INTEGER
 );
 CREATE TABLE IF NOT EXISTS assets (
     desk_id   TEXT NOT NULL REFERENCES desks(id),

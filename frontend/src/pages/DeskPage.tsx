@@ -4,6 +4,7 @@ import { api, type Desk } from '../api'
 import { useWallet } from '../WalletContext'
 import BookView from '../components/BookView'
 import ShieldForm from '../components/ShieldForm'
+import OrderForm from '../components/OrderForm'
 import { notesForDesk, type Note } from '../notes'
 
 export default function DeskPage() {
@@ -81,6 +82,13 @@ export default function DeskPage() {
         <ShieldForm desk={desk} userPubkey={address} onDone={reloadNotes} />
       ) : (
         <p className="muted">Connect your wallet to shield assets.</p>
+      )}
+
+      <h2>Place limit order</h2>
+      {address ? (
+        <OrderForm desk={desk} notes={notes} onDone={reloadNotes} />
+      ) : (
+        <p className="muted">Connect your wallet to place orders.</p>
       )}
 
       <h2>Address book — my notes</h2>

@@ -31,3 +31,42 @@ export async function noteTag(sk: string, rho: string): Promise<string> {
   const { returnValue } = await noir.execute({ sk, rho })
   return asField(returnValue)
 }
+
+export interface OrderTerms {
+  nullifier_in: string
+  output_owner_tag: string
+  cancel_owner_tag: string
+  order_leaf: string
+}
+
+/** Derive the public fields a lift proof binds (all 0x + 64 hex). */
+export async function orderTerms(input: {
+  sk: string
+  rho_in: string
+  rho_out: string
+  rho_ord: string
+  asset_in: number
+  amount_in: string
+  asset_out: number
+  min_out: string
+  expiry: number
+  partial_allowed: number
+}): Promise<OrderTerms> {
+  const noir = await load('order_terms')
+  const { returnValue } = await noir.execute({
+    sk: input.sk,
+    rho_in: input.rho_in,
+    rho_out: input.rho_out,
+    rho_ord: input.rho_ord,
+    asset_in: String(input.asset_in),
+    amount_in: input.amount_in,
+    asset_out: String(input.asset_out),
+    min_out: input.min_out,
+    expiry: String(input.expiry),
+    partial_allowed: String(input.partial_allowed),
+  })
+  const [nullifier_in, output_owner_tag, cancel_owner_tag, order_leaf] = (
+    returnValue as string[]
+  ).map(asField)
+  return { nullifier_in, output_owner_tag, cancel_owner_tag, order_leaf }
+}

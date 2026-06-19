@@ -62,4 +62,18 @@ export const api = {
     assets: { asset_id: number; symbol: string; token: string; decimals: number }[]
     pairs: { base_asset: number; quote_asset: number }[]
   }) => req<Desk>('/desks', { method: 'POST', body: JSON.stringify(body) }),
+  getNoteProof: (id: string, ownerTag: string) =>
+    req<NoteProof>(`/desks/${id}/note-proof?owner_tag=${ownerTag}`),
+  relayOrder: (id: string, proof_b64: string, public_inputs_b64: string) =>
+    req<{ ok: boolean; result: string }>(`/desks/${id}/relay/order`, {
+      method: 'POST',
+      body: JSON.stringify({ proof_b64, public_inputs_b64 }),
+    }),
+}
+
+export interface NoteProof {
+  leaf_index: number
+  root: string
+  siblings: string[]
+  index_bits: number[]
 }
