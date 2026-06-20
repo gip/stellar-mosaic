@@ -54,6 +54,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/desks/:id/note-proof", get(handlers::get_note_proof))
         .route("/desks/:id/shield/submit", post(handlers::shield_submit))
         .route("/desks/:id/relay/order", post(handlers::relay_order))
+        .route("/desks/:id/relay/join", post(handlers::relay_join))
         .route("/desks/:id/relay/unshield", post(handlers::relay_unshield))
         .route("/desks/:id/relay/cancel", post(handlers::relay_cancel))
         .layer(TraceLayer::new_for_http())

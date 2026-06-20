@@ -5,13 +5,28 @@ import { Noir, type CompiledCircuit } from '@noir-lang/noir_js'
 import { UltraHonkBackend } from '@aztec/bb.js'
 import { toField32 } from './crypto'
 
-let liftCircuit: CompiledCircuit | null = null
-async function lift(): Promise<CompiledCircuit> {
-  if (!liftCircuit) {
-    const res = await fetch('/circuits/lift.json')
-    liftCircuit = (await res.json()) as CompiledCircuit
+const circuits = new Map<string, Promise<CompiledCircuit>>()
+async function circuit(name: string): Promise<CompiledCircuit> {
+  let p = circuits.get(name)
+  if (!p) {
+    p = (async () => {
+      const res = await fetch(`/circuits/${name}.json`)
+      if (!res.ok) throw new Error(`failed to load circuit ${name}: ${res.status}`)
+      return (await res.json()) as CompiledCircuit
+    })()
+    circuits.set(name, p)
   }
-  return liftCircuit
+  return p
+}
+
+/** Pack noir_js public-input field strings as the contract's `public_inputs`: 32-byte BE each. */
+function packPublicInputs(publicInputs: string[]): Uint8Array {
+  const pi = new Uint8Array(publicInputs.length * 32)
+  publicInputs.forEach((h, i) => {
+    const hex = toField32(h).slice(2)
+    for (let j = 0; j < 32; j++) pi[i * 32 + j] = parseInt(hex.slice(j * 2, j * 2 + 2), 16)
+  })
+  return pi
 }
 
 export interface LiftInputs {
@@ -41,8 +56,8 @@ export interface ProofBundle {
 
 /** Execute the lift witness and produce a contract-ready proof + public-inputs blob. */
 export async function proveLift(input: LiftInputs): Promise<ProofBundle> {
-  const circuit = await lift()
-  const noir = new Noir(circuit)
+  const compiled = await circuit('lift')
+  const noir = new Noir(compiled)
   const { witness } = await noir.execute({
     rho_in: input.rho_in,
     sk_o: input.sk_o,
@@ -62,17 +77,96 @@ export async function proveLift(input: LiftInputs): Promise<ProofBundle> {
     order_leaf: input.order_leaf,
   })
 
-  const backend = new UltraHonkBackend(circuit.bytecode)
+  const backend = new UltraHonkBackend(compiled.bytecode)
   const { proof, publicInputs } = await backend.generateProof(witness, { keccak: true })
+  return { proof, publicInputs: packPublicInputs(publicInputs) }
+}
 
-  // Concatenate the public inputs as 32-byte big-endian fields (the contract's `public_inputs`).
-  const pi = new Uint8Array(publicInputs.length * 32)
-  publicInputs.forEach((h, i) => {
-    const hex = toField32(h).slice(2)
-    for (let j = 0; j < 32; j++) pi[i * 32 + j] = parseInt(hex.slice(j * 2, j * 2 + 2), 16)
+export interface JoinInputs {
+  // private witness — note 1
+  sk_1: string
+  rho_1: string
+  amount_1: string
+  path_1: string[] // 32 siblings (0x hex)
+  index_bits_1: number[] // 32 bits
+  // private witness — note 2
+  sk_2: string
+  rho_2: string
+  amount_2: string
+  path_2: string[]
+  index_bits_2: number[]
+  // public inputs (domain is fixed to JOIN_DOMAIN=4 inside)
+  root: string
+  nullifier_1: string
+  nullifier_2: string
+  asset: number
+  out_tag_1: string
+  out_amount_1: string
+  out_tag_2: string
+  out_amount_2: string
+}
+
+/** Prove the join circuit in-browser: consolidate two same-asset notes into two fresh notes
+ * (target + change). Public inputs (9 fields): domain, root, nullifier_1, nullifier_2, asset,
+ * out_tag_1, out_amount_1, out_tag_2, out_amount_2 — order matches the contract's `join`. */
+export async function proveJoin(input: JoinInputs): Promise<ProofBundle> {
+  const compiled = await circuit('join')
+  const noir = new Noir(compiled)
+  const { witness } = await noir.execute({
+    sk_1: input.sk_1,
+    rho_1: input.rho_1,
+    amount_1: input.amount_1,
+    path_1: input.path_1,
+    index_bits_1: input.index_bits_1.map(String),
+    sk_2: input.sk_2,
+    rho_2: input.rho_2,
+    amount_2: input.amount_2,
+    path_2: input.path_2,
+    index_bits_2: input.index_bits_2.map(String),
+    domain: '4',
+    root: input.root,
+    nullifier_1: input.nullifier_1,
+    nullifier_2: input.nullifier_2,
+    asset: String(input.asset),
+    out_tag_1: input.out_tag_1,
+    out_amount_1: input.out_amount_1,
+    out_tag_2: input.out_tag_2,
+    out_amount_2: input.out_amount_2,
   })
 
-  return { proof, publicInputs: pi }
+  const backend = new UltraHonkBackend(compiled.bytecode)
+  const { proof, publicInputs } = await backend.generateProof(witness, { keccak: true })
+  return { proof, publicInputs: packPublicInputs(publicInputs) }
+}
+
+export interface CancelInputs {
+  // private witness
+  sk_o: string
+  rho_ord: string
+  // public inputs (domain is fixed to CANCEL_DOMAIN=3 inside)
+  order_leaf: string
+  cancel_owner_tag: string
+  return_owner_tag: string
+}
+
+/** Prove the cancel circuit in-browser: proves authority over a resting order's cancel tag and
+ * binds the order + return destination. Public inputs (4 fields): domain, order_leaf,
+ * cancel_owner_tag, return_owner_tag — order matches the contract's cancel_order. */
+export async function proveCancel(input: CancelInputs): Promise<ProofBundle> {
+  const compiled = await circuit('cancel')
+  const noir = new Noir(compiled)
+  const { witness } = await noir.execute({
+    sk_o: input.sk_o,
+    rho_ord: input.rho_ord,
+    domain: '3',
+    order_leaf: input.order_leaf,
+    cancel_owner_tag: input.cancel_owner_tag,
+    return_owner_tag: input.return_owner_tag,
+  })
+
+  const backend = new UltraHonkBackend(compiled.bytecode)
+  const { proof, publicInputs } = await backend.generateProof(witness, { keccak: true })
+  return { proof, publicInputs: packPublicInputs(publicInputs) }
 }
 
 /** Base64-encode bytes for JSON transport to the relay. */

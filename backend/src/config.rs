@@ -58,6 +58,9 @@ impl Config {
     pub fn cancel_vk(&self) -> PathBuf {
         self.vks_dir.join("cancel_vk")
     }
+    pub fn join_vk(&self) -> PathBuf {
+        self.vks_dir.join("join_vk")
+    }
 }
 
 fn env(key: &str, default: &str) -> String {

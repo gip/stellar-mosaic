@@ -89,15 +89,50 @@ impl Stellar {
 
     /// The Stellar Asset Contract address for native XLM on this network.
     pub fn xlm_sac(&self) -> AppResult<String> {
+        self.asset_sac("native")
+    }
+
+    /// The Stellar Asset Contract address for an asset descriptor. `asset` is either `native` or a
+    /// classic asset `CODE:ISSUER` (e.g. `USDC:GBBD...`). This only *derives* the deterministic
+    /// contract id; it does not check whether the SAC is deployed (see `ensure_asset_sac`).
+    pub fn asset_sac(&self, asset: &str) -> AppResult<String> {
         self.run(&[
             "contract".into(),
             "id".into(),
             "asset".into(),
             "--asset".into(),
-            "native".into(),
+            asset.into(),
             "--network".into(),
             self.network.clone(),
         ])
+    }
+
+    /// Derive the SAC contract id for a classic asset `CODE:ISSUER` and ensure it is deployed
+    /// on-chain (idempotent — a "contract already exists" error is treated as success). Returns
+    /// the SAC contract id. Needed because a non-native asset's SAC may not be wrapped yet, in
+    /// which case the settlement contract's `shield`/`transfer` call would trap.
+    pub fn ensure_asset_sac(&self, asset: &str, source: &str) -> AppResult<String> {
+        let id = self.asset_sac(asset)?;
+        match self.run(&[
+            "contract".into(),
+            "asset".into(),
+            "deploy".into(),
+            "--asset".into(),
+            asset.into(),
+            "--source-account".into(),
+            source.into(),
+            "--network".into(),
+            self.network.clone(),
+        ]) {
+            Ok(_) => {}
+            // Already wrapped on a previous run / by someone else — fine, the id is still valid.
+            Err(AppError::Stellar(msg))
+                if msg.contains("already been used")
+                    || msg.contains("already exists")
+                    || msg.contains("ExistingValue") => {}
+            Err(e) => return Err(e),
+        }
+        Ok(id)
     }
 
     /// Generate a new identity in the keystore and fund it via friendbot.

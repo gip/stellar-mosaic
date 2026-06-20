@@ -4,6 +4,7 @@ import { randomField, fieldToBytes32 } from '../crypto'
 import { noteTag } from '../noir'
 import { buildSponsoredShield } from '../soroban'
 import { addNote } from '../notes'
+import { toRaw } from '../amount'
 
 /**
  * Shield a supported asset into the desk's custody. Generates fresh note secrets in-browser,
@@ -20,7 +21,7 @@ export default function ShieldForm({
   onDone: () => void
 }) {
   const [assetId, setAssetId] = useState(desk.assets[0]?.asset_id ?? 1)
-  const [amount, setAmount] = useState('100')
+  const [amount, setAmount] = useState('10')
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -32,6 +33,7 @@ export default function ShieldForm({
     setStatus(null)
     try {
       const asset = desk.assets.find((a) => a.asset_id === assetId)!
+      const rawAmount = toRaw(amount, asset.decimals)
       const sk = randomField()
       const rho = randomField()
       setStatus('Deriving owner tag…')
@@ -42,7 +44,7 @@ export default function ShieldForm({
         desk.sponsor_pubkey,
         userPubkey,
         assetId,
-        amount,
+        rawAmount,
         fieldToBytes32(owner_tag),
       )
       setStatus('Submitting (sponsored)…')
@@ -54,7 +56,7 @@ export default function ShieldForm({
         role: 'asset',
         asset_id: assetId,
         symbol: asset.symbol,
-        amount,
+        amount: rawAmount,
         sk,
         rho,
         owner_tag,
@@ -85,8 +87,8 @@ export default function ShieldForm({
         </select>
       </div>
       <div>
-        <label>Amount (raw units)</label>
-        <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="numeric" />
+        <label>Amount ({desk.assets.find((a) => a.asset_id === assetId)?.symbol ?? ''})</label>
+        <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
       </div>
       <button type="submit" disabled={busy}>
         {busy ? 'Shielding…' : 'Shield'}

@@ -5,6 +5,19 @@ import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 export type NoteRole = 'asset' | 'order-output' | 'order-cancel'
 export type NoteStatus = 'pending' | 'confirmed' | 'spent'
 
+/** Secrets + identifiers an order's maker needs to later prove cancel authority and reclaim the
+ * locked funds. Carried on the order-output (proceeds) note created when the order is placed. */
+export interface OrderCancelInfo {
+  rho_ord: string // cancel randomness (cancel_owner_tag = compress(compress(sk,0), rho_ord))
+  order_leaf: string // identifies the resting order on-chain
+  cancel_owner_tag: string // cancel-authority tag stored in the book entry
+  pairId: number
+  side: number // SELL=1 / BUY=0 (matches the submit side)
+  asset_in: number // locked/offered asset — the refund is minted in this asset
+  symbol_in: string
+  amount_in: string // principal offered; the refund note's initial amount
+}
+
 export interface Note {
   id: string
   deskId: string
@@ -19,6 +32,8 @@ export interface Note {
   leaf_index?: number
   txHash?: string
   createdAt: number
+  cancel?: OrderCancelInfo // present on order-output notes for a still-cancellable resting order
+  cancelledAt?: number // set once the order has been cancelled
 }
 
 interface MosaicDB extends DBSchema {
@@ -70,6 +85,7 @@ export async function reconcile(
   const local = await notesForDesk(deskId)
   let changed = false
   for (const n of local) {
+    if (n.cancelledAt) continue // cancelled order: no fill will arrive, don't promote it
     const c = byTag.get(n.owner_tag.toLowerCase())
     if (!c) continue
     const patch: Partial<Note> = {}

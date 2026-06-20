@@ -5,7 +5,10 @@ import { useWallet } from '../WalletContext'
 import BookView from '../components/BookView'
 import ShieldForm from '../components/ShieldForm'
 import OrderForm from '../components/OrderForm'
+import ConsolidateForm from '../components/ConsolidateForm'
+import CancelOrderButton from '../components/CancelOrderButton'
 import { notesForDesk, reconcile, type Note } from '../notes'
+import { formatAmount } from '../amount'
 
 export default function DeskPage() {
   const { deskId } = useParams()
@@ -66,6 +69,7 @@ export default function DeskPage() {
   if (!desk) return <p className="muted">Loading…</p>
 
   const sym = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
+  const dec = (id: number) => desk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
 
   return (
     <>
@@ -104,6 +108,13 @@ export default function DeskPage() {
         <p className="muted">Connect your wallet to shield assets.</p>
       )}
 
+      <h2>Consolidate notes</h2>
+      {address ? (
+        <ConsolidateForm desk={desk} notes={notes} onDone={reloadNotes} />
+      ) : (
+        <p className="muted">Connect your wallet to consolidate notes.</p>
+      )}
+
       <h2>Place limit order</h2>
       {address ? (
         <OrderForm desk={desk} notes={notes} onDone={reloadNotes} />
@@ -112,9 +123,9 @@ export default function DeskPage() {
       )}
 
       <h2>Address book — my notes</h2>
-      {balances(notes).length > 0 && (
+      {balances(notes, dec).length > 0 && (
         <p>
-          {balances(notes).map(([s, amt]) => (
+          {balances(notes, dec).map(([s, amt]) => (
             <span className="pill" key={s}>
               {s} {amt}
             </span>
@@ -131,15 +142,23 @@ export default function DeskPage() {
               <th>Amount</th>
               <th>Owner tag</th>
               <th>Status</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {notes.map((n) => (
               <tr key={n.id}>
                 <td>{n.symbol}</td>
-                <td>{n.amount}</td>
+                <td>{formatAmount(n.amount, dec(n.asset_id))}</td>
                 <td className="mono">{n.owner_tag.slice(0, 14)}…</td>
                 <td className={n.status === 'spent' ? 'muted' : 'ok'}>{n.status}</td>
+                <td>
+                  {n.cancelledAt ? (
+                    <span className="muted">cancelled</span>
+                  ) : (
+                    n.cancel && <CancelOrderButton desk={desk} note={n} onDone={reloadNotes} />
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -154,8 +173,22 @@ export default function DeskPage() {
             {sym(p.base_asset)}/{sym(p.quote_asset)} <span className="muted">· pair {p.pair_id}</span>
           </h3>
           <div className="row">
-            <BookView deskId={desk.id} pairId={p.pair_id} side={1} label="Asks (sell base)" />
-            <BookView deskId={desk.id} pairId={p.pair_id} side={0} label="Bids (buy base)" />
+            <BookView
+              deskId={desk.id}
+              pairId={p.pair_id}
+              side={1}
+              label="Asks (sell base)"
+              inDecimals={dec(p.base_asset)}
+              outDecimals={dec(p.quote_asset)}
+            />
+            <BookView
+              deskId={desk.id}
+              pairId={p.pair_id}
+              side={0}
+              label="Bids (buy base)"
+              inDecimals={dec(p.quote_asset)}
+              outDecimals={dec(p.base_asset)}
+            />
           </div>
         </div>
       ))}
@@ -163,12 +196,15 @@ export default function DeskPage() {
   )
 }
 
-/** Spendable shielded balance per asset symbol, summed from confirmed (unspent) notes. */
-function balances(notes: Note[]): [string, string][] {
-  const m = new Map<string, bigint>()
+/** Spendable shielded balance per asset, summed from confirmed (unspent) notes and formatted
+ * to human decimals. `decimals` resolves an asset_id to its decimal places. */
+function balances(notes: Note[], decimals: (id: number) => number): [string, string][] {
+  const m = new Map<number, { symbol: string; sum: bigint }>()
   for (const n of notes) {
     if (n.status === 'spent') continue
-    m.set(n.symbol, (m.get(n.symbol) ?? 0n) + BigInt(n.amount))
+    const e = m.get(n.asset_id) ?? { symbol: n.symbol, sum: 0n }
+    e.sum += BigInt(n.amount)
+    m.set(n.asset_id, e)
   }
-  return [...m.entries()].map(([s, v]) => [s, v.toString()])
+  return [...m.entries()].map(([id, { symbol, sum }]) => [symbol, formatAmount(sum, decimals(id))])
 }

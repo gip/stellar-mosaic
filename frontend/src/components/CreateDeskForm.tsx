@@ -3,7 +3,7 @@ import { api } from '../api'
 
 const ASSETS_TEMPLATE = `[
   { "asset_id": 1, "symbol": "XLM",  "token": "native", "decimals": 7 },
-  { "asset_id": 2, "symbol": "USDC", "token": "native", "decimals": 7 }
+  { "asset_id": 2, "symbol": "USDC", "token": "USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5", "decimals": 7 }
 ]`
 const PAIRS_TEMPLATE = `[
   { "base_asset": 1, "quote_asset": 2 }
@@ -40,7 +40,7 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
     <form onSubmit={submit} style={{ maxWidth: 560 }}>
       <label>Name</label>
       <input value={name} onChange={(e) => setName(e.target.value)} required style={{ width: '100%' }} />
-      <label>Assets (JSON) — token "native" = XLM SAC</label>
+      <label>Assets (JSON) — token: "native" = XLM SAC, "CODE:ISSUER" = classic asset (SAC auto-derived + deployed), or a C... SAC id</label>
       <textarea
         className="mono"
         value={assets}

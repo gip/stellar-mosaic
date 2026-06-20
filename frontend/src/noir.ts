@@ -70,3 +70,37 @@ export async function orderTerms(input: {
   ).map(asField)
   return { nullifier_in, output_owner_tag, cancel_owner_tag, order_leaf }
 }
+
+export interface JoinTerms {
+  nullifier_1: string
+  nullifier_2: string
+  out_tag_1: string
+  out_tag_2: string
+}
+
+/** Derive the public fields a join proof binds: the two input nullifiers and the two output
+ * destination tags (all 0x + 64 hex). Each input/output note has its own secret (per-note keys). */
+export async function joinTerms(input: {
+  sk_1: string
+  rho_1: string
+  sk_2: string
+  rho_2: string
+  sk_out1: string
+  rho_out1: string
+  sk_out2: string
+  rho_out2: string
+}): Promise<JoinTerms> {
+  const noir = await load('join_terms')
+  const { returnValue } = await noir.execute({
+    sk_1: input.sk_1,
+    rho_1: input.rho_1,
+    sk_2: input.sk_2,
+    rho_2: input.rho_2,
+    sk_out1: input.sk_out1,
+    rho_out1: input.rho_out1,
+    sk_out2: input.sk_out2,
+    rho_out2: input.rho_out2,
+  })
+  const [nullifier_1, nullifier_2, out_tag_1, out_tag_2] = (returnValue as string[]).map(asField)
+  return { nullifier_1, nullifier_2, out_tag_1, out_tag_2 }
+}

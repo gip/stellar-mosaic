@@ -5,6 +5,7 @@ import { randomField } from '../crypto'
 import { orderTerms } from '../noir'
 import { proveLift, b64 } from '../prove'
 import { addNote, updateNote, type Note } from '../notes'
+import { toRaw, formatAmount } from '../amount'
 
 type Side = 'SELL' | 'BUY'
 
@@ -25,7 +26,7 @@ export default function OrderForm({
   const [pairId, setPairId] = useState(desk.pairs[0]?.pair_id ?? 0)
   const [side, setSide] = useState<Side>('SELL')
   const [noteId, setNoteId] = useState('')
-  const [minOut, setMinOut] = useState('1000')
+  const [minOut, setMinOut] = useState('1')
   const [partial, setPartial] = useState(true)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
@@ -36,6 +37,7 @@ export default function OrderForm({
   const assetIn = pair ? (side === 'SELL' ? pair.base_asset : pair.quote_asset) : 0
   const assetOut = pair ? (side === 'SELL' ? pair.quote_asset : pair.base_asset) : 0
   const sym = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
+  const dec = (id: number) => desk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
 
   // Spendable notes whose asset matches what this order offers (full-consumption).
   const eligible = useMemo(
@@ -53,6 +55,7 @@ export default function OrderForm({
     setBusy(true)
     setError(null)
     try {
+      const rawMinOut = toRaw(minOut, dec(assetOut))
       const expiry = Math.floor(Date.now() / 1000) + 7 * 86400
       const rho_out = randomField()
       const rho_ord = randomField()
@@ -65,7 +68,7 @@ export default function OrderForm({
         asset_in: assetIn,
         amount_in: note.amount,
         asset_out: assetOut,
-        min_out: minOut,
+        min_out: rawMinOut,
         expiry,
         partial_allowed: partial ? 1 : 0,
       })
@@ -82,7 +85,7 @@ export default function OrderForm({
         asset_in: assetIn,
         amount_in: note.amount,
         asset_out: assetOut,
-        min_out: minOut,
+        min_out: rawMinOut,
         output_owner_tag: terms.output_owner_tag,
         cancel_owner_tag: terms.cancel_owner_tag,
         expiry,
@@ -100,12 +103,23 @@ export default function OrderForm({
         role: 'order-output',
         asset_id: assetOut,
         symbol: sym(assetOut),
-        amount: minOut,
+        amount: rawMinOut,
         sk: note.sk,
         rho: rho_out,
         owner_tag: terms.output_owner_tag,
         status: 'pending',
         createdAt: Date.now(),
+        // Everything needed to later prove a cancel and reclaim the locked asset_in funds.
+        cancel: {
+          rho_ord,
+          order_leaf: terms.order_leaf,
+          cancel_owner_tag: terms.cancel_owner_tag,
+          pairId,
+          side: side === 'SELL' ? 1 : 0,
+          asset_in: assetIn,
+          symbol_in: sym(assetIn),
+          amount_in: note.amount,
+        },
       })
       setStatus('Order submitted.')
       onDone()
@@ -142,14 +156,14 @@ export default function OrderForm({
           {eligible.length === 0 && <option value="">none</option>}
           {eligible.map((n) => (
             <option key={n.id} value={n.id}>
-              {n.amount} {n.symbol} · {n.owner_tag.slice(0, 10)}…
+              {formatAmount(n.amount, dec(n.asset_id))} {n.symbol} · {n.owner_tag.slice(0, 10)}…
             </option>
           ))}
         </select>
       </div>
       <div>
         <label>Min out ({sym(assetOut)})</label>
-        <input value={minOut} onChange={(e) => setMinOut(e.target.value)} inputMode="numeric" />
+        <input value={minOut} onChange={(e) => setMinOut(e.target.value)} inputMode="decimal" />
       </div>
       <div>
         <label>

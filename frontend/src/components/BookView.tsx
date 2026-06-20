@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { formatAmount } from '../amount'
 
 interface OrderEntry {
   amount_in: string | number
@@ -15,11 +16,17 @@ export default function BookView({
   pairId,
   side,
   label,
+  inDecimals,
+  outDecimals,
 }: {
   deskId: string
   pairId: number
   side: number
   label: string
+  /** Decimals of the asset offered (amount_in / remaining_in). */
+  inDecimals: number
+  /** Decimals of the asset requested (min_out). */
+  outDecimals: number
 }) {
   const [orders, setOrders] = useState<OrderEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -64,9 +71,9 @@ export default function BookView({
           <tbody>
             {orders.map((o, i) => (
               <tr key={o.order_leaf ?? i}>
-                <td>{String(o.amount_in)}</td>
-                <td>{String(o.min_out)}</td>
-                <td>{String(o.remaining_in)}</td>
+                <td>{formatAmount(BigInt(o.amount_in), inDecimals)}</td>
+                <td>{formatAmount(BigInt(o.min_out), outDecimals)}</td>
+                <td>{formatAmount(BigInt(o.remaining_in), inDecimals)}</td>
                 <td>{o.partial_allowed ? 'Y' : 'N'}</td>
               </tr>
             ))}

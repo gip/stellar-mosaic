@@ -37,6 +37,7 @@ const POSEIDON_T: u32 = 4;
 const LIFT_OP: u32 = 1;
 const UNSHIELD_OP: u32 = 2;
 const CANCEL_OP: u32 = 3;
+const JOIN_OP: u32 = 4;
 
 /// Order-book limits. A pair has at most this many resting orders per side (buy / sell).
 const BOOK_CAPACITY: u32 = 64;
@@ -67,6 +68,12 @@ const UNSHIELD_DOMAIN: [u8; 32] = [
 const CANCEL_PUBLIC_INPUTS_BYTES: u32 = 4 * 32;
 const CANCEL_DOMAIN: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3,
+];
+/// Public-input length for the join circuit ([0]domain [1]root [2]nullifier_1 [3]nullifier_2
+/// [4]asset [5]out_tag_1 [6]out_amount_1 [7]out_tag_2 [8]out_amount_2) and its domain separator (=4).
+const JOIN_PUBLIC_INPUTS_BYTES: u32 = 9 * 32;
+const JOIN_DOMAIN: [u8; 32] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4,
 ];
 
 #[contracterror]
@@ -537,6 +544,68 @@ impl Settlement {
 
         env.events()
             .publish((symbol_short!("unshield"),), (asset, amount, nullifier));
+        bump_core(&env);
+        Ok(())
+    }
+
+    /// Join: consolidate two asset notes of the same asset into two fresh asset notes (a target and
+    /// a change), entirely inside the shielded pool — no token movement. This is what lets a wallet
+    /// assemble an exact denomination so the full-consumption `lift` order can offer a precise
+    /// amount (e.g. merge 1.5 + 2 USDC into 3 + 0.5). Relayer-submittable (no caller auth: the join
+    /// proof is the spend authority, exactly like `unshield`/`submit_order`).
+    ///
+    /// The proof (circuits/join) guarantees: both consumed notes are owned by one secret, are in the
+    /// tree at the published `root`, expose the two nullifiers, every amount is bounded, and value is
+    /// conserved (`amount_1 + amount_2 == out_amount_1 + out_amount_2`, one asset). The contract
+    /// therefore never sees the input amounts: it records both nullifiers (single-use, must be
+    /// distinct + unused) and mints exactly the two bound output leaves. A zero-amount output mints
+    /// nothing (so this also serves as a plain 2->1 merge).
+    pub fn join(env: Env, proof: Bytes, public_inputs: Bytes) -> Result<(), Error> {
+        Self::verify_proof(&env, JOIN_OP, &proof, &public_inputs, JOIN_PUBLIC_INPUTS_BYTES)?;
+
+        // [0] domain separator must be the join constant.
+        if read_word(&public_inputs, 0) != JOIN_DOMAIN {
+            return Err(Error::BadPublicInputs);
+        }
+        // [1] root must be a published root.
+        let root = BytesN::from_array(&env, &read_word(&public_inputs, 32));
+        if !env.storage().persistent().has(&DataKey::Root(root)) {
+            return Err(Error::UnknownRoot);
+        }
+        // [2],[3] the two consumed-note nullifiers: must be distinct and both unused. Distinctness
+        // matters because the has/set below is idempotent on equal keys — without this check a
+        // single note could be passed twice and counted as two inputs (cf. `settle`).
+        let nf1 = BytesN::from_array(&env, &read_word(&public_inputs, 64));
+        let nf2 = BytesN::from_array(&env, &read_word(&public_inputs, 96));
+        if nf1 == nf2 {
+            return Err(Error::NotCompatible);
+        }
+        let k1 = DataKey::Nullifier(nf1.clone());
+        let k2 = DataKey::Nullifier(nf2.clone());
+        if env.storage().persistent().has(&k1) || env.storage().persistent().has(&k2) {
+            return Err(Error::NullifierUsed);
+        }
+        // [4] asset (shared by inputs + outputs), [5..9] the two output notes the proof bound.
+        let asset = word_to_u32(&read_word(&public_inputs, 128))?;
+        let out_tag_1 = BytesN::from_array(&env, &read_word(&public_inputs, 160));
+        let out_amount_1 = word_to_i128(&read_word(&public_inputs, 192))?;
+        let out_tag_2 = BytesN::from_array(&env, &read_word(&public_inputs, 224));
+        let out_amount_2 = word_to_i128(&read_word(&public_inputs, 256))?;
+
+        // Record both nullifiers BEFORE minting (single-use spend authority; cannot be replayed).
+        env.storage().persistent().set(&k1, &true);
+        env.storage().persistent().set(&k2, &true);
+        bump(&env, &k1);
+        bump(&env, &k2);
+
+        // Mint the two fresh asset notes into the tree. Value conservation is guaranteed by the
+        // proof, so the contract simply mints the bound amounts; `mint_note` no-ops a zero output.
+        let h = Hasher::new(&env);
+        mint_note(&env, &h, asset, out_amount_1, &out_tag_1);
+        mint_note(&env, &h, asset, out_amount_2, &out_tag_2);
+
+        env.events()
+            .publish((symbol_short!("joined"),), (asset, nf1, nf2));
         bump_core(&env);
         Ok(())
     }

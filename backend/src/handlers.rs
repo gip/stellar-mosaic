@@ -9,17 +9,23 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 pub async fn health() -> Json<Value> {
+    // Debug, not info: health is polled frequently and would otherwise flood the logs.
+    tracing::debug!("health check");
     Json(json!({ "ok": true }))
 }
 
 pub async fn list_desks(State(st): State<Arc<AppState>>) -> AppResult<Json<Vec<Desk>>> {
-    Ok(Json(st.db.list_desks()?))
+    tracing::info!("list_desks");
+    let desks = st.db.list_desks()?;
+    tracing::info!(count = desks.len(), "list_desks ok");
+    Ok(Json(desks))
 }
 
 pub async fn get_desk(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<Json<Desk>> {
+    tracing::info!(desk = %id, "get_desk");
     Ok(Json(st.db.get_desk(&id)?))
 }
 
@@ -28,6 +34,7 @@ pub async fn import_desk(
     State(st): State<Arc<AppState>>,
     Json(body): Json<ImportDesk>,
 ) -> AppResult<Json<Desk>> {
+    tracing::info!(name = %body.name, contract_id = %body.contract_id, "import_desk");
     if body.contract_id.trim().is_empty() {
         return Err(AppError::BadRequest("contract_id required".into()));
     }
@@ -40,6 +47,7 @@ pub async fn import_desk(
         pairs: body.pairs,
     };
     st.db.insert_desk(&desk, None, None)?;
+    tracing::info!(desk = %desk.id, contract_id = %desk.contract_id, "import_desk ok");
     Ok(Json(desk))
 }
 
@@ -49,9 +57,11 @@ pub async fn create_desk(
     State(st): State<Arc<AppState>>,
     Json(body): Json<CreateDesk>,
 ) -> AppResult<Json<Desk>> {
+    tracing::info!(name = %body.name, assets = body.assets.len(), pairs = body.pairs.len(), "create_desk");
     let desk = tokio::task::spawn_blocking(move || crate::deploy::create_desk(&st, body))
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    tracing::info!(desk = %desk.id, contract_id = %desk.contract_id, "create_desk ok");
     Ok(Json(desk))
 }
 
@@ -59,6 +69,7 @@ pub async fn get_root(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, "get_root");
     let desk = st.db.get_desk(&id)?;
     let root = st
         .stellar
@@ -77,6 +88,7 @@ pub async fn get_book(
     Path(id): Path<String>,
     Query(q): Query<BookQuery>,
 ) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, pair = q.pair, side = q.side, "get_book");
     let desk = st.db.get_desk(&id)?;
     let book = st
         .stellar
@@ -94,6 +106,7 @@ pub async fn get_notes(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, "get_notes");
     let desk = st.db.get_desk(&id)?;
     let from = st.db.from_ledger(&id)?;
     let notes = tokio::task::spawn_blocking(move || {
@@ -114,6 +127,7 @@ pub async fn get_note_proof(
     Path(id): Path<String>,
     Query(q): Query<ProofQuery>,
 ) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, owner_tag = %q.owner_tag, "get_note_proof");
     let desk = st.db.get_desk(&id)?;
     let from = st.db.from_ledger(&id)?;
     let proof = tokio::task::spawn_blocking(move || {
@@ -137,6 +151,7 @@ pub async fn shield_submit(
     Path(id): Path<String>,
     Json(body): Json<ShieldSubmit>,
 ) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, xdr_len = body.tx_xdr.len(), "shield_submit: sponsor signing + sending");
     let secret = st
         .db
         .sponsor_secret(&id)?
@@ -145,6 +160,7 @@ pub async fn shield_submit(
     let out = tokio::task::spawn_blocking(move || st.stellar.sign_and_send(&tx_xdr, &secret))
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    tracing::info!(desk = %id, result = %out, "shield_submit ok");
     Ok(Json(json!({ "ok": true, "result": out })))
 }
 
@@ -161,9 +177,26 @@ pub async fn relay_order(
     Path(id): Path<String>,
     Json(body): Json<RelayOrder>,
 ) -> AppResult<Json<Value>> {
-    relay(st, id, body.proof_b64, body.public_inputs_b64, |proof, pi| {
+    relay(st, id, "relay_order", body.proof_b64, body.public_inputs_b64, |proof, pi| {
         vec![
             "submit_order".into(),
+            "--proof-file-path".into(),
+            proof,
+            "--public_inputs-file-path".into(),
+            pi,
+        ]
+    })
+    .await
+}
+
+pub async fn relay_join(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RelayOrder>,
+) -> AppResult<Json<Value>> {
+    relay(st, id, "relay_join", body.proof_b64, body.public_inputs_b64, |proof, pi| {
+        vec![
+            "join".into(),
             "--proof-file-path".into(),
             proof,
             "--public_inputs-file-path".into(),
@@ -186,7 +219,7 @@ pub async fn relay_unshield(
     Json(body): Json<RelayUnshield>,
 ) -> AppResult<Json<Value>> {
     let to = body.to;
-    relay(st, id, body.proof_b64, body.public_inputs_b64, move |proof, pi| {
+    relay(st, id, "relay_unshield", body.proof_b64, body.public_inputs_b64, move |proof, pi| {
         vec![
             "unshield".into(),
             "--to".into(),
@@ -214,7 +247,7 @@ pub async fn relay_cancel(
     Json(body): Json<RelayCancel>,
 ) -> AppResult<Json<Value>> {
     let (pair, side) = (body.pair_id, body.side);
-    relay(st, id, body.proof_b64, body.public_inputs_b64, move |proof, pi| {
+    relay(st, id, "relay_cancel", body.proof_b64, body.public_inputs_b64, move |proof, pi| {
         vec![
             "cancel_order".into(),
             "--pair_id".into(),
@@ -235,11 +268,13 @@ pub async fn relay_cancel(
 async fn relay(
     st: Arc<AppState>,
     desk_id: String,
+    action: &'static str,
     proof_b64: String,
     pi_b64: String,
     build_args: impl FnOnce(String, String) -> Vec<String> + Send + 'static,
 ) -> AppResult<Json<Value>> {
     use base64::Engine;
+    tracing::info!(desk = %desk_id, proof_len = proof_b64.len(), "{action}: fully-sponsored relay");
     let secret = st
         .db
         .sponsor_secret(&desk_id)?
@@ -272,6 +307,7 @@ async fn relay(
     .await
     .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
+    tracing::info!(desk = %desk_id, result = %out, "{action} ok");
     Ok(Json(json!({ "ok": true, "result": out })))
 }
 

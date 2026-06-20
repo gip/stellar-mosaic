@@ -75,6 +75,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ proof_b64, public_inputs_b64 }),
     }),
+  relayJoin: (id: string, proof_b64: string, public_inputs_b64: string) =>
+    req<{ ok: boolean; result: string }>(`/desks/${id}/relay/join`, {
+      method: 'POST',
+      body: JSON.stringify({ proof_b64, public_inputs_b64 }),
+    }),
+  relayCancel: (
+    id: string,
+    pair_id: number,
+    side: number,
+    proof_b64: string,
+    public_inputs_b64: string,
+  ) =>
+    req<{ ok: boolean; result: string }>(`/desks/${id}/relay/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ pair_id, side, proof_b64, public_inputs_b64 }),
+    }),
 }
 
 export interface NoteProof {

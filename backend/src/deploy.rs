@@ -8,8 +8,8 @@ use uuid::Uuid;
 /// Pipeline (mirrors `scripts/06_book_budget_testnet.sh`):
 ///   1. generate + friendbot-fund a sponsor ("main") keypair
 ///   2. deploy settlement.wasm with the lift VK + admin = sponsor
-///   3. set_vk(2, unshield_vk), set_vk(3, cancel_vk)
-///   4. register_asset for each currency (token "native" resolves to the XLM SAC)
+///   3. set_vk(2, unshield_vk), set_vk(3, cancel_vk), set_vk(4, join_vk)
+///   4. register_asset for each currency (see `resolve_token` for how `token` is resolved to a SAC)
 ///   5. register_pair for each pair (pair_id assigned sequentially from 0)
 ///
 /// This makes blocking CLI calls; run it via `spawn_blocking`.
@@ -29,7 +29,7 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<Desk> {
     let desk_id = Uuid::new_v4().to_string();
     let key_name = format!("desk-{}", &desk_id[..8]);
 
-    // resolve token addresses ("native" -> XLM SAC)
+    // resolve token addresses (see `resolve_token`); "native" -> XLM SAC
     let xlm_sac = st.stellar.xlm_sac()?;
 
     // Stamp the current latest ledger so later event scans start near this desk's activity.
@@ -42,17 +42,15 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<Desk> {
     let assets: Vec<Asset> = body
         .assets
         .iter()
-        .map(|a| Asset {
-            asset_id: a.asset_id,
-            symbol: a.symbol.clone(),
-            token: if a.token == "native" {
-                xlm_sac.clone()
-            } else {
-                a.token.clone()
-            },
-            decimals: a.decimals,
+        .map(|a| {
+            Ok(Asset {
+                asset_id: a.asset_id,
+                symbol: a.symbol.clone(),
+                token: resolve_token(st, &a.token, &xlm_sac, &sponsor_secret)?,
+                decimals: a.decimals,
+            })
         })
-        .collect();
+        .collect::<AppResult<Vec<_>>>()?;
 
     // 2. deploy
     let contract_id = st
@@ -75,6 +73,13 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<Desk> {
         "3",
         "--vk_bytes-file-path",
         &cfg.cancel_vk().to_string_lossy(),
+    ]))?;
+    inv(svec(&[
+        "set_vk",
+        "--op",
+        "4",
+        "--vk_bytes-file-path",
+        &cfg.join_vk().to_string_lossy(),
     ]))?;
 
     // 4. assets
@@ -115,6 +120,29 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<Desk> {
     };
     st.db.insert_desk(&desk, Some(&sponsor_secret), from_ledger)?;
     Ok(desk)
+}
+
+/// Resolve a user-supplied `token` field into a Soroban SAC contract address (`C...`):
+///   - `"native"`                 -> the XLM SAC
+///   - `"CODE:ISSUER"` (classic)  -> derive its SAC id and ensure it is deployed on-chain
+///   - `"C..."` (contract id)     -> used as-is (assumed already deployed)
+///
+/// A bare `G...` issuer is rejected: a SAC id is derived from *both* the asset code and the
+/// issuer, so the code is required — pass `CODE:ISSUER` instead.
+fn resolve_token(st: &AppState, token: &str, xlm_sac: &str, source: &str) -> AppResult<String> {
+    if token == "native" {
+        Ok(xlm_sac.to_string())
+    } else if token.contains(':') {
+        st.stellar.ensure_asset_sac(token, source)
+    } else if token.starts_with('G') {
+        Err(AppError::BadRequest(format!(
+            "token \"{token}\" is an issuer account, not a contract. Use \"CODE:ISSUER\" \
+             (e.g. \"USDC:{token}\") so the Stellar Asset Contract address can be derived, \
+             or pass the SAC contract id directly (C...)."
+        )))
+    } else {
+        Ok(token.to_string())
+    }
 }
 
 fn svec(s: &[&str]) -> Vec<String> {
