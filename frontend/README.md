@@ -6,8 +6,8 @@ wallet, browser-side ZK proving, and local private notes in IndexedDB.
 ## Run
 
 ```bash
-npm install
-npm run dev            # http://localhost:5173, proxies /api -> backend (127.0.0.1:8787)
+pnpm install
+pnpm dev               # http://localhost:5173, proxies /api -> backend (127.0.0.1:8787)
 ```
 
 The backend (`../backend`) must be running. Override its URL with `MOSAIC_BACKEND` (build-time) or

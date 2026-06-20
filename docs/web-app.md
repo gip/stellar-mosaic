@@ -47,7 +47,7 @@ the lift + wallet helper circuits (→ `frontend/public/circuits/`).
 ```bash
 ./scripts/08_build_web_artifacts.sh         # once / after circuit changes
 (cd backend && cargo run)                   # 127.0.0.1:8787
-(cd frontend && npm install && npm run dev) # http://localhost:5173
+(cd frontend && pnpm install && pnpm dev)   # http://localhost:5173
 ```
 
 ## Not yet wired in the UI
