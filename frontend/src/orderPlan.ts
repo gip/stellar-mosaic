@@ -20,7 +20,7 @@ export type AssemblyPlan =
 
 /** Indexed, active notes of a given asset — the only ones a join/order can consume. */
 export function spendableNotes(notes: Note[], assetId: number): Note[] {
-  return notes.filter((n) => n.status === 'active' && n.indexed && n.asset_id === assetId)
+  return notes.filter((n) => n.status === 'active' && n.indexed && n.asset_id === assetId && n.operation_state !== 'reserved')
 }
 
 /** Maximum amount_in offerable for an asset: the sum of all its spendable notes (raw units). */

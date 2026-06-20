@@ -11,6 +11,14 @@
   background: var(--bg);
 }
 
+.activity-drawer { position: fixed; right: 18px; bottom: 18px; z-index: 20; }
+.activity-toggle { box-shadow: 0 2px 12px #0003; }
+.activity-panel { width: min(420px, calc(100vw - 36px)); max-height: 65vh; overflow: auto; background: white; color: black; border: 2px solid black; padding: 14px; margin-bottom: 8px; box-shadow: 0 6px 24px #0004; }
+.activity-item { border-top: 1px solid #aaa; padding: 10px 0; }
+.activity-item small { display: block; margin: 3px 0; }
+.operation-succeeded { color: #167526; }
+.operation-failed, .operation-cancelled { color: #a02020; }
+
 * {
   box-sizing: border-box;
 }

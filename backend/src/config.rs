@@ -11,6 +11,9 @@ pub struct Config {
     pub stellar_bin: String,
     /// SQLite database file.
     pub db_path: PathBuf,
+    /// SQLx database URL. PostgreSQL is required for multi-instance production; SQLite is used
+    /// for local development. `MOSAIC_DB` remains a compatibility fallback.
+    pub database_url: String,
     /// Directory holding the build output `settlement.wasm` (git-ignored).
     pub artifacts_dir: PathBuf,
     /// Directory holding the committed lift/unshield/cancel VK files used at deploy.
@@ -24,14 +27,26 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let db_path = PathBuf::from(env(
+            "MOSAIC_DB",
+            cwd.join("data")
+                .join("mosaic.db")
+                .to_string_lossy()
+                .as_ref(),
+        ));
+        let database_url = std::env::var("MOSAIC_DATABASE_URL").unwrap_or_else(|_| {
+            if db_path == std::path::Path::new(":memory:") {
+                "sqlite::memory:".into()
+            } else {
+                format!("sqlite://{}?mode=rwc", db_path.to_string_lossy())
+            }
+        });
         Config {
             bind: env("MOSAIC_BIND", "127.0.0.1:8787"),
             network: env("MOSAIC_NETWORK", "testnet"),
             stellar_bin: env("MOSAIC_STELLAR_BIN", "stellar"),
-            db_path: PathBuf::from(env(
-                "MOSAIC_DB",
-                cwd.join("data").join("mosaic.db").to_string_lossy().as_ref(),
-            )),
+            db_path,
+            database_url,
             artifacts_dir: PathBuf::from(env(
                 "MOSAIC_ARTIFACTS",
                 cwd.join("artifacts").to_string_lossy().as_ref(),

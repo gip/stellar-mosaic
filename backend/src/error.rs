@@ -20,8 +20,8 @@ pub enum AppError {
     Other(#[from] anyhow::Error),
 }
 
-impl From<rusqlite::Error> for AppError {
-    fn from(e: rusqlite::Error) -> Self {
+impl From<sqlx::Error> for AppError {
+    fn from(e: sqlx::Error) -> Self {
         AppError::Other(anyhow::anyhow!(e))
     }
 }

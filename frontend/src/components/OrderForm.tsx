@@ -1,16 +1,12 @@
 import { useEffect, useState } from 'react'
 import type { Desk, Pair } from '../api'
 import { api } from '../api'
-import { randomField } from '../crypto'
-import { orderTerms } from '../noir'
-import { proveLift, b64 } from '../prove'
-import { updateNote, type Note } from '../notes'
+import type { Note } from '../notes'
 import { toRaw, formatAmount, computeMinOutAtPrice, parseRatio } from '../amount'
 import { maxIn, planAssembly } from '../orderPlan'
-import { runAssembly } from '../orchestrate'
-import { nowMs, nowSeconds } from '../time'
-import { stageRecoverableNote, syncRecoveryNow } from '../recovery'
+import { nowSeconds } from '../time'
 import { useRecovery } from '../RecoveryContext'
+import { useActivity } from '../ActivityContext'
 
 type Side = 'SELL' | 'BUY'
 
@@ -88,6 +84,7 @@ export default function OrderForm({
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const recovery = useRecovery()
+  const activity = useActivity()
   const recoveryReady = recovery.unlocked && !recovery.error
 
   const pair = desk.pairs.find((p) => p.pair_id === pairId) as Pair | undefined
@@ -171,87 +168,12 @@ export default function OrderForm({
     setBusy(true)
     setError(null)
     try {
-      // Resolve a single confirmed note of exactly amount_in (assembling it first if needed).
-      let offer: Note
-      if (plan.kind === 'direct') {
-        const found = notes.find((n) => n.id === plan.noteId)
-        if (!found) throw new Error('Offer note no longer available; please retry.')
-        offer = found
-      } else {
-        setStatus('Preparing note…')
-        offer = await runAssembly(desk, plan.steps, notes, setStatus)
-      }
-
-      const minOut = minOutRaw.toString()
-      const expiry = nowSeconds() + 7 * 86400
-      const rho_out = randomField()
-      const rho_ord = randomField()
-      setStatus('Deriving order terms…')
-      const terms = await orderTerms({
-        sk: offer.sk,
-        rho_in: offer.rho,
-        rho_out,
-        rho_ord,
-        asset_in: assetIn,
-        amount_in: offer.amount,
-        asset_out: assetOut,
-        min_out: minOut,
-        expiry,
-        partial_allowed: partial ? 1 : 0,
+      setStatus('Queueing order…')
+      const operation = await activity.enqueue({
+        kind: 'place_order', desk_id: desk.id, pair_id: pairId, side,
+        amount_in: amountInRaw.toString(), min_out: minOutRaw.toString(), partial_allowed: partial,
       })
-      setStatus('Fetching membership path…')
-      const proof = await api.getNoteProof(desk.id, offer.owner_tag)
-      setStatus('Proving (UltraHonk, in-browser)…')
-      const bundle = await proveLift({
-        rho_in: offer.rho,
-        sk_o: offer.sk,
-        path: proof.siblings,
-        index_bits: proof.index_bits,
-        root: proof.root,
-        nullifier_in: terms.nullifier_in,
-        asset_in: assetIn,
-        amount_in: offer.amount,
-        asset_out: assetOut,
-        min_out: minOut,
-        output_owner_tag: terms.output_owner_tag,
-        cancel_owner_tag: terms.cancel_owner_tag,
-        expiry,
-        partial_allowed: partial ? 1 : 0,
-        order_leaf: terms.order_leaf,
-      })
-      const outputNote: Note = {
-        id: crypto.randomUUID(),
-        deskId: desk.id,
-        role: 'order-output',
-        asset_id: assetOut,
-        symbol: sym(assetOut),
-        amount: minOut,
-        sk: offer.sk,
-        rho: rho_out,
-        owner_tag: terms.output_owner_tag,
-        status: 'active',
-        indexed: false,
-        createdAt: nowMs(),
-        cancel: {
-          rho_ord,
-          order_leaf: terms.order_leaf,
-          cancel_owner_tag: terms.cancel_owner_tag,
-          pairId,
-          side: side === 'SELL' ? 1 : 0,
-          asset_in: assetIn,
-          symbol_in: sym(assetIn),
-          amount_in: offer.amount,
-        },
-      }
-      setStatus('Backing up note secrets…')
-      await stageRecoverableNote(outputNote)
-      setStatus('Submitting (sponsored)…')
-      await api.relayOrder(desk.id, b64(bundle.proof), b64(bundle.publicInputs))
-
-      // The offered note is now spent; record the active order/proceeds note (asset_out @ output tag).
-      await updateNote(offer.id, { status: 'spent' })
-      await syncRecoveryNow()
-      setStatus('Order submitted.')
+      setStatus(`Queued · ${operation.id.slice(0, 8)}`)
       onDone()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))

@@ -1,10 +1,13 @@
+mod auth;
 mod config;
 mod db;
 mod deploy;
+mod durable_indexer;
 mod error;
 mod handlers;
 mod indexer;
 mod models;
+mod operations;
 mod stellar;
 
 use axum::extract::DefaultBodyLimit;
@@ -33,9 +36,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env();
-    tracing::info!(?config, "starting mosaic-backend");
+    tracing::info!(bind=%config.bind, network=%config.network, database=%if config.database_url.starts_with("postgres") {"postgres"} else {"sqlite"}, "starting mosaic-backend");
 
-    let db = Db::open(&config.db_path)?;
+    let db = Db::open(&config.database_url).await?;
     let stellar = Stellar::new(&config);
     let bind = config.bind.clone();
     let state = Arc::new(AppState {
@@ -44,9 +47,25 @@ async fn main() -> anyhow::Result<()> {
         stellar,
     });
 
+    let worker_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Err(error) = worker_state.db.promote_queued().await {
+                tracing::error!(%error, "operation queue promotion failed");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    });
+    tokio::spawn(durable_indexer::run(state.clone()));
+
     let app = Router::new()
         .route("/health", get(handlers::health))
-        .route("/desks", get(handlers::list_desks).post(handlers::create_desk))
+        .merge(auth::routes())
+        .merge(operations::routes())
+        .route(
+            "/desks",
+            get(handlers::list_desks).post(handlers::create_desk),
+        )
         .route("/desks/import", post(handlers::import_desk))
         .route("/desks/:id", get(handlers::get_desk))
         .route("/desks/:id/root", get(handlers::get_root))
@@ -54,11 +73,26 @@ async fn main() -> anyhow::Result<()> {
         .route("/desks/:id/notes", get(handlers::get_notes))
         .route("/desks/:id/fills", get(handlers::get_fills))
         .route("/desks/:id/note-proof", get(handlers::get_note_proof))
-        .route("/desks/:id/shield/submit", post(handlers::shield_submit))
-        .route("/desks/:id/relay/order", post(handlers::relay_order))
-        .route("/desks/:id/relay/join", post(handlers::relay_join))
-        .route("/desks/:id/relay/unshield", post(handlers::relay_unshield))
-        .route("/desks/:id/relay/cancel", post(handlers::relay_cancel))
+        .route(
+            "/client-actions/relay/desks/:id/shield",
+            post(handlers::shield_submit),
+        )
+        .route(
+            "/client-actions/relay/desks/:id/order",
+            post(handlers::relay_order),
+        )
+        .route(
+            "/client-actions/relay/desks/:id/join",
+            post(handlers::relay_join),
+        )
+        .route(
+            "/client-actions/relay/desks/:id/unshield",
+            post(handlers::relay_unshield),
+        )
+        .route(
+            "/client-actions/relay/desks/:id/cancel",
+            post(handlers::relay_cancel),
+        )
         .route(
             "/wallet-backups/:backup_id",
             get(handlers::get_wallet_backup).put(handlers::put_wallet_backup),

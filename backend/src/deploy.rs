@@ -13,7 +13,7 @@ use uuid::Uuid;
 ///   5. register_pair for each pair (pair_id assigned sequentially from 0)
 ///
 /// This makes blocking CLI calls; run it via `spawn_blocking`.
-pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<Desk> {
+pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, Option<u64>)> {
     if body.assets.is_empty() {
         return Err(AppError::BadRequest("at least one asset required".into()));
     }
@@ -59,7 +59,10 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<Desk> {
     tracing::info!(%contract_id, "deployed settlement contract");
 
     // 3. extra VKs
-    let inv = |args: Vec<String>| st.stellar.invoke_write(&contract_id, &sponsor_secret, &args);
+    let inv = |args: Vec<String>| {
+        st.stellar
+            .invoke_write(&contract_id, &sponsor_secret, &args)
+    };
     inv(svec(&[
         "set_vk",
         "--op",
@@ -118,8 +121,7 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<Desk> {
         assets,
         pairs,
     };
-    st.db.insert_desk(&desk, Some(&sponsor_secret), from_ledger)?;
-    Ok(desk)
+    Ok((desk, sponsor_secret, from_ledger))
 }
 
 /// Resolve a user-supplied `token` field into a Soroban SAC contract address (`C...`):

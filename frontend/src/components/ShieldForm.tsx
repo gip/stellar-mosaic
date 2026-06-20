@@ -1,12 +1,8 @@
 import { useState } from 'react'
-import { api, type Desk } from '../api'
-import { randomField, fieldToBytes32 } from '../crypto'
-import { noteTag } from '../noir'
-import { buildSponsoredShield } from '../soroban'
-import type { Note } from '../notes'
+import type { Desk } from '../api'
 import { toRaw } from '../amount'
-import { stageRecoverableNote, updateNoteAndSync } from '../recovery'
 import { useRecovery } from '../RecoveryContext'
+import { useActivity } from '../ActivityContext'
 
 /**
  * Shield a supported asset into the desk's custody. Generates fresh note secrets in-browser,
@@ -15,7 +11,6 @@ import { useRecovery } from '../RecoveryContext'
  */
 export default function ShieldForm({
   desk,
-  userPubkey,
   onDone,
 }: {
   desk: Desk
@@ -28,6 +23,7 @@ export default function ShieldForm({
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const recovery = useRecovery()
+  const activity = useActivity()
   const recoveryReady = recovery.unlocked && !recovery.error
 
   async function submit(e: React.FormEvent) {
@@ -38,40 +34,9 @@ export default function ShieldForm({
     try {
       const asset = desk.assets.find((a) => a.asset_id === assetId)!
       const rawAmount = toRaw(amount, asset.decimals)
-      const sk = randomField()
-      const rho = randomField()
-      setStatus('Deriving owner tag…')
-      const owner_tag = await noteTag(sk, rho)
-      setStatus('Authorize in wallet…')
-      const txXdr = await buildSponsoredShield(
-        desk.contract_id,
-        desk.sponsor_pubkey,
-        userPubkey,
-        assetId,
-        rawAmount,
-        fieldToBytes32(owner_tag),
-      )
-      const note: Note = {
-        id: crypto.randomUUID(),
-        deskId: desk.id,
-        role: 'asset',
-        asset_id: assetId,
-        symbol: asset.symbol,
-        amount: rawAmount,
-        sk,
-        rho,
-        owner_tag,
-        status: 'active',
-        indexed: false,
-        createdAt: Date.now(),
-      }
-      setStatus('Backing up note secrets…')
-      await stageRecoverableNote(note)
-      setStatus('Submitting (sponsored)…')
-      const { result } = await api.submitShield(desk.id, txXdr)
-      const txHash = result
-      await updateNoteAndSync(note.id, { indexed: true, txHash })
-      setStatus(`Shielded (sponsored). ${result}`)
+      setStatus('Queueing shield…')
+      const operation = await activity.enqueue({ kind: 'shield', desk_id: desk.id, asset_id: assetId, amount: rawAmount })
+      setStatus(`Queued · ${operation.id.slice(0, 8)}`)
       onDone()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))

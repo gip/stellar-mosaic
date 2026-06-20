@@ -15,7 +15,11 @@ use soroban_sdk::{Env, U256};
 
 /// A leaf-producing event, in insertion order.
 enum TreeEvent {
-    Insert { asset: u32, amount: i128, tag: [u8; 32] },
+    Insert {
+        asset: u32,
+        amount: i128,
+        tag: [u8; 32],
+    },
     Settled([(u32, i128, [u8; 32]); 2]),
 }
 
@@ -31,14 +35,23 @@ pub struct NoteInfo {
 #[derive(Serialize)]
 pub struct NoteProof {
     pub leaf_index: usize,
-    pub root: String,                  // 0x + 64 hex
-    pub siblings: Vec<String>,         // 32 entries, 0x + 64 hex
-    pub index_bits: Vec<u8>,           // 32 entries (0/1)
+    pub root: String,          // 0x + 64 hex
+    pub siblings: Vec<String>, // 32 entries, 0x + 64 hex
+    pub index_bits: Vec<u8>,   // 32 entries (0/1)
 }
 
 /// Replay all events and return the full note list (for discovery).
-pub fn notes(stellar: &Stellar, contract_id: &str, from_ledger: Option<u64>) -> AppResult<Vec<NoteInfo>> {
+pub fn notes(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+) -> AppResult<Vec<NoteInfo>> {
     let (_, notes) = build(stellar, contract_id, from_ledger)?;
+    Ok(notes)
+}
+
+pub fn notes_from_raw(raw: &[serde_json::Value]) -> AppResult<Vec<NoteInfo>> {
+    let (_, notes) = build_events(raw.iter().filter_map(parse_event).collect())?;
     Ok(notes)
 }
 
@@ -59,8 +72,16 @@ pub struct FillInfo {
     pub owner_tag: String, // 0x + 64 hex
 }
 
+pub fn fills_from_raw(raw: &[serde_json::Value]) -> Vec<FillInfo> {
+    raw.iter().filter_map(parse_fill).collect()
+}
+
 /// Scan the contract's `filled` events (no tree replay needed — these are informational summaries).
-pub fn fills(stellar: &Stellar, contract_id: &str, from_ledger: Option<u64>) -> AppResult<Vec<FillInfo>> {
+pub fn fills(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+) -> AppResult<Vec<FillInfo>> {
     scan_events(stellar, contract_id, from_ledger, parse_fill)
 }
 
@@ -86,6 +107,22 @@ pub fn note_proof(
     })
 }
 
+pub fn note_proof_from_raw(raw: &[serde_json::Value], owner_tag: &str) -> AppResult<NoteProof> {
+    let want = parse_hex32(owner_tag)?;
+    let (tree, notes) = build_events(raw.iter().filter_map(parse_event).collect())?;
+    let note = notes
+        .iter()
+        .find(|n| n.owner_tag == fmt_hex32(&want))
+        .ok_or_else(|| AppError::NotFound(format!("no note with owner_tag {owner_tag}")))?;
+    let path = tree.path(note.leaf_index);
+    Ok(NoteProof {
+        leaf_index: note.leaf_index,
+        root: u256_hex(&tree.root()),
+        siblings: path.siblings.iter().map(u256_hex).collect(),
+        index_bits: path.index_bits.to_vec(),
+    })
+}
+
 /// Fetch + replay events into a NoteTree, recording the (leaf_index, note) list.
 fn build(
     stellar: &Stellar,
@@ -93,6 +130,10 @@ fn build(
     from_ledger: Option<u64>,
 ) -> AppResult<(NoteTree, Vec<NoteInfo>)> {
     let events = fetch_events(stellar, contract_id, from_ledger)?;
+    build_events(events)
+}
+
+fn build_events(events: Vec<TreeEvent>) -> AppResult<(NoteTree, Vec<NoteInfo>)> {
     let env = Env::default();
     // The Env is only a hash engine here; lift its CPU budget so deep Poseidon folds don't trip it.
     env.cost_estimate().budget().reset_unlimited();
@@ -180,7 +221,9 @@ fn parse_event(v: &serde_json::Value) -> Option<TreeEvent> {
     let topic_b64 = v.get("topic")?.as_array()?.first()?.as_str()?;
     let symbol = decode_symbol(topic_b64)?;
     let value_b64 = v.get("value")?.as_str()?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(value_b64).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value_b64)
+        .ok()?;
     let mut r = Rdr::new(&bytes);
     let n = r.vec_header()?;
     match symbol.as_str() {
@@ -212,7 +255,9 @@ fn parse_fill(v: &serde_json::Value) -> Option<FillInfo> {
         return None;
     }
     let value_b64 = v.get("value")?.as_str()?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(value_b64).ok()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value_b64)
+        .ok()?;
     let mut r = Rdr::new(&bytes);
     if r.vec_header()? != 5 {
         return None;
@@ -225,7 +270,11 @@ fn parse_fill(v: &serde_json::Value) -> Option<FillInfo> {
     Some(FillInfo {
         id: v.get("id")?.as_str()?.to_string(),
         ledger: v.get("ledger").and_then(|x| x.as_u64()).unwrap_or(0),
-        tx_hash: v.get("txHash").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        tx_hash: v
+            .get("txHash")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
         asset_in,
         amount_in: amount_in.to_string(),
         asset_out,

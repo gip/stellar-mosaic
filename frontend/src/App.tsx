@@ -1,6 +1,7 @@
 import { Link, Outlet } from 'react-router-dom'
 import { useWallet } from './WalletContext'
 import RecoveryPanel from './components/RecoveryPanel'
+import ActivityDrawer from './components/ActivityDrawer'
 
 function short(addr: string): string {
   return addr.length > 12 ? `${addr.slice(0, 5)}…${addr.slice(-4)}` : addr
@@ -36,6 +37,7 @@ export default function App() {
         <RecoveryPanel />
         <Outlet />
       </main>
+      <ActivityDrawer />
     </>
   )
 }

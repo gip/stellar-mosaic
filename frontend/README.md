@@ -1,7 +1,8 @@
 # mosaic-frontend
 
-Minimalist (black & white) web client for Stellar Mosaic. Vite + React + TypeScript, Freighter
-wallet, browser-side ZK proving, and wallet-encrypted private-note recovery.
+Minimalist web client for Stellar Mosaic. Fund forms enqueue high-level operations; a recovery-
+unlocked private-wallet worker performs leased signing/proving steps while the Rust backend owns
+durable FIFO sequencing, submission state, and progress history.
 
 ## Run
 
@@ -18,6 +19,7 @@ the Soroban RPC with `VITE_SOROBAN_RPC` (defaults to testnet).
 - `/` — list desks + pairs; create a new desk (deploys a contract via the backend) or import one.
 - `/desk/:id` — address book (desk contract/sponsor/token addresses + your notes), shield, place a
   limit order, and a live order book. Auto-refreshes root/book/notes.
+- A global Activity drawer survives navigation/reload and shows queued, running, and historical work.
 
 ## Proving and recovery
 
@@ -34,5 +36,7 @@ the Soroban RPC with `VITE_SOROBAN_RPC` (defaults to testnet).
   can restore on a new device; encrypted file export is the service-independent backup.
 - Notes created before recovery support have no account association and remain explicitly
   local-only. Never sign the Mosaic recovery message outside the trusted app: it unlocks the notes.
+- Backend login uses a separate short-lived challenge message whose signature cannot derive the
+  recovery key. Private operation journals and note reservations remain browser-side.
 
 Compiled circuits live in `public/circuits/` — regenerate with `../scripts/08_build_web_artifacts.sh`.

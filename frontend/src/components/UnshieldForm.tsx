@@ -2,10 +2,10 @@ import { useState } from 'react'
 import { StrKey } from '@stellar/stellar-sdk'
 import type { Desk } from '../api'
 import { toRaw, formatAmount } from '../amount'
-import { executeUnshield, runAssembly } from '../orchestrate'
 import { maxIn, planAssembly } from '../orderPlan'
 import type { Note } from '../notes'
 import { useRecovery } from '../RecoveryContext'
+import { useActivity } from '../ActivityContext'
 
 function parseAmount(amount: string, decimals: number): bigint | null {
   if (amount.trim() === '') return null
@@ -35,6 +35,7 @@ export default function UnshieldForm({
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const recovery = useRecovery()
+  const activity = useActivity()
   const recoveryReady = recovery.unlocked && !recovery.error
 
   const asset = desk.assets.find((a) => a.asset_id === assetId)
@@ -80,18 +81,12 @@ export default function UnshieldForm({
     setError(null)
     setStatus(null)
     try {
-      let note: Note
-      if (plan.kind === 'direct') {
-        const found = notes.find((n) => n.id === plan.noteId)
-        if (!found) throw new Error('Note no longer available; please retry.')
-        note = found
-      } else {
-        setStatus('Preparing note…')
-        note = await runAssembly(desk, plan.steps, notes, setStatus)
-      }
-
-      await executeUnshield(desk, note, recipient.trim(), setStatus)
-      setStatus('Unshielded successfully.')
+      setStatus('Queueing unshield…')
+      const operation = await activity.enqueue({
+        kind: 'unshield', desk_id: desk.id, asset_id: assetId,
+        amount: amountRaw.toString(), recipient: recipient.trim(),
+      })
+      setStatus(`Queued · ${operation.id.slice(0, 8)}`)
       onDone()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))

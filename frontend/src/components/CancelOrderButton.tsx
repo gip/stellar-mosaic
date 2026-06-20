@@ -1,12 +1,8 @@
 import { useState } from 'react'
 import type { Desk } from '../api'
-import { api } from '../api'
-import { randomField } from '../crypto'
-import { noteTag } from '../noir'
-import { proveCancel, b64 } from '../prove'
-import { updateNote, type Note } from '../notes'
-import { stageRecoverableNote, syncRecoveryNow } from '../recovery'
+import type { Note } from '../notes'
 import { useRecovery } from '../RecoveryContext'
+import { useActivity } from '../ActivityContext'
 
 /**
  * Cancel a resting limit order. Derives a fresh return destination, proves the cancel circuit
@@ -27,6 +23,7 @@ export default function CancelOrderButton({
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const recovery = useRecovery()
+  const activity = useActivity()
   const recoveryReady = recovery.unlocked && !recovery.error
 
   const c = note.cancel
@@ -37,39 +34,9 @@ export default function CancelOrderButton({
     setBusy(true)
     setError(null)
     try {
-      const rho_return = randomField()
-      setStatus('Deriving return tag…')
-      const return_owner_tag = await noteTag(note.sk, rho_return)
-      setStatus('Proving (UltraHonk, in-browser)…')
-      const bundle = await proveCancel({
-        sk_o: note.sk,
-        rho_ord: c.rho_ord,
-        order_leaf: c.order_leaf,
-        cancel_owner_tag: c.cancel_owner_tag,
-        return_owner_tag,
-      })
-      const refund: Note = {
-        id: crypto.randomUUID(),
-        deskId: desk.id,
-        role: 'asset',
-        asset_id: c.asset_in,
-        symbol: c.symbol_in,
-        amount: c.amount_in,
-        sk: note.sk,
-        rho: rho_return,
-        owner_tag: return_owner_tag,
-        status: 'active',
-        indexed: false,
-        createdAt: Date.now(),
-      }
-      setStatus('Backing up refund secrets…')
-      await stageRecoverableNote(refund)
-      setStatus('Submitting (sponsored)…')
-      await api.relayCancel(desk.id, c.pairId, c.side, b64(bundle.proof), b64(bundle.publicInputs))
-
-      await updateNote(note.id, { status: 'cancelled', cancelledAt: Date.now() })
-      await syncRecoveryNow()
-      setStatus('Cancelled.')
+      setStatus('Queueing cancellation…')
+      const operation = await activity.enqueue({ kind: 'cancel_order', desk_id: desk.id, wallet_note_id: note.id })
+      setStatus(`Queued · ${operation.id.slice(0, 8)}`)
       onDone()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))

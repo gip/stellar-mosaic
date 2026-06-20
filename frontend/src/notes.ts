@@ -43,6 +43,10 @@ export interface Note {
   recovery_version?: 1
   recovery_state?: RecoveryState
   revision?: number
+  /** Durable private-wallet journal fields. The backend sees only the operation id, never this
+   * note, its secrets, or its ownership metadata. */
+  operation_id?: string
+  operation_state?: 'reserved' | 'pending-output' | 'committed'
 }
 
 interface MosaicDB extends DBSchema {
@@ -100,6 +104,11 @@ export async function updateNote(id: string, patch: Partial<Note>): Promise<void
     })
     announceNotesChanged()
   }
+}
+
+export async function removeNote(id: string): Promise<void> {
+  await (await db()).delete('notes', id)
+  announceNotesChanged()
 }
 
 export async function recoveryNotes(walletAddress: string): Promise<Note[]> {

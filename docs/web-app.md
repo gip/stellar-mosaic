@@ -1,13 +1,14 @@
 # Web app: desks, shield, order book
 
-A web frontend + Rust backend on top of the `settlement` contract. Users browse **desks**, log in
-with a Stellar wallet, shield USDC/XLM, and place limit orders — with ZK proofs generated in the
-browser and transactions relayed fully-sponsored.
+A web frontend + Rust backend on top of the `settlement` contract. Fund actions are durable,
+high-level operations serialized per wallet/network. The backend records progress, persists chain
+events, and controls submission; the browser retains private note selection, signatures, and ZK
+proving through leased client actions.
 
 - `frontend/` — Vite + React + TS, Freighter wallet, IndexedDB private notes, in-browser proving
   (`noir_js` + `@aztec/bb.js`). See `frontend/README.md`.
-- `backend/` — Rust (axum): desk registry (SQLite), desk deploy pipeline, indexer-backed membership
-  paths, and fully-sponsored relays. See `backend/README.md`.
+- `backend/` — Rust (axum): PostgreSQL/SQLite repository, wallet authentication, operation queue,
+  durable indexer, membership paths, SSE updates, and sponsored relays. See `backend/README.md`.
 
 ## Desk model
 
@@ -22,6 +23,12 @@ A **desk** is its own deployed `settlement` contract + a friendbot-funded sponso
   and proofs are generated in-browser. Freighter `signMessage` deterministically unlocks an
   HKDF-derived recovery key; the backend stores only an opaque AES-GCM snapshot and a write-token
   hash. New note secrets are uploaded before their transaction is submitted.
+- The backend is not given the wallet's owned-note inventory. Coin selection and split/join planning
+  remain client-private. Each action stages output secrets and reservation state in the encrypted
+  backup before submission.
+- Fund mutation endpoints require a wallet session plus the live client-action lease at the head of
+  that wallet's FIFO queue; direct relay calls cannot bypass serialization. Progress events are
+  persisted and replayed over SSE.
 - `submit_order` / `unshield` / `cancel_order` are relayer-submittable (the proof is the spend
   authority), so the desk sponsor is the sole source/fee payer = fully sponsored.
 - `shield` moves the user's own tokens, so it needs the user's authorization — but it is **also

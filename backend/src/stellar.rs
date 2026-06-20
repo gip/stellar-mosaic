@@ -6,6 +6,7 @@ use std::process::Command;
 /// Thin wrapper over the `stellar` CLI. We shell out to the already-validated recipe in
 /// `scripts/0{4,6}_*.sh` rather than reimplement Soroban tx assembly. Read calls simulate
 /// (no `--send`); write/relay calls add `--send yes` and a signing source (the sponsor secret).
+#[derive(Clone)]
 pub struct Stellar {
     bin: String,
     network: String,
@@ -308,5 +309,8 @@ impl Stellar {
 }
 
 fn is_contract_id(t: &str) -> bool {
-    t.len() == 56 && t.starts_with('C') && t.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    t.len() == 56
+        && t.starts_with('C')
+        && t.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
 }
