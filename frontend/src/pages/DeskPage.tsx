@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { api, type Desk } from '../api'
 import { useWallet } from '../WalletContext'
@@ -6,8 +6,14 @@ import BookView from '../components/BookView'
 import ShieldForm from '../components/ShieldForm'
 import OrderForm from '../components/OrderForm'
 import CancelOrderButton from '../components/CancelOrderButton'
+import Toasts, { type ToastItem } from '../components/Toasts'
 import { notesForDesk, reconcile, type Note } from '../notes'
 import { formatAmount } from '../amount'
+
+/** Canonical 32-byte hex tag for comparison: drop any `0x`, lowercase, left-pad to 64. */
+function normTag(h: string): string {
+  return h.replace(/^0x/i, '').toLowerCase().padStart(64, '0')
+}
 
 export default function DeskPage() {
   const { deskId } = useParams()
@@ -64,6 +70,59 @@ export default function DeskPage() {
     }
   }, [deskId, reloadNotes])
 
+  // Live confirmation toasts (e.g. "your order filled").
+  const [toasts, setToasts] = useState<ToastItem[]>([])
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id))
+  }, [])
+
+  // Latest notes, read inside the fills poller without resubscribing it on every notes change.
+  const notesRef = useRef<Note[]>(notes)
+  useEffect(() => {
+    notesRef.current = notes
+  }, [notes])
+
+  // Poll `filled` events and toast the ones destined for our own order-output notes. The first poll
+  // silently records every existing fill id (so historical fills don't toast); only fills that show
+  // up afterwards — i.e. trades that cross during this session — raise a confirmation.
+  const seenFills = useRef<Set<string>>(new Set())
+  const fillsSeeded = useRef(false)
+  useEffect(() => {
+    if (!deskId || !desk) return
+    const symOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
+    const decOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
+    let alive = true
+    const tick = () =>
+      api
+        .getFills(deskId)
+        .then((r) => {
+          if (!alive) return
+          const fills = r.fills ?? []
+          if (!fillsSeeded.current) {
+            fills.forEach((f) => seenFills.current.add(f.id))
+            fillsSeeded.current = true
+            return
+          }
+          const mine = new Set(notesRef.current.map((n) => normTag(n.owner_tag)))
+          const fresh = fills.filter((f) => !seenFills.current.has(f.id))
+          fresh.forEach((f) => seenFills.current.add(f.id))
+          const added = fresh
+            .filter((f) => mine.has(normTag(f.owner_tag)))
+            .map((f) => ({
+              id: f.id,
+              text: `Order filled — traded ${formatAmount(BigInt(f.amount_in), decOf(f.asset_in))} ${symOf(f.asset_in)} → ${formatAmount(BigInt(f.amount_out), decOf(f.asset_out))} ${symOf(f.asset_out)}`,
+            }))
+          if (added.length) setToasts((prev) => [...prev, ...added])
+        })
+        .catch(() => {})
+    tick()
+    const h = setInterval(tick, 7000)
+    return () => {
+      alive = false
+      clearInterval(h)
+    }
+  }, [deskId, desk])
+
   if (error) return <p className="err">{error}</p>
   if (!desk) return <p className="muted">Loading…</p>
 
@@ -77,6 +136,7 @@ export default function DeskPage() {
 
   return (
     <>
+      <Toasts items={toasts} onDismiss={dismissToast} />
       <h2>{desk.name}</h2>
 
       <h2>Address book — desk</h2>

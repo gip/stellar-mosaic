@@ -140,6 +140,27 @@ th {
 .ok {
   color: #060;
 }
+.warn {
+  color: #a6730a;
+}
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 360px;
+}
+.toast {
+  border: 1px solid var(--line-strong);
+  background: var(--bg);
+  padding: 10px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 12%);
+}
 .pill {
   border: 1px solid var(--line-strong);
   padding: 1px 8px;

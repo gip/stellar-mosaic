@@ -645,6 +645,7 @@ impl Settlement {
         let mut book = book_load(&env, pair_id, opp_u);
 
         let mut remaining_in = taker.amount_in;
+        let mut filled_out = 0i128; // total asset_out the taker receives across all fills
         let mut fills = 0u32;
         let mut i = 0u32;
         while i < book.len() && fills < MAX_FILLS_PER_SUBMIT && remaining_in > 0 {
@@ -679,12 +680,14 @@ impl Settlement {
                 mint_note(&env, &h, pair.quote_asset, q_quote, &maker.output_owner_tag);
                 maker.remaining_in -= f_base;
                 remaining_in -= q_quote;
+                filled_out += f_base; // taker (BUY) receives base
             } else {
                 // maker gives quote -> taker; taker gives base -> maker
                 mint_note(&env, &h, pair.quote_asset, q_quote, &taker.output_owner_tag);
                 mint_note(&env, &h, pair.base_asset, f_base, &maker.output_owner_tag);
                 maker.remaining_in -= q_quote;
                 remaining_in -= f_base;
+                filled_out += q_quote; // taker (SELL) receives quote
             }
             fills += 1;
             if maker.remaining_in == 0 {
@@ -694,6 +697,24 @@ impl Settlement {
             }
         }
         book_store(&env, pair_id, opp_u, &book);
+
+        // If the order crossed, summarize the taker's trade in a single event so clients can show
+        // "your order matched" with concrete amounts/currencies: `in` = asset_in spent on fills,
+        // `out` = asset_out received. The per-note `noteins` mints still drive tree reconstruction;
+        // this event is purely informational (indexers ignore unknown topics).
+        let filled_in = taker.amount_in - remaining_in;
+        if filled_in > 0 {
+            env.events().publish(
+                (symbol_short!("filled"),),
+                (
+                    taker.asset_in,
+                    filled_in,
+                    taker.asset_out,
+                    filled_out,
+                    taker.output_owner_tag.clone(),
+                ),
+            );
+        }
 
         // Rest or IOC-return the taker's remainder.
         if remaining_in > 0 {

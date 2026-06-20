@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/desks/:id/root", get(handlers::get_root))
         .route("/desks/:id/book", get(handlers::get_book))
         .route("/desks/:id/notes", get(handlers::get_notes))
+        .route("/desks/:id/fills", get(handlers::get_fills))
         .route("/desks/:id/note-proof", get(handlers::get_note_proof))
         .route("/desks/:id/shield/submit", post(handlers::shield_submit))
         .route("/desks/:id/relay/order", post(handlers::relay_order))

@@ -117,6 +117,23 @@ pub async fn get_notes(
     Ok(Json(json!({ "notes": notes })))
 }
 
+/// Crossing-fill summaries (`filled` events) for the desk. A client matches each `owner_tag` against
+/// its own order-output notes to surface a "your order filled" confirmation with the traded amounts.
+pub async fn get_fills(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, "get_fills");
+    let desk = st.db.get_desk(&id)?;
+    let from = st.db.from_ledger(&id)?;
+    let fills = tokio::task::spawn_blocking(move || {
+        crate::indexer::fills(&st.stellar, &desk.contract_id, from)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(json!({ "fills": fills })))
+}
+
 #[derive(Deserialize)]
 pub struct ProofQuery {
     pub owner_tag: String,

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { Desk, Pair } from '../api'
 import { api } from '../api'
 import { randomField } from '../crypto'
@@ -36,6 +36,22 @@ function parseMinOut(
   } catch {
     return null
   }
+}
+
+/**
+ * Mirror of the contract's price-cross test (`cross_amounts`): taker `a` crosses resting maker `b`
+ * when `a.min_out * b.min_out <= a.amount_in * b.amount_in`. Used to warn, before submitting, that an
+ * order would match immediately rather than rest on the book.
+ */
+function crosses(aIn: bigint, aMinOut: bigint, bIn: bigint, bMinOut: bigint): boolean {
+  return aMinOut * bMinOut <= aIn * bIn
+}
+
+interface BookEntry {
+  amount_in: string | number
+  min_out: string | number
+  remaining_in: string | number
+  expiry: string | number
 }
 
 /**
@@ -86,6 +102,36 @@ export default function OrderForm({
     minOutRaw > 0n &&
     plan != null &&
     plan.kind !== 'impossible'
+
+  // Will this order cross a resting opposing order and execute immediately (rather than rest)? We
+  // mirror the contract's match logic against the live opposing book so we can warn before placing.
+  // SELL crosses resting bids (side 0); BUY crosses resting asks (side 1).
+  const [willCross, setWillCross] = useState(false)
+  useEffect(() => {
+    let alive = true
+    const aIn = amountInRaw
+    const aMinOut = minOutRaw
+    const oppSide = side === 'SELL' ? 0 : 1
+    // Only query the opposing book when inputs are well-formed; otherwise the answer is just "no".
+    const probe =
+      aIn != null && aMinOut != null && aIn > 0n && aMinOut > 0n
+        ? api.getBook(desk.id, pairId, oppSide).then((r) => {
+            const now = nowSeconds()
+            const entries = (r.orders as BookEntry[]) ?? []
+            return entries.some(
+              (o) =>
+                Number(o.expiry) > now &&
+                BigInt(o.remaining_in) > 0n &&
+                crosses(aIn, aMinOut, BigInt(o.amount_in), BigInt(o.min_out)),
+            )
+          })
+        : Promise.resolve(false)
+    probe.then((cross) => alive && setWillCross(cross)).catch(() => alive && setWillCross(false))
+    return () => {
+      alive = false
+    }
+    // amountInRaw/minOutRaw are bigints, compared by value via Object.is in the dep array.
+  }, [desk.id, pairId, side, amountInRaw, minOutRaw])
 
   // Human-readable preview of what placing the order will do.
   const preview = (() => {
@@ -255,6 +301,12 @@ export default function OrderForm({
       <button type="submit" disabled={busy || !valid}>
         {busy ? 'Working…' : 'Place order'}
       </button>
+      {willCross && valid && !busy && !error && (
+        <span className="warn">
+          ⚠ Crosses the book — this order will match a resting {side === 'SELL' ? 'bid' : 'ask'} and
+          execute immediately (fully or partially) instead of resting.
+        </span>
+      )}
       {preview && !error && <span className="muted">{preview}</span>}
       {status && <span className="muted">{status}</span>}
       {error && <span className="err">{error}</span>}

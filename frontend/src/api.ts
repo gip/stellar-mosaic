@@ -63,6 +63,7 @@ export const api = {
     pairs: { base_asset: number; quote_asset: number }[]
   }) => req<Desk>('/desks', { method: 'POST', body: JSON.stringify(body) }),
   getNotes: (id: string) => req<{ notes: ChainNote[] }>(`/desks/${id}/notes`),
+  getFills: (id: string) => req<{ fills: Fill[] }>(`/desks/${id}/fills`),
   submitShield: (id: string, tx_xdr: string) =>
     req<{ ok: boolean; result: string }>(`/desks/${id}/shield/submit`, {
       method: 'POST',
@@ -104,5 +105,17 @@ export interface ChainNote {
   leaf_index: number
   asset: number
   amount: string
+  owner_tag: string
+}
+
+/** A crossing-fill summary from a `filled` event (taker-perspective: `in` spent, `out` received). */
+export interface Fill {
+  id: string
+  ledger: number
+  tx_hash: string
+  asset_in: number
+  amount_in: string
+  asset_out: number
+  amount_out: string
   owner_tag: string
 }

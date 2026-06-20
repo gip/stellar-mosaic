@@ -42,6 +42,28 @@ pub fn notes(stellar: &Stellar, contract_id: &str, from_ledger: Option<u64>) -> 
     Ok(notes)
 }
 
+/// One crossing fill, decoded from a `filled` event (emitted when a submitted order matches resting
+/// liquidity). `owner_tag` is the taker's output destination; a client matches it against its own
+/// order-output notes to show a "your order filled" confirmation with the exact traded amounts.
+/// `in`/`out` are taker-perspective: `amount_in` of `asset_in` spent, `amount_out` of `asset_out`
+/// received. Events are returned in emission order (oldest first).
+#[derive(Serialize)]
+pub struct FillInfo {
+    pub id: String,
+    pub ledger: u64,
+    pub tx_hash: String,
+    pub asset_in: u32,
+    pub amount_in: String,
+    pub asset_out: u32,
+    pub amount_out: String,
+    pub owner_tag: String, // 0x + 64 hex
+}
+
+/// Scan the contract's `filled` events (no tree replay needed — these are informational summaries).
+pub fn fills(stellar: &Stellar, contract_id: &str, from_ledger: Option<u64>) -> AppResult<Vec<FillInfo>> {
+    scan_events(stellar, contract_id, from_ledger, parse_fill)
+}
+
 /// Replay all events, find the leaf for `owner_tag` (0x hex), and return its membership path.
 pub fn note_proof(
     stellar: &Stellar,
@@ -100,12 +122,14 @@ fn build(
     Ok((tree, notes))
 }
 
-/// Page through all of the contract's events and parse the tree-relevant ones, in order.
-fn fetch_events(
+/// Page through all of the contract's events from `from_ledger`, mapping each event line with
+/// `parse` and collecting the `Some` results in emission order.
+fn scan_events<T>(
     stellar: &Stellar,
     contract_id: &str,
     from_ledger: Option<u64>,
-) -> AppResult<Vec<TreeEvent>> {
+    parse: impl Fn(&serde_json::Value) -> Option<T>,
+) -> AppResult<Vec<T>> {
     // Start near the desk's activity (stored at create) so a single scan window reaches its events;
     // fall back to the oldest retained ledger for imported desks.
     let oldest = match from_ledger {
@@ -131,8 +155,8 @@ fn fetch_events(
             if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
                 last_id = Some(id.to_string());
             }
-            if let Some(ev) = parse_event(&v) {
-                out.push(ev);
+            if let Some(t) = parse(&v) {
+                out.push(t);
             }
         }
         if n < 10000 || last_id.is_none() {
@@ -141,6 +165,15 @@ fn fetch_events(
         cursor = last_id;
     }
     Ok(out)
+}
+
+/// Page through all of the contract's events and parse the tree-relevant ones, in order.
+fn fetch_events(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+) -> AppResult<Vec<TreeEvent>> {
+    scan_events(stellar, contract_id, from_ledger, parse_event)
 }
 
 fn parse_event(v: &serde_json::Value) -> Option<TreeEvent> {
@@ -168,6 +201,37 @@ fn parse_event(v: &serde_json::Value) -> Option<TreeEvent> {
         }
         _ => None,
     }
+}
+
+/// Parse a `filled` event into a `FillInfo` (taker-perspective trade summary). Returns `None` for
+/// any other event. Value layout: `(u32 asset_in, i128 amount_in, u32 asset_out, i128 amount_out,
+/// bytes32 output_owner_tag)`.
+fn parse_fill(v: &serde_json::Value) -> Option<FillInfo> {
+    let topic_b64 = v.get("topic")?.as_array()?.first()?.as_str()?;
+    if decode_symbol(topic_b64)? != "filled" {
+        return None;
+    }
+    let value_b64 = v.get("value")?.as_str()?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(value_b64).ok()?;
+    let mut r = Rdr::new(&bytes);
+    if r.vec_header()? != 5 {
+        return None;
+    }
+    let asset_in = r.scu32()?;
+    let amount_in = r.sci128()?;
+    let asset_out = r.scu32()?;
+    let amount_out = r.sci128()?;
+    let tag = r.scbytes32()?;
+    Some(FillInfo {
+        id: v.get("id")?.as_str()?.to_string(),
+        ledger: v.get("ledger").and_then(|x| x.as_u64()).unwrap_or(0),
+        tx_hash: v.get("txHash").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+        asset_in,
+        amount_in: amount_in.to_string(),
+        asset_out,
+        amount_out: amount_out.to_string(),
+        owner_tag: fmt_hex32(&tag),
+    })
 }
 
 /// Decode a base64 ScVal::Symbol into its string.
