@@ -41,23 +41,12 @@ fn hash3(a: Field, b: Field, c: Field) -> Field {
     compress(compress(a, b), c)
 }
 
-fn hash8(
-    a: Field,
-    b: Field,
-    c: Field,
-    d: Field,
-    e: Field,
-    f: Field,
-    g: Field,
-    h: Field,
-) -> Field {
+fn hash6(a: Field, b: Field, c: Field, d: Field, e: Field, f: Field) -> Field {
     let mut acc = compress(a, b);
     acc = compress(acc, c);
     acc = compress(acc, d);
     acc = compress(acc, e);
-    acc = compress(acc, f);
-    acc = compress(acc, g);
-    compress(acc, h)
+    compress(acc, f)
 }
 
 fn main(
@@ -76,9 +65,7 @@ fn main(
     min_out: pub Field,             // [6] limit terms, scaled integer
     output_owner_tag: pub Field,    // [7] proceeds destination tag
     cancel_owner_tag: pub Field,    // [8] cancel-authority tag
-    expiry: pub Field,              // [9] order validity deadline (unix seconds; book rejects when past)
-    partial_allowed: pub Field,     // [10] 0/1: may this order be partially filled in the book
-    order_leaf: pub Field,          // [11] leaf binding every order field the book/cancel trust
+    order_leaf: pub Field,          // [9] leaf the contract inserts as the active order
 ) {
     // (5) domain separation: this proof is only valid as a lift.
     assert(domain == LIFT_DOMAIN);
@@ -106,21 +93,14 @@ fn main(
     // (3) nullifier correctness for the consumed note.
     assert(compress(sk_o, rho_in) == nullifier_in);
 
-    // partial_allowed is a boolean flag the book trusts; constrain it so a proof cannot bind a
-    // non-{0,1} value that the contract would misread.
-    assert(partial_allowed * (partial_allowed - 1) == 0);
-
-    // (4) order leaf binds every field the book/cancel will trust, now including the validity
-    // deadline and the partial-execution flag.
-    let computed_order_leaf = hash8(
+    // (4) order leaf binds every field settle/cancel will trust.
+    let computed_order_leaf = hash6(
         asset_in,
         amount_in,
         asset_out,
         min_out,
         output_owner_tag,
         cancel_owner_tag,
-        expiry,
-        partial_allowed,
     );
     assert(computed_order_leaf == order_leaf);
 }

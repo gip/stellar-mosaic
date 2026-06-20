@@ -40,16 +40,11 @@ Created by: `shield`, or `settle` (proceeds/change). Consumed by: `lift_order`, 
     min_out          : u128         // limit terms, scaled integer / fixed-point policy
     output_owner_tag : Field        // proceeds destination = Poseidon(pk_o, rho_out)
     cancel_owner_tag : Field        // cancel auth          = Poseidon(pk_o, rho_ord)
-    expiry           : u64          // validity deadline (unix seconds); book rejects when past
-    partial_allowed  : bool         // may this order be partially filled in the book
   }
-  leaf      = Poseidon8(asset_in, amount_in, asset_out, min_out,
-                        output_owner_tag, cancel_owner_tag, expiry, partial_allowed)
+  leaf      = Poseidon(asset_in, amount_in, asset_out, min_out, output_owner_tag, cancel_owner_tag)
+  nullifier = Poseidon(sk_o, rho_ord)   // when settled or cancelled
 ```
-Created by: `lift_order` (consuming an asset note). Consumed by `settle`/`settle_exact` (atomic) or
-rested in the on-chain book and consumed by fills, `cancel_order`, or `prune_expired` (see
-`order-book.md`). The book stores these terms in plaintext; `cancel_order` proves knowledge of the
-`cancel_owner_tag` secret (no nullifier — removing the book entry is the single-use guard).
+Created by: `lift_order` (consuming an asset note). Consumed by: `settle` or `cancel`.
 
 ## How settle creates proceeds (no proof, no secret)
 

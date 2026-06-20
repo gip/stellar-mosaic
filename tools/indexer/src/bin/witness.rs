@@ -19,7 +19,7 @@
 //!   compress   <a> <b>                    # 2-to-1 Poseidon2 compression
 //!   notetag    <sk> <rho>                 # owner_tag = compress(compress(sk,0), rho)
 //!   nullifier  <sk> <rho>                 # nullifier = compress(sk, rho)
-//!   orderleaf  <asset_in> <amount_in> <asset_out> <min_out> <out_tag> <cancel_tag> <expiry> <partial>  # hash8
+//!   orderleaf  <asset_in> <amount_in> <asset_out> <min_out> <out_tag> <cancel_tag>  # hash6
 //!   recipient  <strkey>                   # sha256(address.xdr), top byte zeroed (unshield binding)
 //!
 //! `shield`/`settled` mirror the contract's events and insert leaves in the exact on-chain order.
@@ -57,27 +57,14 @@ fn parse_field(env: &Env, s: &str) -> Result<U256, String> {
     }
 }
 
-/// 8-input left-to-right fold (the circuits' `hash8`), used for the order leaf.
+/// 6-input left-to-right fold (the circuits' `hash6`), used for the order leaf.
 #[allow(clippy::too_many_arguments)]
-fn hash8(
-    env: &Env,
-    h: &Hasher,
-    a: &U256,
-    b: &U256,
-    c: &U256,
-    d: &U256,
-    e: &U256,
-    f: &U256,
-    g: &U256,
-    i: &U256,
-) -> U256 {
+fn hash6(env: &Env, h: &Hasher, a: &U256, b: &U256, c: &U256, d: &U256, e: &U256, f: &U256) -> U256 {
     let mut acc = h.compress(env, a, b);
     acc = h.compress(env, &acc, c);
     acc = h.compress(env, &acc, d);
     acc = h.compress(env, &acc, e);
-    acc = h.compress(env, &acc, f);
-    acc = h.compress(env, &acc, g);
-    h.compress(env, &acc, i)
+    h.compress(env, &acc, f)
 }
 
 fn run() -> Result<(), String> {
@@ -209,20 +196,18 @@ fn run() -> Result<(), String> {
                     .map_err(|e| e.to_string())?;
             }
             "orderleaf" => {
-                if tok.len() != 9 {
+                if tok.len() != 7 {
                     return Err(ctx(
-                        "orderleaf needs: <asset_in> <amount_in> <asset_out> <min_out> <out_tag> <cancel_tag> <expiry> <partial_allowed>".into(),
+                        "orderleaf needs: <asset_in> <amount_in> <asset_out> <min_out> <out_tag> <cancel_tag>".into(),
                     ));
                 }
                 let f: Result<Vec<U256>, String> =
-                    tok[1..9].iter().map(|t| parse_field(&env, t)).collect();
+                    tok[1..7].iter().map(|t| parse_field(&env, t)).collect();
                 let f = f.map_err(&ctx)?;
                 writeln!(
                     out,
                     "{}",
-                    u256_hex(&hash8(
-                        &env, &h, &f[0], &f[1], &f[2], &f[3], &f[4], &f[5], &f[6], &f[7]
-                    ))
+                    u256_hex(&hash6(&env, &h, &f[0], &f[1], &f[2], &f[3], &f[4], &f[5]))
                 )
                 .map_err(|e| e.to_string())?;
             }
