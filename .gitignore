@@ -18,6 +18,3 @@ target/
 # misc
 .DS_Store
 .gstack/
-
-# bulky one-off worst-case testnet fixtures (regenerable via scripts/gen_worstcase_fixtures.sh)
-contracts/settlement/tests/fixtures/book_worst/

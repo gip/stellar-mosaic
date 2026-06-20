@@ -51,9 +51,6 @@ SKB=3333; RHOB=4444
 SKA2=5555; RHOA2=6666     # A's proceeds (2000 asset2)
 SKB2=7777; RHOB2=8888     # B's proceeds (100 asset1)
 CANCEL_A=9100; CANCEL_B=9200
-# Order-book public inputs (lift fields [9]/[10]). The demo uses the atomic settle (full-fill), so
-# partial execution is off; expiry is far in the future so the orders never look stale.
-EXPIRY=9999999999; PARTIAL_A=0; PARTIAL_B=0
 # The real address A withdraws its proceeds to.
 DEMO_TO="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
 
@@ -65,8 +62,8 @@ OTB_OUT=$(field notetag $SKB2 $RHOB2)      # B's proceeds stealth tag
 NULL_A=$(field nullifier $SKA $RHOA)
 NULL_B=$(field nullifier $SKB $RHOB)
 NULL_AOUT=$(field nullifier $SKA2 $RHOA2)  # nullifier of A's proceeds note (for unshield)
-OLEAF_A=$(field orderleaf $ASSET1 $AMT_A $ASSET2 $MIN_A "$OTA_OUT" $CANCEL_A $EXPIRY $PARTIAL_A)
-OLEAF_B=$(field orderleaf $ASSET2 $AMT_B $ASSET1 $MIN_B "$OTB_OUT" $CANCEL_B $EXPIRY $PARTIAL_B)
+OLEAF_A=$(field orderleaf $ASSET1 $AMT_A $ASSET2 $MIN_A "$OTA_OUT" $CANCEL_A)
+OLEAF_B=$(field orderleaf $ASSET2 $AMT_B $ASSET1 $MIN_B "$OTB_OUT" $CANCEL_B)
 RECIP=$(field recipient "$DEMO_TO")
 
 # Persist the owner tags the contract's shield calls need (as raw 32-byte words for the test).
@@ -131,8 +128,6 @@ echo ">>> proving order A..."
   echo "min_out = \"$MIN_A\""
   echo "output_owner_tag = \"$OTA_OUT\""
   echo "cancel_owner_tag = \"$CANCEL_A\""
-  echo "expiry = \"$EXPIRY\""
-  echo "partial_allowed = \"$PARTIAL_A\""
   echo "order_leaf = \"$OLEAF_A\""
 } > "$LIFT/Prover.toml"
 prove "$LIFT" lift a
@@ -151,8 +146,6 @@ echo ">>> proving order B..."
   echo "min_out = \"$MIN_B\""
   echo "output_owner_tag = \"$OTB_OUT\""
   echo "cancel_owner_tag = \"$CANCEL_B\""
-  echo "expiry = \"$EXPIRY\""
-  echo "partial_allowed = \"$PARTIAL_B\""
   echo "order_leaf = \"$OLEAF_B\""
 } > "$LIFT/Prover.toml"
 prove "$LIFT" lift b
