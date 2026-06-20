@@ -8,8 +8,9 @@
 
 use settlement::{DataKey, Error, OrderEntry, Settlement, SettlementClient};
 use soroban_sdk::{
-    testutils::{storage::Persistent as _, Address as _, Ledger},
+    testutils::{storage::Persistent as _, Address as _, Events, Ledger},
     token::StellarAssetClient,
+    xdr::{ContractEventBody, Int128Parts, ScVal},
     Address, Bytes, BytesN, Env,
 };
 
@@ -148,6 +149,54 @@ fn book_lifecycle_rest_partial_fill_cancel_prune() {
     let removed = client.prune_expired(&0, &SIDE_SELL, &10);
     assert_eq!(removed, 1, "S3 pruned");
     assert!(client.book(&0, &SIDE_SELL).is_empty(), "sell book empty after prune");
+}
+
+/// Decode the data payload of every `filled` event currently in the env. Returns
+/// `(asset_in, amount_in, asset_out, amount_out)` tuples (taker-perspective; the owner tag is the
+/// 5th field but not needed here).
+fn filled_events(env: &Env) -> std::vec::Vec<(u32, i128, u32, i128)> {
+    let i128_of = |p: &Int128Parts| ((p.hi as i128) << 64) | (p.lo as i128);
+    env.events()
+        .all()
+        .events()
+        .iter()
+        .filter_map(|e| {
+            let ContractEventBody::V0(v0) = &e.body;
+            match v0.topics.first() {
+                Some(ScVal::Symbol(s)) if s.to_string() == "filled" => match v0.data.clone() {
+                    ScVal::Vec(Some(v)) => match (&v[0], &v[1], &v[2], &v[3]) {
+                        (ScVal::U32(ai), ScVal::I128(amt_in), ScVal::U32(ao), ScVal::I128(amt_out)) => {
+                            Some((*ai, i128_of(amt_in), *ao, i128_of(amt_out)))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn crossing_order_emits_filled_event_with_amounts_and_currencies() {
+    let env = test_env();
+    let id = deploy(&env);
+    let client = SettlementClient::new(&env, &id);
+    setup_book(&env, &id);
+
+    // Three sells rest (book empty -> no cross): no `filled` event for resting orders.
+    client.submit_order(&bytes(&env, P_S1), &bytes(&env, PI_S1));
+    client.submit_order(&bytes(&env, P_S2), &bytes(&env, PI_S2));
+    client.submit_order(&bytes(&env, P_S3), &bytes(&env, PI_S3));
+    assert!(filled_events(&env).is_empty(), "resting orders emit no `filled` event");
+
+    // The buy taker crosses S1 (full) + S2 (partial): exactly one taker-perspective summary.
+    client.submit_order(&bytes(&env, P_B1), &bytes(&env, PI_B1));
+    let filled = filled_events(&env);
+    assert_eq!(filled.len(), 1, "one `filled` event from the crossing taker");
+    // BUY spends quote (a2) to receive base (a1): in 1500+896=2396 a2, out 100+56=156 a1.
+    assert_eq!(filled[0], (A2, 2396, A1, 156), "filled summary: asset_in/amount_in/asset_out/amount_out");
 }
 
 #[test]

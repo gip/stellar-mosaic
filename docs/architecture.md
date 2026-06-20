@@ -174,4 +174,7 @@ the recipient's balance rose by exactly the 2000 unshielded.
 - **Wrapped assets:** define issuers/bridges before advertising ETH/XRP support.
 - **Standalone build:** the contract depends on a vendored Nethermind verifier path that is
   gitignored; make it reproducible before treating it as a buildable package.
-- **Recovery:** users hold note secrets; losing them loses access until a recovery design exists.
+- **Recovery:** new notes are account-scoped and included in an AES-GCM snapshot encrypted with a
+  key deterministically recovered from Freighter `signMessage`. The backend stores ciphertext under
+  opaque read/write capabilities; encrypted file export is the independent fallback. Legacy notes
+  without an account association intentionally remain local-only.

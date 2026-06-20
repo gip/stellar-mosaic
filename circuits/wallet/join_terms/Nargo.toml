@@ -1,0 +1,6 @@
+[package]
+name = "join_terms"
+type = "bin"
+authors = ["stellar-mosaic"]
+
+[dependencies]
