@@ -223,6 +223,9 @@ export default function DeskPage() {
               label="Asks (sell base)"
               inDecimals={dec(p.base_asset)}
               outDecimals={dec(p.quote_asset)}
+              baseDecimals={dec(p.base_asset)}
+              quoteDecimals={dec(p.quote_asset)}
+              inIsBase={true}
               notes={notes}
               onCancel={reloadNotes}
             />
@@ -233,6 +236,9 @@ export default function DeskPage() {
               label="Bids (buy base)"
               inDecimals={dec(p.quote_asset)}
               outDecimals={dec(p.base_asset)}
+              baseDecimals={dec(p.base_asset)}
+              quoteDecimals={dec(p.quote_asset)}
+              inIsBase={false}
               notes={notes}
               onCancel={reloadNotes}
             />

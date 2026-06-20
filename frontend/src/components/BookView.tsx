@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, type Desk } from '../api'
-import { formatAmount } from '../amount'
+import { formatAmount, formatPrice } from '../amount'
 import { type Note } from '../notes'
 import CancelOrderButton from './CancelOrderButton'
 
@@ -27,6 +27,9 @@ export default function BookView({
   label,
   inDecimals,
   outDecimals,
+  baseDecimals,
+  quoteDecimals,
+  inIsBase,
   notes,
   onCancel,
 }: {
@@ -38,6 +41,11 @@ export default function BookView({
   inDecimals: number
   /** Decimals of the asset requested (min_out). */
   outDecimals: number
+  /** Pair base/quote decimals, for the quote-per-base price column. */
+  baseDecimals: number
+  quoteDecimals: number
+  /** Whether the offered (amount_in) asset is the base — true for asks, false for bids. */
+  inIsBase: boolean
   /** The user's local notes — used to find orders we placed (and can cancel). */
   notes: Note[]
   onCancel: () => void
@@ -84,6 +92,7 @@ export default function BookView({
         <table>
           <thead>
             <tr>
+              <th>price</th>
               <th>in</th>
               <th>min out</th>
               <th>left</th>
@@ -94,8 +103,13 @@ export default function BookView({
           <tbody>
             {orders.map((o, i) => {
               const own = o.order_leaf ? ownByLeaf.get(normLeaf(o.order_leaf)) : undefined
+              // Price is always quote-per-base: amount_in/min_out are base/quote depending on side.
+              const baseRaw = BigInt(inIsBase ? o.amount_in : o.min_out)
+              const quoteRaw = BigInt(inIsBase ? o.min_out : o.amount_in)
+              const px = formatPrice(baseRaw, quoteRaw, baseDecimals, quoteDecimals)
               return (
                 <tr key={o.order_leaf ?? i}>
+                  <td>{px ?? '—'}</td>
                   <td>{formatAmount(BigInt(o.amount_in), inDecimals)}</td>
                   <td>{formatAmount(BigInt(o.min_out), outDecimals)}</td>
                   <td>{formatAmount(BigInt(o.remaining_in), inDecimals)}</td>

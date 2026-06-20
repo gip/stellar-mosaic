@@ -48,6 +48,47 @@ export function computeMinOut(
   return (amountInRaw * num * 10n ** BigInt(decimalsOut)) / (den * 10n ** BigInt(decimalsIn))
 }
 
+/**
+ * Compute a limit order's raw min_out from a limit price quoted as quote-per-base — the same number
+ * for both sides of a pair (e.g. 63000 USD per BTC for BTC/USD). What differs is the direction of
+ * the conversion: a SELL offers base for quote (multiply by price), a BUY offers quote for base
+ * (divide by price). All exact integer floor math, rescaled across the base/quote decimals.
+ */
+export function computeMinOutAtPrice(
+  amountInRaw: bigint,
+  price: string,
+  side: 'SELL' | 'BUY',
+  decimalsBase: number,
+  decimalsQuote: number,
+): bigint {
+  const { num, den } = parseRatio(price) // price = num/den, in quote per base
+  if (side === 'SELL') {
+    // amount_in is base; out is quote: amount_in × price.
+    return (amountInRaw * num * 10n ** BigInt(decimalsQuote)) / (den * 10n ** BigInt(decimalsBase))
+  }
+  // BUY: amount_in is quote; out is base: amount_in ÷ price.
+  return (amountInRaw * den * 10n ** BigInt(decimalsBase)) / (num * 10n ** BigInt(decimalsQuote))
+}
+
+/**
+ * Human quote-per-base price from a raw base amount and a raw quote amount (price = quote / base),
+ * rendered with up to `places` fractional digits. Returns null when base is zero. Used to show a
+ * single consistent price for resting orders regardless of which way round they were placed.
+ */
+export function formatPrice(
+  baseRaw: bigint,
+  quoteRaw: bigint,
+  decimalsBase: number,
+  decimalsQuote: number,
+  places = 6,
+): string | null {
+  if (baseRaw <= 0n) return null
+  const scaled =
+    (quoteRaw * 10n ** BigInt(decimalsBase) * 10n ** BigInt(places)) /
+    (baseRaw * 10n ** BigInt(decimalsQuote))
+  return formatAmount(scaled, places)
+}
+
 /** Format raw base units into a human decimal string, trimming trailing fractional zeros. */
 export function formatAmount(raw: string | bigint, decimals: number): string {
   const n = typeof raw === 'bigint' ? raw : BigInt(raw)

@@ -5,7 +5,7 @@ import { randomField } from '../crypto'
 import { orderTerms } from '../noir'
 import { proveLift, b64 } from '../prove'
 import { addNote, updateNote, type Note } from '../notes'
-import { toRaw, formatAmount, computeMinOut, parseRatio } from '../amount'
+import { toRaw, formatAmount, computeMinOutAtPrice, parseRatio } from '../amount'
 import { maxIn, planAssembly } from '../orderPlan'
 import { runAssembly } from '../orchestrate'
 import { nowMs, nowSeconds } from '../time'
@@ -22,17 +22,22 @@ function parseAmountIn(amountIn: string, decimalsIn: number): bigint | null {
   }
 }
 
-/** Compute raw min_out from amount_in + ratio, or null if either is blank/invalid. */
+/**
+ * Compute raw min_out from amount_in + a limit price (quote per base), or null if either is
+ * blank/invalid. The price means the same thing for both sides; only the conversion direction
+ * (multiply for SELL, divide for BUY) depends on `side`.
+ */
 function parseMinOut(
   amountInRaw: bigint | null,
-  ratio: string,
-  decimalsIn: number,
-  decimalsOut: number,
+  price: string,
+  side: Side,
+  decimalsBase: number,
+  decimalsQuote: number,
 ): bigint | null {
-  if (amountInRaw == null || amountInRaw <= 0n || ratio.trim() === '') return null
+  if (amountInRaw == null || amountInRaw <= 0n || price.trim() === '') return null
   try {
-    if (parseRatio(ratio).num <= 0n) return null
-    return computeMinOut(amountInRaw, ratio, decimalsIn, decimalsOut)
+    if (parseRatio(price).num <= 0n) return null
+    return computeMinOutAtPrice(amountInRaw, price, side, decimalsBase, decimalsQuote)
   } catch {
     return null
   }
@@ -56,7 +61,8 @@ interface BookEntry {
 
 /**
  * Place a resting limit order. The user picks a pair/side, an amount of the offered (in) asset, and
- * a ratio (out per 1 in); min_out is computed. The `lift` circuit consumes ONE note in full and that
+ * a limit price quoted as quote-per-base (the same number for both sides); min_out is computed from
+ * it per side (SELL multiplies, BUY divides). The `lift` circuit consumes ONE note in full and that
  * note must already be on-chain, so if no single confirmed note equals amount_in we first assemble
  * one via in-browser-proved `join`(s) (each gated on confirmation), then prove the lift and relay a
  * fully-sponsored submit_order. On success the offered note is marked spent and a pending proceeds
@@ -74,7 +80,7 @@ export default function OrderForm({
   const [pairId, setPairId] = useState(desk.pairs[0]?.pair_id ?? 0)
   const [side, setSide] = useState<Side>('SELL')
   const [amountIn, setAmountIn] = useState('')
-  const [ratio, setRatio] = useState('')
+  const [price, setPrice] = useState('')
   const [partial, setPartial] = useState(true)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
@@ -89,9 +95,13 @@ export default function OrderForm({
 
   const maxInRaw = maxIn(notes, assetIn)
 
+  // The limit price is always quoted as quote-per-base, the same for both sides of the pair.
+  const baseDecimals = pair ? dec(pair.base_asset) : 7
+  const quoteDecimals = pair ? dec(pair.quote_asset) : 7
+
   // Parse amount_in; derive min_out and the assembly plan reactively for preview + validation.
   const amountInRaw = parseAmountIn(amountIn, dec(assetIn))
-  const minOutRaw = parseMinOut(amountInRaw, ratio, dec(assetIn), dec(assetOut))
+  const minOutRaw = parseMinOut(amountInRaw, price, side, baseDecimals, quoteDecimals)
   const plan =
     amountInRaw != null && amountInRaw > 0n ? planAssembly(notes, assetIn, amountInRaw) : null
 
@@ -284,9 +294,9 @@ export default function OrderForm({
       </div>
       <div>
         <label>
-          Ratio ({sym(assetOut)} per {sym(assetIn)})
+          Limit price ({pair && sym(pair.quote_asset)} per {pair && sym(pair.base_asset)})
         </label>
-        <input value={ratio} onChange={(e) => setRatio(e.target.value)} inputMode="decimal" />
+        <input value={price} onChange={(e) => setPrice(e.target.value)} inputMode="decimal" />
       </div>
       <div>
         <label>Min out ({sym(assetOut)})</label>
