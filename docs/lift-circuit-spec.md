@@ -5,11 +5,15 @@ exactly what the `lift_order` proof binds, what the contract reads, and the soun
 both sides. Read `note-types.md` for the note structures and `architecture.md` for where it sits in
 the flow.
 
-> **NOTE (2026-06-18): this circuit is now the "order proof" consumed directly by the atomic
-> `settle` (two of them per trade), not a separate on-chain `lift` step.** The contract has no `lift`
-> entrypoint anymore. The public-input vector and all bindings below are unchanged and still correct;
-> only `order_leaf` (field 9) and `cancel_owner_tag` (field 8) are currently unused on-chain (there
-> is no on-chain order note to insert and no cancel entrypoint). See `architecture.md`.
+> **NOTE (2026-06-18): this circuit is the "order proof" consumed directly by the atomic `settle`
+> and by the on-chain order book (`submit_order`).** The contract has no separate `lift` entrypoint.
+>
+> **UPDATE (order-book Phase 2): the public-input vector grew from 10 to 12 fields** — `expiry` [9]
+> and `partial_allowed` [10] were added and `order_leaf` moved to [11] and now hashes all 8 order
+> terms (`hash8`). All earlier bindings are unchanged. `cancel_owner_tag` [8], `expiry` [9],
+> `partial_allowed` [10] and `order_leaf` [11] are read on-chain by the order book; `settle` /
+> `settle_exact` still only use fields [0..8]. This is a breaking change: every lift proof and the
+> lift VK were regenerated. See `architecture.md` and `order-book.md`.
 
 ## What lift does
 
@@ -61,8 +65,10 @@ this exact tuple. All are BN254 field elements.
 | 5 | `asset_out`        | contract stores as order field | wanted asset |
 | 6 | `min_out`          | contract stores as order field | limit terms, scaled integer (no floats) |
 | 7 | `output_owner_tag` | contract stores; `settle` stamps onto proceeds | proceeds destination tag |
-| 8 | `cancel_owner_tag` | contract stores; `cancel` checks against | cancel-authority tag |
-| 9 | `order_leaf`       | contract inserts into the tree as active order | `H(asset_in, amount_in, asset_out, min_out, output_owner_tag, cancel_owner_tag)` |
+| 8 | `cancel_owner_tag` | book stores; `cancel_order` checks proof against it | cancel-authority tag |
+| 9 | `expiry`           | book rejects if `< ledger timestamp`; stores | order validity deadline (unix seconds) |
+| 10 | `partial_allowed` | book honors when matching; circuit constrains to {0,1} | may this order be partially filled |
+| 11 | `order_leaf`      | book stores as the order's identity; `cancel` references it | `H8(asset_in, amount_in, asset_out, min_out, output_owner_tag, cancel_owner_tag, expiry, partial_allowed)` |
 
 `order_leaf` is exposed (rather than recomputed on-chain) so the contract does **not** pay Poseidon
 cost to insert the order; it trusts the in-circuit assertion that the leaf equals the hash of the
@@ -88,9 +94,10 @@ any tag. Binding-into-the-leaf is what stops a relayer or the contract from redi
 3. `input_leaf  = H(asset_in, amount_in, owner_tag_in)`
 4. membership: fold `input_leaf` up `path`/`index_bits`; assert the result `== root`
 5. nullifier: assert `H(sk_o, rho_in) == nullifier_in`
-6. order leaf: assert `H(asset_in, amount_in, asset_out, min_out, output_owner_tag, cancel_owner_tag)
-   == order_leaf`
+6. order leaf: assert `H8(asset_in, amount_in, asset_out, min_out, output_owner_tag,
+   cancel_owner_tag, expiry, partial_allowed) == order_leaf`
 7. domain: assert `domain == LIFT_DOMAIN` (a circuit constant), so this proof is only valid as a lift
+8. flag: assert `partial_allowed * (partial_allowed - 1) == 0` (boolean), so the book reads a clean 0/1
 
 Hashing matches the spike's convention: a 2-to-1 `compress` built from `poseidon2_permutation`
 (width 4, first lane), folded left-to-right for multi-input hashes. The contract and wallet MUST use
@@ -130,7 +137,9 @@ for the note-capacity headroom you want (32 ≈ 4B notes).
 
 ## Out of scope here (tracked in architecture.md)
 
-- `cancel` circuit (reuses ownership + nullifier machinery; spends `cancel_owner_tag`).
+- ~~`cancel` circuit~~ — IMPLEMENTED in `circuits/cancel` (domain 3); proves knowledge of the
+  order's `cancel_owner_tag` and binds `order_leaf` + `return_owner_tag`. No membership proof (the
+  resting order is plaintext on-chain). See `order-book.md`.
 - `unshield` circuit (asset-note spend, no order created).
 - change-at-lift extension.
 - registry ownership (merged contract vs Assets-owned registry + Desk cross-calls).

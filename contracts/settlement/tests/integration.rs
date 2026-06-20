@@ -25,6 +25,15 @@ const PI_B: &[u8] = include_bytes!("fixtures/public_inputs_b");
 const OTAG_A: &[u8] = include_bytes!("fixtures/owner_tag_a");
 const OTAG_B: &[u8] = include_bytes!("fixtures/owner_tag_b");
 
+// Exact-reverse fixtures (same circuit/VK): A sells 100 of asset 1 wanting EXACTLY 2000 of asset 2;
+// B sells 2000 of asset 2 wanting EXACTLY 100 of asset 1. Notes shielded at leaf 0 (exa) / 1 (exb).
+const PROOF_EXA: &[u8] = include_bytes!("fixtures/proof_exa");
+const PI_EXA: &[u8] = include_bytes!("fixtures/public_inputs_exa");
+const PROOF_EXB: &[u8] = include_bytes!("fixtures/proof_exb");
+const PI_EXB: &[u8] = include_bytes!("fixtures/public_inputs_exb");
+const OTAG_EXA: &[u8] = include_bytes!("fixtures/owner_tag_exa");
+const OTAG_EXB: &[u8] = include_bytes!("fixtures/owner_tag_exb");
+
 const UNSHIELD_VK: &[u8] = include_bytes!("fixtures/unshield_vk");
 const UNSHIELD_PROOF: &[u8] = include_bytes!("fixtures/unshield_proof");
 const UNSHIELD_PI: &[u8] = include_bytes!("fixtures/unshield_public_inputs");
@@ -204,6 +213,141 @@ fn settle_rejects_incompatible_orders() {
             )
         })
         .expect_err("incompatible / self-pair");
+    assert_eq!(err as u32, Error::NotCompatible as u32);
+}
+
+// ===========================================================================
+// Pair registry + settle_exact (Phase 1).
+// ===========================================================================
+
+#[test]
+fn register_pair_assigns_ids_and_rejects_noncanonical() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let client = SettlementClient::new(&env, &id);
+    register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+    register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
+
+    // First pair gets id 0.
+    assert_eq!(client.register_pair(&ASSET_1, &ASSET_2), 0);
+
+    // The reverse orientation is the SAME market and is rejected.
+    let err = env
+        .as_contract(&id, || Settlement::register_pair(env.clone(), ASSET_2, ASSET_1))
+        .expect_err("reverse orientation");
+    assert_eq!(err as u32, Error::PairAlreadyRegistered as u32);
+
+    // Re-registering the same orientation is rejected too.
+    let err = env
+        .as_contract(&id, || Settlement::register_pair(env.clone(), ASSET_1, ASSET_2))
+        .expect_err("duplicate pair");
+    assert_eq!(err as u32, Error::PairAlreadyRegistered as u32);
+}
+
+#[test]
+fn register_pair_rejects_unregistered_asset_and_self_pair() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+
+    // ASSET_2 not registered.
+    let err = env
+        .as_contract(&id, || Settlement::register_pair(env.clone(), ASSET_1, ASSET_2))
+        .expect_err("unregistered quote asset");
+    assert_eq!(err as u32, Error::AssetNotRegistered as u32);
+
+    // base == quote is not a pair.
+    let err = env
+        .as_contract(&id, || Settlement::register_pair(env.clone(), ASSET_1, ASSET_1))
+        .expect_err("self pair");
+    assert_eq!(err as u32, Error::PairNotRegistered as u32);
+}
+
+#[test]
+fn settle_exact_rejects_unregistered_pair() {
+    // Existing crossing proofs, both notes shielded (root accepted), but no pair registered.
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let client = SettlementClient::new(&env, &id);
+    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
+    client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
+    client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
+
+    let err = env
+        .as_contract(&id, || {
+            Settlement::settle_exact(
+                env.clone(),
+                bytes(&env, PROOF_A),
+                bytes(&env, PI_A),
+                bytes(&env, PROOF_B),
+                bytes(&env, PI_B),
+            )
+        })
+        .expect_err("pair not registered");
+    assert_eq!(err as u32, Error::PairNotRegistered as u32);
+}
+
+#[test]
+fn settle_exact_accepts_exact_reverse() {
+    // A and B are exact reverses: A gives 100 asset1 / wants 2000 asset2; B gives 2000 asset2 /
+    // wants 100 asset1. Both proofs are made against the root produced by shielding the two notes.
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let client = SettlementClient::new(&env, &id);
+    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
+    client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_EXA));
+    client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_EXB));
+    client.register_pair(&ASSET_1, &ASSET_2);
+
+    client.settle_exact(
+        &bytes(&env, PROOF_EXA),
+        &bytes(&env, PI_EXA),
+        &bytes(&env, PROOF_EXB),
+        &bytes(&env, PI_EXB),
+    );
+
+    // One settled event, and the pair is consumed: replaying is rejected (nullifiers recorded).
+    assert_eq!(env.events().all().filter_by_contract(&id).events().len(), 1);
+    let err = env
+        .as_contract(&id, || {
+            Settlement::settle_exact(
+                env.clone(),
+                bytes(&env, PROOF_EXA),
+                bytes(&env, PI_EXA),
+                bytes(&env, PROOF_EXB),
+                bytes(&env, PI_EXB),
+            )
+        })
+        .expect_err("replayed settle_exact");
+    assert_eq!(err as u32, Error::NullifierUsed as u32);
+}
+
+#[test]
+fn settle_exact_rejects_inexact_reverse() {
+    // The committed fixtures cross (A wants >=1500 for 100; B wants >=50 for 2000) but are NOT exact
+    // reverses, so settle_exact rejects them with NotCompatible even though both proofs verify.
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let client = SettlementClient::new(&env, &id);
+    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
+    client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
+    client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
+    client.register_pair(&ASSET_1, &ASSET_2);
+
+    let err = env
+        .as_contract(&id, || {
+            Settlement::settle_exact(
+                env.clone(),
+                bytes(&env, PROOF_A),
+                bytes(&env, PI_A),
+                bytes(&env, PROOF_B),
+                bytes(&env, PI_B),
+            )
+        })
+        .expect_err("inexact reverse");
     assert_eq!(err as u32, Error::NotCompatible as u32);
 }
 
