@@ -1,6 +1,7 @@
 // Browser-local private note store (IndexedDB). Secrets (sk, rho) never leave the device.
 // Each note is the wallet's own record of value it can later spend (order / unshield).
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
+import { nowMs } from './time'
 
 export type NoteRole = 'asset' | 'order-output' | 'order-cancel'
 export type NoteStatus = 'pending' | 'confirmed' | 'spent'
@@ -32,6 +33,7 @@ export interface Note {
   leaf_index?: number
   txHash?: string
   createdAt: number
+  updatedAt?: number // last mutation (status promotion, fill, cancel); falls back to createdAt
   cancel?: OrderCancelInfo // present on order-output notes for a still-cancellable resting order
   cancelledAt?: number // set once the order has been cancelled
 }
@@ -58,7 +60,7 @@ function db() {
 }
 
 export async function addNote(n: Note): Promise<void> {
-  await (await db()).put('notes', n)
+  await (await db()).put('notes', { ...n, updatedAt: n.updatedAt ?? n.createdAt })
 }
 
 export async function notesForDesk(deskId: string): Promise<Note[]> {
@@ -69,7 +71,7 @@ export async function notesForDesk(deskId: string): Promise<Note[]> {
 export async function updateNote(id: string, patch: Partial<Note>): Promise<void> {
   const d = await db()
   const cur = await d.get('notes', id)
-  if (cur) await d.put('notes', { ...cur, ...patch })
+  if (cur) await d.put('notes', { ...cur, ...patch, updatedAt: nowMs() })
 }
 
 /**

@@ -1,5 +1,5 @@
 // Async execution of the note-assembly plan from orderPlan.ts. This is the single code path for
-// proving + relaying a `join` (also used by ConsolidateForm) and for driving a multi-join sequence:
+// proving + relaying a `join` and for driving a multi-join sequence:
 // each join's outputs are pending until they land on-chain and reconcile, and the next join needs
 // its input's membership proof, so the steps are inherently sequential and gated on confirmation.
 import type { Desk } from './api'
