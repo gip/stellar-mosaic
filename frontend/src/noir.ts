@@ -71,6 +71,24 @@ export async function orderTerms(input: {
   return { nullifier_in, output_owner_tag, cancel_owner_tag, order_leaf }
 }
 
+/** Derive a note nullifier with the existing order_terms wallet helper. The other inputs only
+ * affect unused return values, so deterministic zero placeholders avoid a separate ACIR helper. */
+export async function noteNullifier(sk: string, rho: string): Promise<string> {
+  const { nullifier_in } = await orderTerms({
+    sk,
+    rho_in: rho,
+    rho_out: '0',
+    rho_ord: '0',
+    asset_in: 0,
+    amount_in: '0',
+    asset_out: 0,
+    min_out: '0',
+    expiry: 0,
+    partial_allowed: 0,
+  })
+  return nullifier_in
+}
+
 export interface JoinTerms {
   nullifier_1: string
   nullifier_2: string

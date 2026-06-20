@@ -51,7 +51,7 @@ export interface LiftInputs {
 
 export interface ProofBundle {
   proof: Uint8Array // full honk proof (contract `proof` arg)
-  publicInputs: Uint8Array // 12 fields, 32B BE each (contract `public_inputs` arg)
+  publicInputs: Uint8Array // circuit-dependent field count, 32B BE each
 }
 
 /** Execute the lift witness and produce a contract-ready proof + public-inputs blob. */
@@ -75,6 +75,43 @@ export async function proveLift(input: LiftInputs): Promise<ProofBundle> {
     expiry: String(input.expiry),
     partial_allowed: String(input.partial_allowed),
     order_leaf: input.order_leaf,
+  })
+
+  const backend = new UltraHonkBackend(compiled.bytecode)
+  const { proof, publicInputs } = await backend.generateProof(witness, { keccak: true })
+  return { proof, publicInputs: packPublicInputs(publicInputs) }
+}
+
+export interface UnshieldInputs {
+  // private witness
+  rho_in: string
+  sk_o: string
+  path: string[] // 32 siblings (0x hex)
+  index_bits: number[] // 32 bits
+  // public inputs (domain is fixed to UNSHIELD_DOMAIN=2 inside)
+  root: string
+  nullifier: string
+  asset: number
+  amount: string
+  recipient: string
+}
+
+/** Prove ownership and full consumption of one asset note, binding the public payout recipient.
+ * Public inputs (6 fields): domain, root, nullifier, asset, amount, recipient. */
+export async function proveUnshield(input: UnshieldInputs): Promise<ProofBundle> {
+  const compiled = await circuit('unshield')
+  const noir = new Noir(compiled)
+  const { witness } = await noir.execute({
+    rho_in: input.rho_in,
+    sk_o: input.sk_o,
+    path: input.path,
+    index_bits: input.index_bits.map(String),
+    domain: '2',
+    root: input.root,
+    nullifier: input.nullifier,
+    asset: String(input.asset),
+    amount: input.amount,
+    recipient: input.recipient,
   })
 
   const backend = new UltraHonkBackend(compiled.bytecode)

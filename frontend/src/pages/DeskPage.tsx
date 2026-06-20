@@ -5,6 +5,7 @@ import { useWallet } from '../WalletContext'
 import BookView from '../components/BookView'
 import ShieldForm from '../components/ShieldForm'
 import OrderForm from '../components/OrderForm'
+import UnshieldForm from '../components/UnshieldForm'
 import CancelOrderButton from '../components/CancelOrderButton'
 import Toasts, { type ToastItem } from '../components/Toasts'
 import { notesForDesk, reconcile, type Note } from '../notes'
@@ -177,6 +178,19 @@ export default function DeskPage() {
         <OrderForm desk={desk} notes={notes} onDone={reloadNotes} />
       ) : (
         <p className="muted">Connect your wallet to place orders.</p>
+      )}
+
+      <h2>Unshield</h2>
+      {address ? (
+        <UnshieldForm
+          key={address}
+          desk={desk}
+          notes={notes}
+          userPubkey={address}
+          onDone={reloadNotes}
+        />
+      ) : (
+        <p className="muted">Connect your wallet to unshield assets.</p>
       )}
 
       <h2>Address book — my notes</h2>

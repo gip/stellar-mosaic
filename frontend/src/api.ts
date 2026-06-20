@@ -81,6 +81,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ proof_b64, public_inputs_b64 }),
     }),
+  relayUnshield: (id: string, to: string, proof_b64: string, public_inputs_b64: string) =>
+    req<{ ok: boolean; result: string }>(`/desks/${id}/relay/unshield`, {
+      method: 'POST',
+      body: JSON.stringify({ to, proof_b64, public_inputs_b64 }),
+    }),
   relayCancel: (
     id: string,
     pair_id: number,

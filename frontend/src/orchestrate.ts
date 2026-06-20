@@ -5,8 +5,9 @@
 import type { Desk } from './api'
 import { api } from './api'
 import { randomField } from './crypto'
-import { joinTerms } from './noir'
-import { proveJoin, b64 } from './prove'
+import { joinTerms, noteNullifier } from './noir'
+import { proveJoin, proveUnshield, b64 } from './prove'
+import { recipientField } from './soroban'
 import { addNote, updateNote, notesForDesk, reconcile, type Note } from './notes'
 import type { AssemblyStep } from './orderPlan'
 
@@ -16,6 +17,43 @@ export interface JoinResult {
 }
 
 type Status = (s: string) => void
+
+/** Prove + relay a withdrawal of one exact, confirmed asset note to a Stellar recipient. */
+export async function executeUnshield(
+  desk: Desk,
+  note: Note,
+  to: string,
+  onStatus?: Status,
+): Promise<void> {
+  onStatus?.('Deriving unshield terms…')
+  const [nullifier, recipient] = await Promise.all([
+    noteNullifier(note.sk, note.rho),
+    recipientField(to),
+  ])
+
+  onStatus?.('Fetching membership path…')
+  const membership = await api.getNoteProof(desk.id, note.owner_tag)
+
+  onStatus?.('Proving (UltraHonk, in-browser)…')
+  const bundle = await proveUnshield({
+    rho_in: note.rho,
+    sk_o: note.sk,
+    path: membership.siblings,
+    index_bits: membership.index_bits,
+    root: membership.root,
+    nullifier,
+    asset: note.asset_id,
+    amount: note.amount,
+    recipient,
+  })
+
+  onStatus?.('Submitting (sponsored)…')
+  await api.relayUnshield(desk.id, to, b64(bundle.proof), b64(bundle.publicInputs))
+
+  // The relay only resolves after the sponsored transaction succeeds. Preserve the confirmed note
+  // on every earlier failure so the user can retry without corrupting local wallet state.
+  await updateNote(note.id, { status: 'spent' })
+}
 
 // A null padding note: 32 zero siblings + zero index bits. The join circuit only checks note 2's
 // membership when its amount is non-zero, so any path is accepted for a split's amount-0 input.

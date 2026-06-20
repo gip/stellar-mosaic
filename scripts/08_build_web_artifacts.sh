@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the artifacts the web app needs and copy them into place:
 #   - settlement.wasm  -> backend/artifacts/   (deploy input for new desks)
-#   - lift/cancel/join + order_terms/note_tag/join_terms ACIR -> frontend/public/circuits/
+#   - lift/unshield/cancel/join + order_terms/note_tag/join_terms ACIR
+#     -> frontend/public/circuits/
 #     (in-browser execute + prove)
 #
 # VKs (backend/vks/{lift,unshield,cancel,join}_vk) are committed and already match these circuits
@@ -21,7 +22,7 @@ cp "$ROOT/contracts/settlement/target/wasm32v1-none/release/settlement.wasm" \
 
 echo ">>> compile circuits + ship ACIR to the frontend"
 mkdir -p "$ROOT/frontend/public/circuits"
-for c in lift cancel join; do
+for c in lift unshield cancel join; do
   ( cd "$ROOT/circuits/$c" && nargo compile >/dev/null )
   cp "$ROOT/circuits/$c/target/$c.json" "$ROOT/frontend/public/circuits/$c.json"
 done
