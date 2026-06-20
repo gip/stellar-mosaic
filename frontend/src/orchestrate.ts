@@ -1,6 +1,6 @@
 // Async execution of the note-assembly plan from orderPlan.ts. This is the single code path for
 // proving + relaying a `join` and for driving a multi-join sequence:
-// each join's outputs are pending until they land on-chain and reconcile, and the next join needs
+// each join's outputs are unindexed until they land on-chain and reconcile, and the next join needs
 // its input's membership proof, so the steps are inherently sequential and gated on confirmation.
 import type { Desk } from './api'
 import { api } from './api'
@@ -8,11 +8,16 @@ import { randomField } from './crypto'
 import { joinTerms, noteNullifier } from './noir'
 import { proveJoin, proveUnshield, b64 } from './prove'
 import { recipientField } from './soroban'
-import { addNote, updateNote, notesForDesk, reconcile, type Note } from './notes'
+import { updateNote, notesForDesk, reconcile, type Note } from './notes'
 import type { AssemblyStep } from './orderPlan'
+import {
+  stageRecoverableNotes,
+  syncRecoveryNow,
+  updateNoteAndSync,
+} from './recovery'
 
 export interface JoinResult {
-  target: Note // the carved/accumulated output (pending until confirmed)
+  target: Note // the carved/accumulated output (active, but unspendable until indexed)
   change: Note | null // the change output, or null when change is 0
 }
 
@@ -52,7 +57,7 @@ export async function executeUnshield(
 
   // The relay only resolves after the sponsored transaction succeeds. Preserve the confirmed note
   // on every earlier failure so the user can retry without corrupting local wallet state.
-  await updateNote(note.id, { status: 'spent' })
+  await updateNoteAndSync(note.id, { status: 'spent' })
 }
 
 // A null padding note: 32 zero siblings + zero index bits. The join circuit only checks note 2's
@@ -65,7 +70,7 @@ const ZERO_BITS = Array<number>(32).fill(0)
  * Prove + relay one `join`: consume note `a` and an optional same-asset note `b` into a `target` of
  * `targetRaw` and `change` of `changeRaw` (target + change == a [+ b]). When `b` is null this is a
  * 1->2 SPLIT (the second input is a null padding note with fresh dummy secrets, amount 0). Marks the
- * consumed input(s) spent and saves the fresh outputs as pending (reconciliation confirms them).
+ * consumed input(s) spent and saves fresh active outputs (reconciliation makes them spendable).
  */
 export async function executeJoin(
   desk: Desk,
@@ -134,13 +139,7 @@ export async function executeJoin(
     out_amount_2: changeRaw.toString(),
   })
 
-  onStatus?.('Submitting (sponsored)…')
-  await api.relayJoin(desk.id, b64(bundle.proof), b64(bundle.publicInputs))
-
-  await updateNote(a.id, { status: 'spent' })
-  if (b) await updateNote(b.id, { status: 'spent' })
-
-  const target: Note = {
+  let target: Note = {
     id: crypto.randomUUID(),
     deskId: desk.id,
     role: 'asset',
@@ -150,40 +149,51 @@ export async function executeJoin(
     sk: sk_out1,
     rho: rho_out1,
     owner_tag: terms.out_tag_1,
-    status: 'pending',
+    status: 'active',
+    indexed: false,
     createdAt: Date.now(),
   }
-  await addNote(target)
+  let change: Note | null =
+    changeRaw > 0n
+      ? {
+          id: crypto.randomUUID(),
+          deskId: desk.id,
+          role: 'asset',
+          asset_id: a.asset_id,
+          symbol: a.symbol,
+          amount: changeRaw.toString(),
+          sk: sk_out2,
+          rho: rho_out2,
+          owner_tag: terms.out_tag_2,
+          status: 'active',
+          indexed: false,
+          createdAt: Date.now(),
+        }
+      : null
+  onStatus?.('Backing up output secrets…')
+  const staged = await stageRecoverableNotes(change ? [target, change] : [target])
+  target = staged[0]
+  change = change ? staged[1] : null
 
-  let change: Note | null = null
-  if (changeRaw > 0n) {
-    change = {
-      id: crypto.randomUUID(),
-      deskId: desk.id,
-      role: 'asset',
-      asset_id: a.asset_id,
-      symbol: a.symbol,
-      amount: changeRaw.toString(),
-      sk: sk_out2,
-      rho: rho_out2,
-      owner_tag: terms.out_tag_2,
-      status: 'pending',
-      createdAt: Date.now(),
-    }
-    await addNote(change)
-  }
+  onStatus?.('Submitting (sponsored)…')
+  await api.relayJoin(desk.id, b64(bundle.proof), b64(bundle.publicInputs))
+
+  await updateNote(a.id, { status: 'spent' })
+  if (b) await updateNote(b.id, { status: 'spent' })
+  await syncRecoveryNow()
   return { target, change }
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /**
- * Poll the chain until the local note `noteId` reconciles to `confirmed` (its leaf is indexed),
+ * Poll the chain until the local note `noteId` is indexed (its leaf is available),
  * returning the updated note. Used between join steps so the next join can prove membership.
  */
 export async function waitForConfirm(
   deskId: string,
   noteId: string,
+  walletAddress?: string,
   opts: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<Note> {
   const timeoutMs = opts.timeoutMs ?? 120_000
@@ -196,8 +206,8 @@ export async function waitForConfirm(
     } catch {
       /* transient; retry on the next tick */
     }
-    const n = (await notesForDesk(deskId)).find((x) => x.id === noteId)
-    if (n && n.status === 'confirmed') return n
+    const n = (await notesForDesk(deskId, walletAddress)).find((x) => x.id === noteId)
+    if (n?.status === 'active' && n.indexed) return n
     if (Date.now() - start > timeoutMs) throw new Error('Timed out waiting for note confirmation.')
     await sleep(intervalMs)
   }
@@ -226,7 +236,7 @@ export async function runAssembly(
     onStatus?.(`Preparing note — ${s.op} ${i + 1}/${steps.length}…`)
     const { target } = await executeJoin(desk, a, b, BigInt(s.targetRaw), BigInt(s.changeRaw), onStatus)
     onStatus?.(`Waiting for confirmation (${i + 1}/${steps.length})…`)
-    prev = await waitForConfirm(desk.id, target.id)
+    prev = await waitForConfirm(desk.id, target.id, target.wallet_address)
   }
   if (!prev) throw new Error('Empty assembly plan.')
   return prev

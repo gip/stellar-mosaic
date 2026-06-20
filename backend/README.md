@@ -29,6 +29,11 @@ Config via env: `MOSAIC_BIND`, `MOSAIC_NETWORK` (default `testnet`), `MOSAIC_STE
 - `GET  /health`
 - `GET  /desks` · `POST /desks` (deploy a new desk) · `POST /desks/import` (register existing)
 - `GET  /desks/:id` · `GET /desks/:id/root` · `GET /desks/:id/book?pair=&side=`
+- `GET|PUT /wallet-backups/:backup_id` — opaque AES-GCM wallet snapshots. Updates require a
+  separate write capability and generation compare-and-swap; the backend never receives note keys.
+
+Production deployments must expose the backup endpoints only over HTTPS. Backup ciphertext is
+limited to 2 MiB; SQLite stores the write-token hash, never the token itself.
 
 Creating a desk generates + friendbot-funds a sponsor account, deploys a fresh settlement
 contract, sets the unshield/cancel VKs, and registers the assets + pairs. Sponsor secrets are

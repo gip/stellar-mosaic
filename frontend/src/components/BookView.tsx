@@ -52,10 +52,10 @@ export default function BookView({
 }) {
   const deskId = desk.id
   // Our still-cancellable orders, keyed by on-chain order_leaf, so we can offer a cancel button on
-  // the matching book row. Only order-output notes carry cancel authority; cancelled ones are gone.
+  // the matching book row. Only active order-output notes carry usable cancel authority.
   const ownByLeaf = new Map(
     notes
-      .filter((n) => n.cancel && !n.cancelledAt)
+      .filter((n) => n.cancel && n.status === 'active')
       .map((n) => [normLeaf(n.cancel!.order_leaf), n] as const),
   )
   const [orders, setOrders] = useState<OrderEntry[] | null>(null)

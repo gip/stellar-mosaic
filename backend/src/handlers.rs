@@ -3,7 +3,7 @@ use crate::models::{CreateDesk, Desk, ImportDesk};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -12,6 +12,101 @@ pub async fn health() -> Json<Value> {
     // Debug, not info: health is polled frequently and would otherwise flood the logs.
     tracing::debug!("health check");
     Json(json!({ "ok": true }))
+}
+
+const MAX_BACKUP_CIPHERTEXT: usize = 2 * 1024 * 1024;
+
+#[derive(Serialize)]
+pub struct WalletBackupResponse {
+    pub format_version: u32,
+    pub generation: u64,
+    pub nonce_b64: String,
+    pub ciphertext_b64: String,
+}
+
+#[derive(Deserialize)]
+pub struct PutWalletBackup {
+    pub expected_generation: u64,
+    pub format_version: u32,
+    pub nonce_b64: String,
+    pub ciphertext_b64: String,
+    pub write_token: String,
+}
+
+pub async fn get_wallet_backup(
+    State(st): State<Arc<AppState>>,
+    Path(backup_id): Path<String>,
+) -> AppResult<Json<WalletBackupResponse>> {
+    validate_capability("backup_id", &backup_id)?;
+    let b = st.db.get_wallet_backup(&backup_id)?;
+    Ok(Json(WalletBackupResponse {
+        format_version: b.format_version,
+        generation: b.generation,
+        nonce_b64: b.nonce_b64,
+        ciphertext_b64: b.ciphertext_b64,
+    }))
+}
+
+pub async fn put_wallet_backup(
+    State(st): State<Arc<AppState>>,
+    Path(backup_id): Path<String>,
+    Json(body): Json<PutWalletBackup>,
+) -> AppResult<Json<Value>> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    validate_capability("backup_id", &backup_id)?;
+    let token = validate_capability("write_token", &body.write_token)?;
+    if body.format_version != 1 {
+        return Err(AppError::BadRequest("unsupported backup format_version".into()));
+    }
+    let nonce = base64::engine::general_purpose::STANDARD
+        .decode(&body.nonce_b64)
+        .map_err(|_| AppError::BadRequest("nonce_b64 is not valid base64".into()))?;
+    if nonce.len() != 12 {
+        return Err(AppError::BadRequest("backup nonce must be 12 bytes".into()));
+    }
+    let ciphertext = base64::engine::general_purpose::STANDARD
+        .decode(&body.ciphertext_b64)
+        .map_err(|_| AppError::BadRequest("ciphertext_b64 is not valid base64".into()))?;
+    if ciphertext.len() < 16 || ciphertext.len() > MAX_BACKUP_CIPHERTEXT {
+        return Err(AppError::BadRequest(
+            "backup ciphertext must be between 16 bytes and 2 MiB".into(),
+        ));
+    }
+    let write_hash: [u8; 32] = Sha256::digest(token).into();
+    let generation = st.db.put_wallet_backup(
+        &backup_id,
+        &write_hash,
+        body.expected_generation,
+        body.format_version,
+        &body.nonce_b64,
+        &body.ciphertext_b64,
+    )?;
+    Ok(Json(json!({ "generation": generation })))
+}
+
+fn validate_capability(name: &str, value: &str) -> AppResult<Vec<u8>> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| AppError::BadRequest(format!("{name} is not valid base64url")))?;
+    if bytes.len() != 32 {
+        return Err(AppError::BadRequest(format!("{name} must encode 32 bytes")));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod wallet_backup_tests {
+    use super::validate_capability;
+
+    #[test]
+    fn capability_must_be_canonical_32_byte_base64url() {
+        assert!(validate_capability("id", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").is_ok());
+        assert!(validate_capability("id", "short").is_err());
+        assert!(validate_capability("id", "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!").is_err());
+    }
 }
 
 pub async fn list_desks(State(st): State<Arc<AppState>>) -> AppResult<Json<Vec<Desk>>> {

@@ -3,8 +3,10 @@ import { api, type Desk } from '../api'
 import { randomField, fieldToBytes32 } from '../crypto'
 import { noteTag } from '../noir'
 import { buildSponsoredShield } from '../soroban'
-import { addNote } from '../notes'
+import type { Note } from '../notes'
 import { toRaw } from '../amount'
+import { stageRecoverableNote, updateNoteAndSync } from '../recovery'
+import { useRecovery } from '../RecoveryContext'
 
 /**
  * Shield a supported asset into the desk's custody. Generates fresh note secrets in-browser,
@@ -25,6 +27,8 @@ export default function ShieldForm({
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const recovery = useRecovery()
+  const recoveryReady = recovery.unlocked && !recovery.error
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -47,10 +51,7 @@ export default function ShieldForm({
         rawAmount,
         fieldToBytes32(owner_tag),
       )
-      setStatus('Submitting (sponsored)…')
-      const { result } = await api.submitShield(desk.id, txXdr)
-      const txHash = result
-      await addNote({
+      const note: Note = {
         id: crypto.randomUUID(),
         deskId: desk.id,
         role: 'asset',
@@ -60,10 +61,16 @@ export default function ShieldForm({
         sk,
         rho,
         owner_tag,
-        status: 'confirmed',
-        txHash,
+        status: 'active',
+        indexed: false,
         createdAt: Date.now(),
-      })
+      }
+      setStatus('Backing up note secrets…')
+      await stageRecoverableNote(note)
+      setStatus('Submitting (sponsored)…')
+      const { result } = await api.submitShield(desk.id, txXdr)
+      const txHash = result
+      await updateNoteAndSync(note.id, { indexed: true, txHash })
       setStatus(`Shielded (sponsored). ${result}`)
       onDone()
     } catch (e) {
@@ -90,8 +97,8 @@ export default function ShieldForm({
         <label>Amount ({desk.assets.find((a) => a.asset_id === assetId)?.symbol ?? ''})</label>
         <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
       </div>
-      <button type="submit" disabled={busy}>
-        {busy ? 'Shielding…' : 'Shield'}
+      <button type="submit" disabled={busy || !recoveryReady}>
+        {busy ? 'Shielding…' : recoveryReady ? 'Shield' : 'Enable / repair recovery first'}
       </button>
       {status && <span className="muted">{status}</span>}
       {error && <span className="err">{error}</span>}

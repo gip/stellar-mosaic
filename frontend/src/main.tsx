@@ -11,6 +11,7 @@ import App from './App'
 import Home from './pages/Home'
 import DeskPage from './pages/DeskPage'
 import { WalletProvider } from './WalletContext'
+import { RecoveryProvider } from './RecoveryContext'
 
 const router = createBrowserRouter([
   {
@@ -26,7 +27,9 @@ const router = createBrowserRouter([
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <WalletProvider>
-      <RouterProvider router={router} />
+      <RecoveryProvider>
+        <RouterProvider router={router} />
+      </RecoveryProvider>
     </WalletProvider>
   </StrictMode>,
 )

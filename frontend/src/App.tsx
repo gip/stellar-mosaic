@@ -1,12 +1,13 @@
 import { Link, Outlet } from 'react-router-dom'
 import { useWallet } from './WalletContext'
+import RecoveryPanel from './components/RecoveryPanel'
 
 function short(addr: string): string {
   return addr.length > 12 ? `${addr.slice(0, 5)}…${addr.slice(-4)}` : addr
 }
 
 export default function App() {
-  const { address, connect, connecting, error } = useWallet()
+  const { address, connect, disconnect, connecting, error } = useWallet()
   return (
     <>
       <header className="topbar">
@@ -15,11 +16,16 @@ export default function App() {
         </h1>
         <div>
           {address ? (
-            <span className="mono" title={address}>
-              {short(address)}
-            </span>
+            <div className="wallet-controls">
+              <span className="mono" title={address}>
+                {short(address)}
+              </span>
+              <button type="button" onClick={disconnect}>
+                Log out
+              </button>
+            </div>
           ) : (
-            <button onClick={connect} disabled={connecting}>
+            <button type="button" onClick={connect} disabled={connecting}>
               {connecting ? 'Connecting…' : 'Connect wallet'}
             </button>
           )}
@@ -27,6 +33,7 @@ export default function App() {
         </div>
       </header>
       <main>
+        <RecoveryPanel />
         <Outlet />
       </main>
     </>

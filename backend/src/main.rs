@@ -7,6 +7,7 @@ mod indexer;
 mod models;
 mod stellar;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 use config::Config;
@@ -58,6 +59,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/desks/:id/relay/join", post(handlers::relay_join))
         .route("/desks/:id/relay/unshield", post(handlers::relay_unshield))
         .route("/desks/:id/relay/cancel", post(handlers::relay_cancel))
+        .route(
+            "/wallet-backups/:backup_id",
+            get(handlers::get_wallet_backup).put(handlers::put_wallet_backup),
+        )
+        // Base64 expands the 2 MiB decoded ciphertext; handlers enforce the decoded limit.
+        .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);

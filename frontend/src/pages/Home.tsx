@@ -18,7 +18,18 @@ export default function Home() {
   }
 
   useEffect(() => {
-    load()
+    let active = true
+    api
+      .listDesks()
+      .then((next) => {
+        if (!active) return
+        setDesks(next)
+        setError(null)
+      })
+      .catch((e) => active && setError(e instanceof Error ? e.message : String(e)))
+    return () => {
+      active = false
+    }
   }, [])
 
   return (

@@ -18,9 +18,10 @@ A **desk** is its own deployed `settlement` contract + a friendbot-funded sponso
 
 ## Trust / privacy boundary
 
-- Note secrets (`sk`, `rho`) never leave the browser; owner tags, nullifiers, and order leaves are
-  derived in-browser via tiny Noir helpers, and order proofs are generated in-browser. The backend
-  only relays finished proofs.
+- Plaintext note secrets (`sk`, `rho`) never leave the browser; owner tags, nullifiers, order leaves,
+  and proofs are generated in-browser. Freighter `signMessage` deterministically unlocks an
+  HKDF-derived recovery key; the backend stores only an opaque AES-GCM snapshot and a write-token
+  hash. New note secrets are uploaded before their transaction is submitted.
 - `submit_order` / `unshield` / `cancel_order` are relayer-submittable (the proof is the spend
   authority), so the desk sponsor is the sole source/fee payer = fully sponsored.
 - `shield` moves the user's own tokens, so it needs the user's authorization — but it is **also
@@ -50,8 +51,5 @@ the lift + wallet helper circuits (→ `frontend/public/circuits/`).
 (cd frontend && pnpm install && pnpm dev)   # http://localhost:5173
 ```
 
-## Not yet wired in the UI
-
-The backend exposes `/relay/unshield` and `/relay/cancel` (with the unshield/cancel circuits and
-VKs in place), but the frontend does not yet build those proofs — withdraw + cancel are the natural
-next UI additions.
+Unshield, join/split assembly, and cancel proofs are generated in-browser and sent through their
+fully-sponsored relay endpoints.

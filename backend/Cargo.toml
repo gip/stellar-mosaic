@@ -21,6 +21,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
+sha2 = "0.10"
+subtle = "2"
 # Off-chain note-tree path server (reuses the contract's exact Poseidon2 via a local Soroban host).
 mosaic-indexer = { path = "../tools/indexer" }
 soroban-sdk = { version = "26.0.1", features = ["testutils", "hazmat-crypto"] }

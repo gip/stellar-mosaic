@@ -5,6 +5,7 @@ import {
   requestAccess,
   getAddress,
   getNetwork,
+  signMessage,
 } from '@stellar/freighter-api'
 
 export async function walletInstalled(): Promise<boolean> {
@@ -35,11 +36,22 @@ export async function currentAddress(): Promise<string | null> {
   }
 }
 
-export async function network(): Promise<string | null> {
+export async function network(): Promise<{ network: string; networkPassphrase: string } | null> {
   try {
     const r = await getNetwork()
-    return r.network ?? null
+    if (r.error || !r.networkPassphrase) return null
+    return { network: r.network ?? '', networkPassphrase: r.networkPassphrase }
   } catch {
     return null
   }
+}
+
+export async function signRecoveryMessage(
+  message: string,
+  address: string,
+  networkPassphrase: string,
+) {
+  const r = await signMessage(message, { address, networkPassphrase })
+  if (r.error) throw new Error(String(r.error))
+  return r
 }

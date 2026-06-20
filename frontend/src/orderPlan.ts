@@ -18,9 +18,9 @@ export type AssemblyPlan =
   | { kind: 'assemble'; steps: AssemblyStep[] } // run these in order; last target == amount
   | { kind: 'impossible'; reason: string }
 
-/** Confirmed (on-chain, unspent) notes of a given asset — the only ones a join/order can consume. */
+/** Indexed, active notes of a given asset — the only ones a join/order can consume. */
 export function spendableNotes(notes: Note[], assetId: number): Note[] {
-  return notes.filter((n) => n.status === 'confirmed' && n.asset_id === assetId)
+  return notes.filter((n) => n.status === 'active' && n.indexed && n.asset_id === assetId)
 }
 
 /** Maximum amount_in offerable for an asset: the sum of all its spendable notes (raw units). */

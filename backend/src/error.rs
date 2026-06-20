@@ -10,6 +10,10 @@ pub enum AppError {
     NotFound(String),
     #[error("bad request: {0}")]
     BadRequest(String),
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("stellar cli error: {0}")]
     Stellar(String),
     #[error(transparent)]
@@ -27,6 +31,8 @@ impl IntoResponse for AppError {
         let (status, msg) = match &self {
             AppError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
+            AppError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m.clone()),
+            AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             AppError::Stellar(m) => (StatusCode::BAD_GATEWAY, m.clone()),
             AppError::Other(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };

@@ -1,7 +1,7 @@
 # mosaic-frontend
 
 Minimalist (black & white) web client for Stellar Mosaic. Vite + React + TypeScript, Freighter
-wallet, browser-side ZK proving, and local private notes in IndexedDB.
+wallet, browser-side ZK proving, and wallet-encrypted private-note recovery.
 
 ## Run
 
@@ -19,7 +19,7 @@ the Soroban RPC with `VITE_SOROBAN_RPC` (defaults to testnet).
 - `/desk/:id` — address book (desk contract/sponsor/token addresses + your notes), shield, place a
   limit order, and a live order book. Auto-refreshes root/book/notes.
 
-## How proving works (no secrets leave the browser)
+## Proving and recovery
 
 - `note_tag` / `order_terms` Noir helpers run via `noir_js` to derive owner tags, nullifiers, and
   order leaves — byte-identical to the contract's Poseidon2 (verified against the `witness` tool).
@@ -28,5 +28,11 @@ the Soroban RPC with `VITE_SOROBAN_RPC` (defaults to testnet).
   against the deployed VK).
 - `shield` is fully sponsored via auth-entry signing: the user signs only the Soroban auth entry in
   Freighter, the sponsor is the tx source and pays the fee. `submit_order` is relayed sponsored too.
+- Before creating notes, Freighter signs a fixed recovery message. The browser verifies that
+  signature, derives domain-separated AES/lookup/write keys with HKDF-SHA-256, and uploads only an
+  AES-GCM-encrypted snapshot. Plaintext `sk`/`rho` values never leave the browser. The same account
+  can restore on a new device; encrypted file export is the service-independent backup.
+- Notes created before recovery support have no account association and remain explicitly
+  local-only. Never sign the Mosaic recovery message outside the trusted app: it unlocks the notes.
 
 Compiled circuits live in `public/circuits/` — regenerate with `../scripts/08_build_web_artifacts.sh`.

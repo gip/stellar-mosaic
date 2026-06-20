@@ -5,6 +5,7 @@ import { toRaw, formatAmount } from '../amount'
 import { executeUnshield, runAssembly } from '../orchestrate'
 import { maxIn, planAssembly } from '../orderPlan'
 import type { Note } from '../notes'
+import { useRecovery } from '../RecoveryContext'
 
 function parseAmount(amount: string, decimals: number): bigint | null {
   if (amount.trim() === '') return null
@@ -33,6 +34,8 @@ export default function UnshieldForm({
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const recovery = useRecovery()
+  const recoveryReady = recovery.unlocked && !recovery.error
 
   const asset = desk.assets.find((a) => a.asset_id === assetId)
   const decimals = asset?.decimals ?? 7
@@ -40,6 +43,7 @@ export default function UnshieldForm({
   const amountRaw = parseAmount(amount, decimals)
   const plan = amountRaw != null && amountRaw > 0n ? planAssembly(notes, assetId, amountRaw) : null
   const recipientValid = StrKey.isValidEd25519PublicKey(recipient.trim())
+  const needsRecovery = plan?.kind === 'assemble'
   const valid =
     amountRaw != null &&
     amountRaw > 0n &&
@@ -138,8 +142,12 @@ export default function UnshieldForm({
           size={58}
         />
       </div>
-      <button type="submit" disabled={busy || !valid}>
-        {busy ? 'Working…' : 'Unshield'}
+      <button type="submit" disabled={busy || !valid || (!!needsRecovery && !recoveryReady)}>
+        {busy
+          ? 'Working…'
+          : needsRecovery && !recoveryReady
+            ? 'Enable / repair recovery to prepare note'
+            : 'Unshield'}
       </button>
       {!recipientValid && recipient.trim() !== '' && !error && (
         <span className="err">Enter a valid Stellar G… account.</span>

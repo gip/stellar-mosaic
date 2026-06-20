@@ -4,11 +4,13 @@ import { api } from '../api'
 import { randomField } from '../crypto'
 import { orderTerms } from '../noir'
 import { proveLift, b64 } from '../prove'
-import { addNote, updateNote, type Note } from '../notes'
+import { updateNote, type Note } from '../notes'
 import { toRaw, formatAmount, computeMinOutAtPrice, parseRatio } from '../amount'
 import { maxIn, planAssembly } from '../orderPlan'
 import { runAssembly } from '../orchestrate'
 import { nowMs, nowSeconds } from '../time'
+import { stageRecoverableNote, syncRecoveryNow } from '../recovery'
+import { useRecovery } from '../RecoveryContext'
 
 type Side = 'SELL' | 'BUY'
 
@@ -65,8 +67,8 @@ interface BookEntry {
  * it per side (SELL multiplies, BUY divides). The `lift` circuit consumes ONE note in full and that
  * note must already be on-chain, so if no single confirmed note equals amount_in we first assemble
  * one via in-browser-proved `join`(s) (each gated on confirmation), then prove the lift and relay a
- * fully-sponsored submit_order. On success the offered note is marked spent and a pending proceeds
- * note is saved.
+ * fully-sponsored submit_order. On success the offered note is marked spent and an active order
+ * note is saved; it becomes spendable once its proceeds appear in the indexer.
  */
 export default function OrderForm({
   desk,
@@ -85,6 +87,8 @@ export default function OrderForm({
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const recovery = useRecovery()
+  const recoveryReady = recovery.unlocked && !recovery.error
 
   const pair = desk.pairs.find((p) => p.pair_id === pairId) as Pair | undefined
   // SELL = give base / want quote; BUY = give quote / want base.
@@ -215,12 +219,7 @@ export default function OrderForm({
         partial_allowed: partial ? 1 : 0,
         order_leaf: terms.order_leaf,
       })
-      setStatus('Submitting (sponsored)…')
-      await api.relayOrder(desk.id, b64(bundle.proof), b64(bundle.publicInputs))
-
-      // The offered note is now spent; record a pending proceeds note (asset_out @ output tag).
-      await updateNote(offer.id, { status: 'spent' })
-      await addNote({
+      const outputNote: Note = {
         id: crypto.randomUUID(),
         deskId: desk.id,
         role: 'order-output',
@@ -230,9 +229,9 @@ export default function OrderForm({
         sk: offer.sk,
         rho: rho_out,
         owner_tag: terms.output_owner_tag,
-        status: 'pending',
+        status: 'active',
+        indexed: false,
         createdAt: nowMs(),
-        // Everything needed to later prove a cancel and reclaim the locked asset_in funds.
         cancel: {
           rho_ord,
           order_leaf: terms.order_leaf,
@@ -243,7 +242,15 @@ export default function OrderForm({
           symbol_in: sym(assetIn),
           amount_in: offer.amount,
         },
-      })
+      }
+      setStatus('Backing up note secrets…')
+      await stageRecoverableNote(outputNote)
+      setStatus('Submitting (sponsored)…')
+      await api.relayOrder(desk.id, b64(bundle.proof), b64(bundle.publicInputs))
+
+      // The offered note is now spent; record the active order/proceeds note (asset_out @ output tag).
+      await updateNote(offer.id, { status: 'spent' })
+      await syncRecoveryNow()
       setStatus('Order submitted.')
       onDone()
     } catch (e) {
@@ -308,8 +315,8 @@ export default function OrderForm({
           partial
         </label>
       </div>
-      <button type="submit" disabled={busy || !valid}>
-        {busy ? 'Working…' : 'Place order'}
+      <button type="submit" disabled={busy || !valid || !recoveryReady}>
+        {busy ? 'Working…' : recoveryReady ? 'Place order' : 'Enable / repair recovery first'}
       </button>
       {willCross && valid && !busy && !error && (
         <span className="warn">

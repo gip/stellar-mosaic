@@ -3,13 +3,13 @@ import { useParams } from 'react-router-dom'
 import { api, type Desk } from '../api'
 import { useWallet } from '../WalletContext'
 import BookView from '../components/BookView'
-import ShieldForm from '../components/ShieldForm'
 import OrderForm from '../components/OrderForm'
-import UnshieldForm from '../components/UnshieldForm'
+import ShieldUnshieldPanel from '../components/ShieldUnshieldPanel'
 import CancelOrderButton from '../components/CancelOrderButton'
 import Toasts, { type ToastItem } from '../components/Toasts'
 import { notesForDesk, reconcile, type Note } from '../notes'
 import { formatAmount } from '../amount'
+import { isRecoveryUnlocked, syncRecoveryNow } from '../recovery'
 
 /** Canonical 32-byte hex tag for comparison: drop any `0x`, lowercase, left-pad to 64. */
 function normTag(h: string): string {
@@ -25,14 +25,19 @@ export default function DeskPage() {
   const [error, setError] = useState<string | null>(null)
 
   const reloadNotes = useCallback(() => {
-    if (deskId) notesForDesk(deskId).then(setNotes)
-  }, [deskId])
+    if (deskId) notesForDesk(deskId, address).then(setNotes)
+  }, [deskId, address])
 
   useEffect(() => {
     if (!deskId) return
     api.getDesk(deskId).then(setDesk).catch((e) => setError(String(e)))
     reloadNotes()
   }, [deskId, reloadNotes])
+
+  useEffect(() => {
+    window.addEventListener('mosaic-notes-changed', reloadNotes)
+    return () => window.removeEventListener('mosaic-notes-changed', reloadNotes)
+  }, [reloadNotes])
 
   // Auto-refresh the on-chain root every 5s as a liveness signal.
   useEffect(() => {
@@ -60,7 +65,10 @@ export default function DeskPage() {
         .getNotes(deskId)
         .then(async (r) => {
           if (!alive) return
-          if (await reconcile(deskId, r.notes)) reloadNotes()
+          if (await reconcile(deskId, r.notes)) {
+            if (isRecoveryUnlocked(address ?? undefined)) syncRecoveryNow().catch(() => {})
+            reloadNotes()
+          }
         })
         .catch(() => {})
     tick()
@@ -69,7 +77,7 @@ export default function DeskPage() {
       alive = false
       clearInterval(h)
     }
-  }, [deskId, reloadNotes])
+  }, [deskId, address, reloadNotes])
 
   // Live confirmation toasts (e.g. "your order filled").
   const [toasts, setToasts] = useState<ToastItem[]>([])
@@ -130,10 +138,9 @@ export default function DeskPage() {
   const sym = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
   const dec = (id: number) => desk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
 
-  // Split into active/pending vs spent; within each, most-recently-modified first. Spent renders
-  // last (its own collapsed section), so spent notes always sort to the end of the list.
-  const active = notes.filter((n) => n.status !== 'spent').sort((a, b) => mtime(b) - mtime(a))
-  const spent = notes.filter((n) => n.status === 'spent').sort((a, b) => mtime(b) - mtime(a))
+  // Active notes first; spent and cancelled history renders last in its own collapsed section.
+  const active = notes.filter((n) => n.status === 'active').sort((a, b) => mtime(b) - mtime(a))
+  const history = notes.filter((n) => n.status !== 'active').sort((a, b) => mtime(b) - mtime(a))
 
   return (
     <>
@@ -166,31 +173,18 @@ export default function DeskPage() {
         </tbody>
       </table>
 
-      <h2>Shield</h2>
-      {address ? (
-        <ShieldForm desk={desk} userPubkey={address} onDone={reloadNotes} />
-      ) : (
-        <p className="muted">Connect your wallet to shield assets.</p>
-      )}
+      <ShieldUnshieldPanel
+        desk={desk}
+        notes={notes}
+        userPubkey={address}
+        onDone={reloadNotes}
+      />
 
       <h2>Place limit order</h2>
       {address ? (
         <OrderForm desk={desk} notes={notes} onDone={reloadNotes} />
       ) : (
         <p className="muted">Connect your wallet to place orders.</p>
-      )}
-
-      <h2>Unshield</h2>
-      {address ? (
-        <UnshieldForm
-          key={address}
-          desk={desk}
-          notes={notes}
-          userPubkey={address}
-          onDone={reloadNotes}
-        />
-      ) : (
-        <p className="muted">Connect your wallet to unshield assets.</p>
       )}
 
       <h2>Address book — my notes</h2>
@@ -209,14 +203,14 @@ export default function DeskPage() {
           )}
           {active.length > 0 && (
             <details>
-              <summary>Active &amp; pending notes ({active.length})</summary>
+              <summary>Active notes ({active.length})</summary>
               <NotesTable notes={active} dec={dec} desk={desk} onDone={reloadNotes} />
             </details>
           )}
-          {spent.length > 0 && (
+          {history.length > 0 && (
             <details>
-              <summary className="muted">Spent notes ({spent.length})</summary>
-              <NotesTable notes={spent} dec={dec} desk={desk} onDone={reloadNotes} />
+              <summary className="muted">Spent &amp; cancelled notes ({history.length})</summary>
+              <NotesTable notes={history} dec={dec} desk={desk} onDone={reloadNotes} />
             </details>
           )}
         </>
@@ -284,6 +278,8 @@ function NotesTable({
     <table>
       <thead>
         <tr>
+          <th>Type</th>
+          <th>Pair</th>
           <th>Asset</th>
           <th>Amount</th>
           <th>Owner tag</th>
@@ -294,15 +290,17 @@ function NotesTable({
       <tbody>
         {notes.map((n) => (
           <tr key={n.id}>
+            <td>{noteType(n)}</td>
+            <td>{notePair(n, desk)}</td>
             <td>{n.symbol}</td>
             <td>{formatAmount(n.amount, dec(n.asset_id))}</td>
             <td className="mono">{n.owner_tag.slice(0, 14)}…</td>
-            <td className={n.status === 'spent' ? 'muted' : 'ok'}>{n.status}</td>
+            <td className={n.status === 'active' ? 'ok' : 'muted'}>
+              {n.status === 'active' && !n.indexed ? 'active · pending index' : n.status}
+            </td>
             <td>
-              {n.cancelledAt ? (
-                <span className="muted">cancelled</span>
-              ) : (
-                n.cancel && <CancelOrderButton desk={desk} note={n} onDone={onDone} />
+              {n.status === 'active' && n.cancel && (
+                <CancelOrderButton desk={desk} note={n} onDone={onDone} />
               )}
             </td>
           </tr>
@@ -312,12 +310,28 @@ function NotesTable({
   )
 }
 
-/** Spendable shielded balance per asset, summed from confirmed (unspent) notes and formatted
+/** User-facing note kind. Order notes retain the side used when they were submitted. */
+function noteType(n: Note): 'Asset' | 'Buy' | 'Sell' {
+  if (n.role === 'asset') return 'Asset'
+  return n.cancel?.side === 0 ? 'Buy' : 'Sell'
+}
+
+/** Canonical base/quote symbols for order notes; asset notes have no associated pair. */
+function notePair(n: Note, desk: Desk): string {
+  if (!n.cancel) return '—'
+  const pair = desk.pairs.find((p) => p.pair_id === n.cancel?.pairId)
+  if (!pair) return `Pair ${n.cancel.pairId}`
+  const symbol = (assetId: number) =>
+    desk.assets.find((asset) => asset.asset_id === assetId)?.symbol ?? `#${assetId}`
+  return `${symbol(pair.base_asset)}/${symbol(pair.quote_asset)}`
+}
+
+/** Spendable shielded balance per asset, summed from indexed active notes and formatted
  * to human decimals. `decimals` resolves an asset_id to its decimal places. */
 function balances(notes: Note[], decimals: (id: number) => number): [string, string][] {
   const m = new Map<number, { symbol: string; sum: bigint }>()
   for (const n of notes) {
-    if (n.status === 'spent') continue
+    if (n.status !== 'active' || !n.indexed) continue
     const e = m.get(n.asset_id) ?? { symbol: n.symbol, sum: 0n }
     e.sum += BigInt(n.amount)
     m.set(n.asset_id, e)

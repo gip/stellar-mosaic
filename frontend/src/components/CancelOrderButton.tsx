@@ -4,13 +4,15 @@ import { api } from '../api'
 import { randomField } from '../crypto'
 import { noteTag } from '../noir'
 import { proveCancel, b64 } from '../prove'
-import { addNote, updateNote, type Note } from '../notes'
+import { updateNote, type Note } from '../notes'
+import { stageRecoverableNote, syncRecoveryNow } from '../recovery'
+import { useRecovery } from '../RecoveryContext'
 
 /**
  * Cancel a resting limit order. Derives a fresh return destination, proves the cancel circuit
  * in-browser (authority over the order's cancel tag, bound to this order + payout), and relays a
- * fully-sponsored cancel_order. On success the proceeds note is marked cancelled and a pending
- * refund note (the locked asset_in) is saved — it reconciles to the real returned amount on-chain.
+ * fully-sponsored cancel_order. On success the order note is marked cancelled and an active refund
+ * note (the locked asset_in) is saved — it becomes spendable once indexed on-chain.
  */
 export default function CancelOrderButton({
   desk,
@@ -24,9 +26,11 @@ export default function CancelOrderButton({
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const recovery = useRecovery()
+  const recoveryReady = recovery.unlocked && !recovery.error
 
   const c = note.cancel
-  if (!c || note.cancelledAt) return null
+  if (!c || note.status !== 'active') return null
 
   async function cancel() {
     if (!c) return
@@ -44,12 +48,7 @@ export default function CancelOrderButton({
         cancel_owner_tag: c.cancel_owner_tag,
         return_owner_tag,
       })
-      setStatus('Submitting (sponsored)…')
-      await api.relayCancel(desk.id, c.pairId, c.side, b64(bundle.proof), b64(bundle.publicInputs))
-
-      await updateNote(note.id, { cancelledAt: Date.now() })
-      // Refund of the locked asset_in is minted to return_owner_tag; reconcile fills the real amount.
-      await addNote({
+      const refund: Note = {
         id: crypto.randomUUID(),
         deskId: desk.id,
         role: 'asset',
@@ -59,9 +58,17 @@ export default function CancelOrderButton({
         sk: note.sk,
         rho: rho_return,
         owner_tag: return_owner_tag,
-        status: 'pending',
+        status: 'active',
+        indexed: false,
         createdAt: Date.now(),
-      })
+      }
+      setStatus('Backing up refund secrets…')
+      await stageRecoverableNote(refund)
+      setStatus('Submitting (sponsored)…')
+      await api.relayCancel(desk.id, c.pairId, c.side, b64(bundle.proof), b64(bundle.publicInputs))
+
+      await updateNote(note.id, { status: 'cancelled', cancelledAt: Date.now() })
+      await syncRecoveryNow()
       setStatus('Cancelled.')
       onDone()
     } catch (e) {
@@ -74,8 +81,8 @@ export default function CancelOrderButton({
 
   return (
     <>
-      <button type="button" onClick={cancel} disabled={busy}>
-        {busy ? 'Working…' : 'Cancel'}
+      <button type="button" onClick={cancel} disabled={busy || !recoveryReady}>
+        {busy ? 'Working…' : recoveryReady ? 'Cancel' : 'Repair recovery to cancel'}
       </button>
       {status && <span className="muted"> {status}</span>}
       {error && <span className="err"> {error}</span>}

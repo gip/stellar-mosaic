@@ -24,6 +24,15 @@ export interface Desk {
 
 const BASE = '/api'
 
+export class ApiError extends Error {
+  status: number
+
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+  }
+}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, {
     headers: { 'content-type': 'application/json' },
@@ -37,7 +46,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       /* ignore */
     }
-    throw new Error(msg)
+    throw new ApiError(res.status, msg)
   }
   return res.json() as Promise<T>
 }
@@ -97,6 +106,23 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ pair_id, side, proof_b64, public_inputs_b64 }),
     }),
+  getWalletBackup: (backupId: string) =>
+    req<WalletBackupEnvelope>(`/wallet-backups/${encodeURIComponent(backupId)}`),
+  putWalletBackup: (
+    backupId: string,
+    body: WalletBackupEnvelope & { expected_generation: number; write_token: string },
+  ) =>
+    req<{ generation: number }>(`/wallet-backups/${encodeURIComponent(backupId)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+}
+
+export interface WalletBackupEnvelope {
+  format_version: 1
+  generation: number
+  nonce_b64: string
+  ciphertext_b64: string
 }
 
 export interface NoteProof {
