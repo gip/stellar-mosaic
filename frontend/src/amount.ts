@@ -23,6 +23,31 @@ export function toRaw(human: string, decimals: number): string {
   return parseAmount(human, decimals).toString()
 }
 
+/** Parse a positive decimal ratio (e.g. "0.12") into an exact fraction num/den. */
+export function parseRatio(s: string): { num: bigint; den: bigint } {
+  const t = s.trim()
+  if (t === '' || t === '.' || !/^\d*\.?\d*$/.test(t)) {
+    throw new Error(`invalid ratio: "${s}"`)
+  }
+  const [intPart, fracPart = ''] = t.split('.')
+  return { num: BigInt((intPart || '0') + fracPart || '0'), den: 10n ** BigInt(fracPart.length) }
+}
+
+/**
+ * Compute a limit order's raw min_out from a raw amount_in and a human "out per 1 in" ratio.
+ * All exact integer math (floor): min_out = amount_in × ratio, rescaled across the two assets'
+ * decimals. amount_in is raw asset_in units; the result is raw asset_out units.
+ */
+export function computeMinOut(
+  amountInRaw: bigint,
+  ratio: string,
+  decimalsIn: number,
+  decimalsOut: number,
+): bigint {
+  const { num, den } = parseRatio(ratio)
+  return (amountInRaw * num * 10n ** BigInt(decimalsOut)) / (den * 10n ** BigInt(decimalsIn))
+}
+
 /** Format raw base units into a human decimal string, trimming trailing fractional zeros. */
 export function formatAmount(raw: string | bigint, decimals: number): string {
   const n = typeof raw === 'bigint' ? raw : BigInt(raw)

@@ -1,8 +1,11 @@
 // join circuit - consolidate two asset notes of the same asset into two fresh asset notes
 // (target + change), without unshielding. This is what lets a wallet assemble an exact
 // denomination: {1.5, 2} USDC -> {3, 0.5} USDC, so the full-consumption `lift` order can then
-// offer exactly 3. See docs/note-types.md (the privacy model is owner-anonymous, amount-transparent)
-// and docs/lift-circuit-spec.md for the public-input/contract-obligation conventions this mirrors.
+// offer exactly 3. The second input is OPTIONAL: passing a null padding note (amount_2 == 0) turns
+// this into a 1->2 SPLIT, so a single note can be carved into {target, change} (e.g. 101 -> 100 + 1)
+// with no second note on hand. See docs/note-types.md (the privacy model is owner-anonymous,
+// amount-transparent) and docs/lift-circuit-spec.md for the public-input/contract-obligation
+// conventions this mirrors.
 //
 // What this proves (the contract trusts these because the proof verifies):
 //   (1) the spender knows the secret behind EACH consumed note's owner_tag (per-note sk, matching
@@ -39,15 +42,14 @@ fn hash3(a: Field, b: Field, c: Field) -> Field {
     compress(compress(a, b), c)
 }
 
-// Membership: fold `leaf` up its sibling path and assert it reaches `root`. Index bits are
-// boolean-constrained; bit i == 0 => the running node is the LEFT child at level i. Identical to
-// lift's fold so the on-chain incremental tree produces matching roots.
-fn assert_member(
+// Fold `leaf` up its sibling path and return the root it reaches. Index bits are boolean-
+// constrained; bit i == 0 => the running node is the LEFT child at level i. Identical to lift's
+// fold so the on-chain incremental tree produces matching roots.
+fn fold_root(
     leaf: Field,
     path: [Field; TREE_DEPTH],
     index_bits: [Field; TREE_DEPTH],
-    root: Field,
-) {
+) -> Field {
     let mut node = leaf;
     for i in 0..TREE_DEPTH {
         let bit = index_bits[i];
@@ -57,7 +59,17 @@ fn assert_member(
         let right = (1 - bit) * sib + bit * node;
         node = compress(left, right);
     }
-    assert(node == root);
+    node
+}
+
+// Membership: the leaf's folded root must equal `root`.
+fn assert_member(
+    leaf: Field,
+    path: [Field; TREE_DEPTH],
+    index_bits: [Field; TREE_DEPTH],
+    root: Field,
+) {
+    assert(fold_root(leaf, path, index_bits) == root);
 }
 
 fn main(
@@ -90,9 +102,15 @@ fn main(
     let owner_tag_1 = compress(compress(sk_1, 0), rho_1);
     let owner_tag_2 = compress(compress(sk_2, 0), rho_2);
 
-    // (2) membership: each consumed asset note leaf = H(asset, amount, owner_tag) is in the tree.
+    // (2) membership: consumed note 1 (the real note) leaf = H(asset, amount, owner_tag) is in the
+    // tree. Note 2 is OPTIONAL: when amount_2 == 0 it is a null padding note (no second input),
+    // which turns this join into a 1->2 SPLIT, a single note carved into {target, change}. A null
+    // note contributes 0 to conservation (5), so no value is created and its membership is not
+    // required; a real second note (amount_2 != 0) is fully checked exactly as before.
     assert_member(hash3(asset, amount_1, owner_tag_1), path_1, index_bits_1, root);
-    assert_member(hash3(asset, amount_2, owner_tag_2), path_2, index_bits_2, root);
+    let root_2 = fold_root(hash3(asset, amount_2, owner_tag_2), path_2, index_bits_2);
+    let real_2 = (amount_2 != 0) as Field; // 1 for a real input, 0 for a null padding note
+    assert(real_2 * (root_2 - root) == 0);
 
     // (3) nullifier correctness for each consumed note (the contract records both, distinct).
     assert(compress(sk_1, rho_1) == nullifier_1);

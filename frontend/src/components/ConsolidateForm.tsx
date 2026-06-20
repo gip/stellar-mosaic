@@ -1,10 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { Desk } from '../api'
-import { api } from '../api'
-import { randomField } from '../crypto'
-import { joinTerms } from '../noir'
-import { proveJoin, b64 } from '../prove'
-import { addNote, updateNote, type Note } from '../notes'
+import { executeJoin } from '../orchestrate'
+import { type Note } from '../notes'
 import { toRaw, formatAmount } from '../amount'
 
 /**
@@ -66,91 +63,9 @@ export default function ConsolidateForm({
     setBusy(true)
     setError(null)
     try {
-      // Fresh secrets for each output note (per-note keys, like shield).
-      const sk_out1 = randomField()
-      const rho_out1 = randomField()
-      const sk_out2 = randomField()
-      const rho_out2 = randomField()
-      setStatus('Deriving join terms…')
-      const terms = await joinTerms({
-        sk_1: a.sk,
-        rho_1: a.rho,
-        sk_2: b.sk,
-        rho_2: b.rho,
-        sk_out1,
-        rho_out1,
-        sk_out2,
-        rho_out2,
-      })
-
-      setStatus('Fetching membership paths…')
-      const [pa, pb] = await Promise.all([
-        api.getNoteProof(desk.id, a.owner_tag),
-        api.getNoteProof(desk.id, b.owner_tag),
-      ])
-      // Both paths must be against the same root (the circuit folds both to one). If the tree
-      // advanced between the two fetches, the roots differ — ask the user to retry.
-      if (pa.root.toLowerCase() !== pb.root.toLowerCase()) {
-        throw new Error('Tree advanced between path fetches; please retry.')
-      }
-
-      setStatus('Proving (UltraHonk, in-browser)…')
-      const bundle = await proveJoin({
-        sk_1: a.sk,
-        rho_1: a.rho,
-        amount_1: a.amount,
-        path_1: pa.siblings,
-        index_bits_1: pa.index_bits,
-        sk_2: b.sk,
-        rho_2: b.rho,
-        amount_2: b.amount,
-        path_2: pb.siblings,
-        index_bits_2: pb.index_bits,
-        root: pa.root,
-        nullifier_1: terms.nullifier_1,
-        nullifier_2: terms.nullifier_2,
-        asset: a.asset_id,
-        out_tag_1: terms.out_tag_1,
-        out_amount_1: targetRaw.toString(),
-        out_tag_2: terms.out_tag_2,
-        out_amount_2: changeRaw.toString(),
-      })
-
-      setStatus('Submitting (sponsored)…')
-      await api.relayJoin(desk.id, b64(bundle.proof), b64(bundle.publicInputs))
-
-      // Both inputs are now spent; record the two fresh outputs as pending (reconcile confirms them
-      // + stamps leaf_index once the on-chain `noteins` events are indexed).
-      await updateNote(a.id, { status: 'spent' })
-      await updateNote(b.id, { status: 'spent' })
-      await addNote({
-        id: crypto.randomUUID(),
-        deskId: desk.id,
-        role: 'asset',
-        asset_id: a.asset_id,
-        symbol: a.symbol,
-        amount: targetRaw.toString(),
-        sk: sk_out1,
-        rho: rho_out1,
-        owner_tag: terms.out_tag_1,
-        status: 'pending',
-        createdAt: Date.now(),
-      })
-      if (changeRaw > 0n) {
-        await addNote({
-          id: crypto.randomUUID(),
-          deskId: desk.id,
-          role: 'asset',
-          asset_id: a.asset_id,
-          symbol: a.symbol,
-          amount: changeRaw.toString(),
-          sk: sk_out2,
-          rho: rho_out2,
-          owner_tag: terms.out_tag_2,
-          status: 'pending',
-          createdAt: Date.now(),
-        })
-      }
+      // The shared join primitive proves + relays and records the two fresh outputs as pending
+      // (reconcile confirms them + stamps leaf_index once the on-chain `noteins` events are indexed).
+      await executeJoin(desk, a, b, targetRaw, changeRaw, setStatus)
       setStatus('Consolidated.')
       onDone()
     } catch (e) {
