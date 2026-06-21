@@ -22,7 +22,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, crypto::bn254::Bn254Fr, symbol_short,
-    token::TokenClient, vec, xdr::ToXdr, Address, Bytes, BytesN, Env, Vec, U256,
+    token::TokenClient, vec, xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Vec, U256,
 };
 use soroban_poseidon::{Field, Poseidon2Config, Poseidon2Sponge};
 use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
@@ -103,6 +103,12 @@ pub enum Error {
     OrderNotFound = 19,      // cancel/match referenced an order not present in the book (Phase 2)
     NotPartialAllowed = 20,  // order forbids partial execution but could not fully fill (Phase 2)
     PairAlreadyRegistered = 21, // canonical pair already defined (admin must not redefine)
+    BaseBridgeNotConfigured = 22, // shield_from_base called before the Base bridge config was set
+    BadJournal = 23,            // RISC Zero journal has the wrong length / non-Block commitment
+    ConfigMismatch = 24,        // journal configID != the configured Base Sepolia chain-spec digest
+    BridgeMismatch = 25,        // journal bridgeAddress != the configured Base bridge address
+    BaseBlockNotAttested = 26,  // journal block hash is not in the relayer-attested block registry
+    DepositAlreadyProcessed = 27, // this Base depositId has already minted a note (replay)
 }
 
 /// Depth of the on-chain append-only Merkle note tree (matches the circuits' TREE_DEPTH).
@@ -158,6 +164,13 @@ pub enum DataKey {
     Pair(u32),  // pair id -> PairDef { base_asset, quote_asset } (canonical orientation)
     PairCount,  // u32: number of registered pairs (pair ids are 0..PairCount)
     Book(u32, u32), // (pair_id, side) -> Vec<OrderEntry>, kept sorted best-price-first (<=64)
+    // --- Base-shield bridge (one-way deposit from Base; see docs/base-bridge.md) ---
+    BaseRouter,         // Address: deployed RISC Zero verifier router (cross-called to verify)
+    BaseImageId,        // BytesN<32>: pinned guest image id (bridge-prover BRIDGE_GUEST_ID)
+    BaseConfigId,       // BytesN<32>: expected Steel configID (Base Sepolia chain-spec digest)
+    BaseBridgeAddr,     // BytesN<20>: expected Base MosaicBridge address bound in the journal
+    BaseBlock(u64),     // block number -> attested Base block hash (relayer-attested registry)
+    BaseDeposit(u64),   // Base depositId -> true (single-use; prevents double-mint)
 }
 
 /// A resting order in the on-chain book. Order *terms* are public (the privacy model only hides
@@ -338,6 +351,155 @@ impl Settlement {
         // Mint the AssetNote into the on-chain tree (leaf = Poseidon(asset, amount, owner_tag)),
         // which advances and accepts the new root. The event lets the off-chain client rebuild
         // membership paths (the tree stores only filled subtrees, not all leaves).
+        let h = Hasher::new(&env);
+        let leaf = asset_note_leaf(&env, &h, asset_id, amount, &owner_tag);
+        tree_insert(&env, &h, &leaf);
+        env.events()
+            .publish((symbol_short!("shielded"),), (asset_id, amount, owner_tag));
+        bump_core(&env);
+        Ok(())
+    }
+
+    /// Configure the Base-shield bridge (admin). `router` is the deployed RISC Zero verifier router
+    /// this contract cross-calls; `image_id` is the pinned bridge guest image id; `config_id` is the
+    /// expected Steel `configID` (Base Sepolia chain-spec digest); `bridge` is the Base MosaicBridge
+    /// address the journal must carry. Re-settable so the guest/bridge can be rotated.
+    pub fn configure_base_bridge(
+        env: Env,
+        router: Address,
+        image_id: BytesN<32>,
+        config_id: BytesN<32>,
+        bridge: BytesN<20>,
+    ) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        env.storage().persistent().set(&DataKey::BaseRouter, &router);
+        env.storage().persistent().set(&DataKey::BaseImageId, &image_id);
+        env.storage().persistent().set(&DataKey::BaseConfigId, &config_id);
+        env.storage().persistent().set(&DataKey::BaseBridgeAddr, &bridge);
+        bump(&env, &DataKey::BaseRouter);
+        bump(&env, &DataKey::BaseImageId);
+        bump(&env, &DataKey::BaseConfigId);
+        bump(&env, &DataKey::BaseBridgeAddr);
+        Ok(())
+    }
+
+    /// Attest a finalized Base block hash (admin/relayer). This is the bridge's trust anchor: a Steel
+    /// proof shows an event is in block `block_hash`, but only this registry asserts that hash is
+    /// canonical Base. `shield_from_base` checks the journal's block hash against this map.
+    pub fn attest_base_block(env: Env, block_number: u64, block_hash: BytesN<32>) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        let key = DataKey::BaseBlock(block_number);
+        env.storage().persistent().set(&key, &block_hash);
+        bump(&env, &key);
+        Ok(())
+    }
+
+    /// Shield from Base: mint an AssetNote from a proven Base deposit (one-way peg). `journal` is the
+    /// ABI-encoded RISC Zero journal the bridge guest committed; `seal` is its Groth16 receipt. The
+    /// contract verifies the receipt via the configured router (binding the pinned image id), then
+    /// checks the journal's chain config, bridge address, and attested block hash, guards the
+    /// depositId against replay, and inserts `Poseidon(asset_id, amount, owner_tag)` into the same
+    /// on-chain tree as a native `shield` — emitting an identical `shielded` event so the off-chain
+    /// indexer is unchanged. No Stellar token custody moves (the real USDC is locked on Base).
+    pub fn shield_from_base(env: Env, seal: Bytes, journal: Bytes) -> Result<(), Error> {
+        let router: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BaseRouter)
+            .ok_or(Error::BaseBridgeNotConfigured)?;
+        let image_id: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BaseImageId)
+            .ok_or(Error::BaseBridgeNotConfigured)?;
+        let expected_config: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BaseConfigId)
+            .ok_or(Error::BaseBridgeNotConfigured)?;
+        let expected_bridge: BytesN<20> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BaseBridgeAddr)
+            .ok_or(Error::BaseBridgeNotConfigured)?;
+
+        // The journal is a fixed 8-word ABI tuple (see bridge-prover/README.md). Reject any other
+        // length before hashing so a malformed input cannot be passed to the verifier.
+        if journal.len() != 256 {
+            return Err(Error::BadJournal);
+        }
+
+        // Verify the RISC Zero receipt through the router: it reconstructs the claim from `image_id`
+        // + sha256(journal) and checks the seal. Cross-call (SDK-version agnostic); traps on an
+        // invalid proof, so reaching the next line means the journal is authentic for our guest.
+        let journal_digest: BytesN<32> = env.crypto().sha256(&journal).into();
+        env.invoke_contract::<()>(
+            &router,
+            &symbol_short!("verify"),
+            vec![
+                &env,
+                seal.into_val(&env),
+                image_id.into_val(&env),
+                journal_digest.into_val(&env),
+            ],
+        );
+
+        // Parse the journal: [0] commitment.id  [1] blockHash  [2] configID  [3] bridgeAddress
+        //                     [4] depositId     [5] assetId    [6] amount    [7] ownerTag
+        // word_to_u64 on the id requires the top 24 bytes to be zero, which also enforces the Block
+        // commitment version (0) and a 64-bit block number.
+        let block_number = word_to_u64(&read_word(&journal, 0))?;
+        let block_hash = BytesN::from_array(&env, &read_word(&journal, 32));
+        let config_id = BytesN::from_array(&env, &read_word(&journal, 64));
+        let bridge_word = read_word(&journal, 96);
+        let deposit_id = word_to_u64(&read_word(&journal, 128))?;
+        let asset_id = word_to_u32(&read_word(&journal, 160))?;
+        let amount = word_to_i128(&read_word(&journal, 192))?;
+        let owner_tag: BytesN<32> = BytesN::from_array(&env, &read_word(&journal, 224));
+
+        // Chain config must be the expected Base Sepolia chain spec.
+        if config_id != expected_config {
+            return Err(Error::ConfigMismatch);
+        }
+        // bridgeAddress is an EVM address ABI-encoded as a 32-byte word: 12 zero bytes then 20 addr
+        // bytes. Bind it to the configured bridge so a same-signature event from another contract is
+        // rejected.
+        let mut addr20 = [0u8; 20];
+        for i in 0..12 {
+            if bridge_word[i] != 0 {
+                return Err(Error::BridgeMismatch);
+            }
+        }
+        addr20.copy_from_slice(&bridge_word[12..32]);
+        if BytesN::from_array(&env, &addr20) != expected_bridge {
+            return Err(Error::BridgeMismatch);
+        }
+        // The proven block hash must be one the relayer attested as canonical Base.
+        let attested: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BaseBlock(block_number))
+            .ok_or(Error::BaseBlockNotAttested)?;
+        if attested != block_hash {
+            return Err(Error::BaseBlockNotAttested);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+        // The note's asset must be a known protocol asset (so it is spendable/tradeable like a native
+        // shield). Custody equivalence (Base-USDC == Stellar-USDC) is the documented one-way peg.
+        if !env.storage().persistent().has(&DataKey::Asset(asset_id)) {
+            return Err(Error::AssetNotRegistered);
+        }
+        // Single-use: one mint per Base depositId.
+        let dk = DataKey::BaseDeposit(deposit_id);
+        if env.storage().persistent().has(&dk) {
+            return Err(Error::DepositAlreadyProcessed);
+        }
+        env.storage().persistent().set(&dk, &true);
+        bump(&env, &dk);
+
+        // Mint the AssetNote into the on-chain tree, byte-identical to a native shield's leaf.
         let h = Hasher::new(&env);
         let leaf = asset_note_leaf(&env, &h, asset_id, amount, &owner_tag);
         tree_insert(&env, &h, &leaf);

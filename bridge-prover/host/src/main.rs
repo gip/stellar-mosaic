@@ -138,3 +138,40 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod fixture {
+    //! Emits ground-truth values for the Stellar WS4 tests: the ABI-encoded journal byte layout,
+    //! the guest image id, and the Base Sepolia config digest. Run with:
+    //!   cargo test -p host --release -- --nocapture print_journal_fixture
+    use super::{Journal, BASE_SEPOLIA_CHAIN_SPEC};
+    use alloy_primitives::{hex, Address, B256, U256};
+    use alloy_sol_types::SolValue;
+    use bridge_methods::BRIDGE_GUEST_ID;
+    use risc0_steel::Commitment;
+    use risc0_zkvm::sha::Digest;
+
+    #[test]
+    fn print_journal_fixture() {
+        let commitment = Commitment {
+            id: U256::from(0x1234u64), // version 0 (Block) in top bits, blockNumber = 0x1234
+            digest: B256::repeat_byte(0x11),
+            configID: B256::repeat_byte(0x22),
+        };
+        let journal = Journal {
+            commitment,
+            bridgeAddress: Address::from([0xABu8; 20]),
+            depositId: 7,
+            assetId: 1,
+            amount: U256::from(100_000_000u64), // 100 USDC (6 dp)
+            ownerTag: B256::repeat_byte(0x33),
+        };
+        let enc = journal.abi_encode();
+        println!("JOURNAL_LEN={}", enc.len());
+        println!("JOURNAL_HEX={}", hex::encode(&enc));
+
+        let image_id = Digest::from(BRIDGE_GUEST_ID);
+        println!("IMAGE_ID_HEX={}", hex::encode(image_id.as_bytes()));
+        println!("CONFIG_DIGEST_HEX={}", hex::encode(BASE_SEPOLIA_CHAIN_SPEC.digest()));
+    }
+}
