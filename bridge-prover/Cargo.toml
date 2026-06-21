@@ -10,6 +10,8 @@ risc0-steel = { path = "../../PICO/bless/steel/crates/steel" }
 # risc0 monorepo dependencies.
 risc0-build = { version = "3.0" }
 risc0-zkvm = { version = "3.0" }
+# encode_seal: turns a Receipt into the selector-prefixed seal the RISC Zero verifier expects.
+risc0-ethereum-contracts = { version = "3.0.1" }
 
 alloy-primitives = { version = "1.5" }
 alloy-sol-types = { version = "1.5" }

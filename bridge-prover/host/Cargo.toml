@@ -12,6 +12,7 @@ bridge-methods = { workspace = true }
 log = { workspace = true }
 risc0-steel = { workspace = true, features = ["host"] }
 risc0-zkvm = { workspace = true }
+risc0-ethereum-contracts = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }

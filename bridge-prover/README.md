@@ -49,13 +49,35 @@ Current image id (`bridge_methods::BRIDGE_GUEST_ID`, changes if the guest or its
 ```bash
 cargo build                       # builds host + cross-compiles the guest, fixes the image id
 
-# Needs a real Shielded event on-chain: deploy via ../evm and shield first.
+# Execute only (fast journal-only check). Needs a real Shielded event on-chain:
+# deploy via ../evm and shield first.
 RPC_URL=https://sepolia.base.org RUST_LOG=info \
   cargo run --release -- --bridge 0x<MosaicBridge> --deposit-id 0
+
+# Prove (Groth16) and write the router-ready artifacts to out/{seal.hex,journal.hex}.
+RPC_URL=https://sepolia.base.org RUST_LOG=info \
+  cargo run --release -- --bridge 0x<MosaicBridge> --deposit-id 0 --prove
 ```
 
-Local executor (dev mode) only proves the guest runs and produces the journal. A real Groth16
-receipt for Stellar comes from Boundless (WS6).
+`--prove` produces a Groth16 `Receipt`, verifies it locally against the pinned image id, and
+`encode_seal`s it. The emitted `seal` + `journal` are exactly the two arguments Stellar
+`shield_from_base(seal, journal)` consumes (the contract computes the sha256 journal digest itself).
+The seal format is identical to what the Boundless marketplace returns and what the Nethermind
+verifier router accepts.
+
+Local Groth16 proving needs the RISC Zero prover stack (`r0vm` / Docker on Apple Silicon, or
+`RISC0_PROVER=bonsai`). The executor-only mode and the live preflight (RPC → block → event query)
+run without it.
+
+### Boundless (production proving)
+
+Rather than proving locally, submit the guest + input to the Boundless marketplace and use the
+returned `fulfillment.seal` / `journal` unchanged (same router-compatible format). The flow mirrors
+`boundless/examples/counter/apps/src/main.rs`: build a `boundless_market::Client`, `new_request()
+.with_program(BRIDGE_GUEST_ELF).with_stdin(<the same input the host writes>)`, `submit`,
+`wait_for_request_fulfillment`, then feed `seal`/`journal` to `shield_from_base`. This is the path
+the backend orchestrator (WS6-backend) will drive; it needs a funded Boundless account, an RPC, and
+a program/input storage uploader, so it is not wired into this CLI.
 
 ## Base Sepolia chain spec
 

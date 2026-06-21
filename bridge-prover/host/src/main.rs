@@ -1,23 +1,31 @@
-//! Bridge host: preflight the `Shielded` event query on Base Sepolia, build the Steel input, and run
-//! the guest (executor / dev mode) to produce the journal. Wiring to Boundless for a real Groth16
-//! receipt is WS6; this binary proves the guest + journal shape against live chain data.
+//! Bridge host: preflight the `Shielded` event query on Base Sepolia, build the Steel input, and
+//! either EXECUTE the guest (fast journal-only check) or PROVE it into a Groth16 receipt and emit
+//! the router-ready `seal` + `journal` artifacts that Stellar `shield_from_base` consumes.
 //!
-//! Run (needs a real Shielded event on-chain — deploy via `evm/` and shield first):
+//! Execute only (needs a real Shielded event on-chain — deploy via `evm/` and shield first):
 //!   RPC_URL=https://sepolia.base.org RUST_LOG=info \
 //!     cargo run --release -- --bridge 0x<MosaicBridge> --deposit-id 0
+//!
+//! Prove (Groth16) and write out/{seal.hex,journal.hex}:
+//!   RPC_URL=... RUST_LOG=info cargo run --release -- --bridge 0x.. --deposit-id 0 --prove
+//!
+//! Local Groth16 proving needs the RISC Zero prover stack (`r0vm` / Docker on Apple Silicon, or
+//! `RISC0_PROVER=bonsai`). The emitted `seal` is byte-for-byte what the Boundless marketplace
+//! returns and what the Nethermind verifier router (and thus `shield_from_base`) accepts — see
+//! `bridge-prover/README.md` for the Boundless production path.
 
-use std::sync::LazyLock;
+use std::{fs, path::PathBuf, sync::LazyLock};
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{hex, Address, B256, U256};
 use alloy_sol_types::{sol, SolEvent, SolValue};
 use anyhow::{Context, Result};
-use bridge_methods::BRIDGE_GUEST_ELF;
+use bridge_methods::{BRIDGE_GUEST_ELF, BRIDGE_GUEST_ID};
 use clap::Parser;
 use risc0_steel::{
     config::ChainSpec, ethereum::EthChainSpec, ethereum::EthEvmEnv,
     revm::primitives::hardfork::SpecId, Commitment, Event,
 };
-use risc0_zkvm::{default_executor, ExecutorEnv};
+use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
 use tokio::task;
 use tracing_subscriber::EnvFilter;
 use url::Url;
@@ -68,6 +76,14 @@ struct Args {
     /// The deposit id (indexed) of the Shielded event to prove.
     #[arg(short, long)]
     deposit_id: u64,
+
+    /// Produce a Groth16 receipt and write the router-ready seal + journal (otherwise execute only).
+    #[arg(long)]
+    prove: bool,
+
+    /// Directory for the emitted `seal.hex` / `journal.hex` artifacts when `--prove` is set.
+    #[arg(long, default_value = "out")]
+    out_dir: PathBuf,
 }
 
 #[tokio::main]
@@ -105,8 +121,11 @@ async fn main() -> Result<()> {
     let evm_input = env.into_input().await?;
     let bridge_bytes: [u8; 20] = args.bridge.into();
     let deposit_id = args.deposit_id;
+    let do_prove = args.prove;
 
-    let session_info = task::spawn_blocking(move || {
+    // Execute (journal only) or prove (Groth16 receipt -> router-ready seal). Returns the journal
+    // bytes and, when proving, the encoded seal.
+    let (journal_bytes, seal): (Vec<u8>, Option<Vec<u8>>) = task::spawn_blocking(move || {
         let env = ExecutorEnv::builder()
             .write(&evm_input)
             .context("failed to write evm input")?
@@ -116,18 +135,32 @@ async fn main() -> Result<()> {
             .context("failed to write deposit id")?
             .build()
             .context("failed to build env")?;
-        default_executor()
-            .execute(env, BRIDGE_GUEST_ELF)
-            .context("failed to run executor")
-    })
-    .await?
-    .context("failed to execute guest")?;
 
-    let journal =
-        Journal::abi_decode(session_info.journal.as_ref()).context("failed to decode journal")?;
+        if do_prove {
+            // Groth16 receipt: the seal verifies on Stellar via the Nethermind router.
+            let receipt = default_prover()
+                .prove_with_opts(env, BRIDGE_GUEST_ELF, &ProverOpts::groth16())
+                .context("failed to prove guest")?
+                .receipt;
+            receipt
+                .verify(BRIDGE_GUEST_ID)
+                .context("receipt failed local verification")?;
+            let seal = risc0_ethereum_contracts::encode_seal(&receipt)
+                .context("failed to encode seal")?;
+            Ok::<_, anyhow::Error>((receipt.journal.bytes, Some(seal)))
+        } else {
+            let info = default_executor()
+                .execute(env, BRIDGE_GUEST_ELF)
+                .context("failed to run executor")?;
+            Ok((info.journal.bytes, None))
+        }
+    })
+    .await??;
+
+    let journal = Journal::abi_decode(&journal_bytes).context("failed to decode journal")?;
     log::debug!("Steel commitment: {:?}", journal.commitment);
     log::info!(
-        "Proved Shielded: depositId={} assetId={} amount={} ownerTag={} (bridge {}, block digest {})",
+        "Shielded: depositId={} assetId={} amount={} ownerTag={} (bridge {}, block digest {})",
         journal.depositId,
         journal.assetId,
         journal.amount,
@@ -135,6 +168,23 @@ async fn main() -> Result<()> {
         journal.bridgeAddress,
         journal.commitment.digest,
     );
+
+    if let Some(seal) = seal {
+        // `shield_from_base(seal, journal)` on Stellar consumes exactly these two artifacts (it
+        // computes the sha256 journal digest itself).
+        fs::create_dir_all(&args.out_dir).context("failed to create out dir")?;
+        let journal_path = args.out_dir.join("journal.hex");
+        let seal_path = args.out_dir.join("seal.hex");
+        fs::write(&journal_path, hex::encode(&journal_bytes))?;
+        fs::write(&seal_path, hex::encode(&seal))?;
+        log::info!(
+            "Wrote {} ({} journal bytes) and {} ({} seal bytes)",
+            journal_path.display(),
+            journal_bytes.len(),
+            seal_path.display(),
+            seal.len(),
+        );
+    }
 
     Ok(())
 }
