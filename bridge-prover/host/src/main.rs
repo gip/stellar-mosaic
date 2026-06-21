@@ -81,9 +81,14 @@ struct Args {
     #[arg(long)]
     prove: bool,
 
-    /// Directory for the emitted `seal.hex` / `journal.hex` artifacts when `--prove` is set.
+    /// Directory for the emitted seal/journal artifacts when `--prove` is set.
     #[arg(long, default_value = "out")]
     out_dir: PathBuf,
+
+    /// Block to query the event in. Steel scopes an event query to ONE block, so this must be the
+    /// block that contains the deposit (defaults to latest, which is usually wrong for a past tx).
+    #[arg(long)]
+    block: Option<u64>,
 }
 
 #[tokio::main]
@@ -93,12 +98,13 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
 
-    // EVM environment from the RPC, defaulting to the latest block.
-    let mut env = EthEvmEnv::builder()
-        .rpc(args.rpc_url)
-        .chain_spec(&BASE_SEPOLIA_CHAIN_SPEC)
-        .build()
-        .await?;
+    // EVM environment from the RPC, pinned to the deposit's block (Steel queries one block).
+    let builder = EthEvmEnv::builder().rpc(args.rpc_url).chain_spec(&BASE_SEPOLIA_CHAIN_SPEC);
+    let builder = match args.block {
+        Some(b) => builder.block_number(b),
+        None => builder,
+    };
+    let mut env = builder.build().await?;
 
     // Preflight the event query (same filter the guest applies) to prepare the guest input.
     let deposit_topic = B256::from(U256::from(args.deposit_id));
@@ -173,15 +179,15 @@ async fn main() -> Result<()> {
         // `shield_from_base(seal, journal)` on Stellar consumes exactly these two artifacts (it
         // computes the sha256 journal digest itself).
         fs::create_dir_all(&args.out_dir).context("failed to create out dir")?;
-        let journal_path = args.out_dir.join("journal.hex");
-        let seal_path = args.out_dir.join("seal.hex");
-        fs::write(&journal_path, hex::encode(&journal_bytes))?;
-        fs::write(&seal_path, hex::encode(&seal))?;
+        // Raw .bin for the stellar CLI `--arg-file-path` convention; .hex for human inspection.
+        fs::write(args.out_dir.join("journal.bin"), &journal_bytes)?;
+        fs::write(args.out_dir.join("seal.bin"), &seal)?;
+        fs::write(args.out_dir.join("journal.hex"), hex::encode(&journal_bytes))?;
+        fs::write(args.out_dir.join("seal.hex"), hex::encode(&seal))?;
         log::info!(
-            "Wrote {} ({} journal bytes) and {} ({} seal bytes)",
-            journal_path.display(),
+            "Wrote {}/{{seal,journal}}.{{bin,hex}} ({} journal bytes, {} seal bytes)",
+            args.out_dir.display(),
             journal_bytes.len(),
-            seal_path.display(),
             seal.len(),
         );
     }

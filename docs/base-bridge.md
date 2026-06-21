@@ -49,7 +49,7 @@ accepts this per the equivalence assumption; a Stellar→Base withdraw leg is de
 | WS5 indexer cross-chain note recovery | `tools/indexer`, `backend/` | ◻ |
 | WS6 Boundless proving + receipt → seal | `bridge-prover/host`, `backend/` | ◻ |
 | WS7 frontend (Base wallet + shield + status) | `frontend/` | ◻ |
-| WS8 end-to-end Base-Sepolia ↔ Stellar-testnet demo | `scripts/` | ◻ |
+| WS8 end-to-end Base-Sepolia ↔ Stellar-testnet demo | `scripts/10_demo_base_shield_testnet.sh` | ◻ script authored (live run pending infra) |
 
 WS3 proved a BN254 Groth16 verify fits the budget; **production verification uses the Nethermind
 [`stellar-risc0-verifier`](https://github.com/NethermindEth/stellar-risc0-verifier) router** (pins
@@ -75,3 +75,26 @@ ABI-encoded, fixed 256 bytes (8 × 32-byte words), all fields static:
 Reference values for the current guest (regenerate via `bridge-prover` `print_journal_fixture`):
 image id `703c618ff04997c2937552d40103472081aa87c16c711de5c6ece5607f0ee281`, Base Sepolia config
 digest `96db42921002cf403b4d9b5255f9743aa8ab15f0f8480f4296ddf068d322e71d`.
+
+## Running the end-to-end demo (WS8)
+
+`scripts/10_demo_base_shield_testnet.sh` orchestrates: deploy `MosaicBridge` on Base Sepolia →
+shield → prove (`bridge-prover --prove`, pinned to the deposit's block) → deploy + configure
+settlement on Stellar testnet → `attest_base_block` (the relayer step) → `shield_from_base` → assert
+the tree root advanced.
+
+Prerequisites (the script gates on them): foundry + a funded Base Sepolia key (`PRIVATE_KEY`); the
+RISC Zero Groth16 prover stack (`r0vm`/Docker, or `RISC0_PROVER=bonsai`); the stellar CLI + a funded
+testnet identity; and the **Nethermind verifier router deployed on Stellar testnet** with its address
+in `ROUTER_ID`. Deploy the router once from `vendor/stellar-risc0-verifier`:
+
+```bash
+./scripts/manage.sh deploy-router   -n testnet -a <acct> --min-delay 0
+./scripts/manage.sh deploy-verifier -n testnet -a <acct>
+./scripts/manage.sh schedule-add-verifier -n testnet -a <acct> --selector <seal-selector>
+```
+
+What a live run still validates (untested locally without the above): that Groth16 proving succeeds;
+that the live router accepts our seal selector; that the `configID` our chain spec computes matches
+what Steel commits at proving time; and that Base (OP-stack) headers validate inside the guest during
+proving (the host preflight already fetches Base blocks fine under `SpecId::PRAGUE`).
