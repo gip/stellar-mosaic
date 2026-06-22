@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 # End-to-end demo: shield USDC on BASE SEPOLIA and mint the matching note on STELLAR TESTNET, via a
-# real RISC Zero / Steel Groth16 proof verified on Soroban. This is the WS8 orchestration of the
-# Base-shield bridge (docs/base-bridge.md): Base deposit -> prove -> attest block -> shield_from_base.
+# real RISC Zero / Steel Groth16 proof verified on Soroban. WS8 orchestration of the Base-shield
+# bridge (docs/base-bridge.md): Base deposit -> prove from state -> attest block -> shield_from_base.
 #
-# It ties together the pieces built in WS1 (evm/MosaicBridge.sol), WS2/WS6 (bridge-prover), and WS4
-# (settlement.shield_from_base). The full flow needs live infra that is NOT bundled here:
+# Reproduces the validated manual run. Self-contained on the Base side (deploys a MockUSDC and mints,
+# so no faucet); reuses an already-deployed verifier router on Stellar.
 #
-#   PREREQUISITES (export these or the script stops with an explanation):
-#     - foundry (forge, cast) + a funded BASE SEPOLIA key:   PRIVATE_KEY=0x...
-#     - the RISC Zero prover stack for Groth16 (r0vm/Docker, or RISC0_PROVER=bonsai + BONSAI_*),
-#       OR set USE_BOUNDLESS=1 and wire the marketplace (see bridge-prover/README.md) — not automated.
-#     - stellar CLI + a funded testnet identity (default IDENTITY=m0; auto-funded via friendbot).
-#     - the Nethermind RISC Zero verifier ROUTER deployed on Stellar testnet, and its address in
-#       ROUTER_ID. Deploy it once from vendor/stellar-risc0-verifier:
-#         ./scripts/manage.sh deploy-router   -n testnet -a <acct> --min-delay 0
-#         ./scripts/manage.sh deploy-verifier -n testnet -a <acct>
-#         ./scripts/manage.sh schedule-add-verifier -n testnet -a <acct> --selector <sel>
-#       (the selector is the first 4 bytes of the Groth16 seal; see their docs/architecture.md).
+#   PREREQUISITES:
+#     - foundry (forge, cast) + a funded BASE SEPOLIA key:   export PRIVATE_KEY=0x...
+#     - a Base Sepolia RPC that serves eth_getProof:          export BASE_RPC=...   (Alchemy etc.)
+#     - the RISC Zero Groth16 prover stack (Docker for the wrap), e.g. export RISC0_PROVER=local
+#     - stellar CLI + a funded testnet identity (default IDENTITY=m0; auto-funded via friendbot)
+#     - the Nethermind verifier ROUTER deployed on Stellar testnet, in ROUTER_ID. Deploy once from
+#       vendor/stellar-risc0-verifier and register our seal selector 73c457ba:
+#         ./scripts/manage.sh deploy-router         -n testnet -a <acct> --min-delay 0
+#         ./scripts/manage.sh deploy-verifier       -n testnet -a <acct>
+#         ./scripts/manage.sh schedule-add-verifier -n testnet -a <acct> --selector 73c457ba
+#         ./scripts/manage.sh execute-add-verifier  -n testnet -a <acct> --selector 73c457ba
 #
-# Deliberately minimal for a robust live run: one fresh bridge, one shield (depositId 0), asset id 1
-# mapped to the native XLM SAC on Stellar (the protocol only needs a registered id; Base-USDC is
-# assumed equivalent to Stellar-USDC per the one-way peg). Amounts are tiny.
+# By default the proof anchors to the latest FINALIZED Base block (reorg-safe), which means waiting
+# for the deposit to finalize (~10-15 min on Base Sepolia). Set UNSAFE_FAST=1 to instead prove
+# immediately against the deposit's own (non-finalized) block — quick, but reorg-risky; demo only.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,23 +32,24 @@ export PATH="$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH"
 
 # --- config (override via env) ---
 BASE_RPC="${BASE_RPC:-https://sepolia.base.org}"
-USDC="${USDC:-0x036CbD53842c5426634e7929541eC2318f3dCF7e}" # Circle USDC on Base Sepolia
 NETWORK="${NETWORK:-testnet}"
 IDENTITY="${IDENTITY:-m0}"
 ASSET_ID="${ASSET_ID:-1}"
 AMOUNT="${AMOUNT:-1000000}"                  # 1 USDC (6 dp)
 DEPOSIT_ID="${DEPOSIT_ID:-0}"                # fresh bridge -> first deposit is 0
-# owner_tag = an opaque BN254 Fr element (< r). A real wallet derives Poseidon(pk_o, rho); for the
-# demo any small constant works (it only governs who can later spend the minted note).
+# owner_tag: an opaque BN254 Fr element (< the scalar field modulus r). Any small constant works for
+# the demo; a real wallet uses Poseidon(pk_o, rho). NOTE: must be < r (0x11.. ok; 0x33.. is NOT).
 OWNER_TAG="${OWNER_TAG:-0x1111111111111111111111111111111111111111111111111111111111111111}"
 # Pinned guest image id + Base Sepolia config digest (regenerate via bridge-prover print_journal_fixture).
 IMAGE_ID="${IMAGE_ID:-333e192f991c82a12d4fbf779342c918af4eca4d8eba66908f2ac020c46d26a5}"
 CONFIG_ID="${CONFIG_ID:-3519660d6ecbd34367740f5ca18449cba8b389594f69f177bbf21c46e505c61e}"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found on PATH"; exit 1; }; }
-need forge; need cast; need stellar; need jq
+need forge; need cast; need stellar; need jq; need xxd
 : "${PRIVATE_KEY:?set PRIVATE_KEY to a funded Base Sepolia key}"
 : "${ROUTER_ID:?set ROUTER_ID to the deployed Stellar RISC Zero verifier router (see header)}"
+
+casts() { cast send --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" "$@"; }
 
 echo "==> 0. context"
 ADMIN_EVM=$(cast wallet address --private-key "$PRIVATE_KEY")
@@ -58,33 +59,42 @@ STELLAR_ADDR=$(stellar keys address "$IDENTITY" 2>/dev/null) \
 XLM_SAC=$(stellar contract id asset --asset native --network "$NETWORK")
 echo "    stellar admin = $STELLAR_ADDR   router = $ROUTER_ID"
 
-echo "==> 1. deploy MosaicBridge on Base Sepolia + register USDC"
-BRIDGE=$(forge create "$EVM/src/MosaicBridge.sol:MosaicBridge" \
-  --root "$EVM" --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --broadcast --json \
-  --constructor-args "$ADMIN_EVM" | jq -r .deployedTo)
-echo "    bridge = $BRIDGE"
-cast send "$BRIDGE" 'registerAsset(uint32,address)' "$ASSET_ID" "$USDC" \
-  --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" >/dev/null
+echo "==> 1. deploy MockUSDC + MosaicBridge on Base Sepolia, register + mint"
+USDC=$(cd "$EVM" && forge create test/mocks/MockUSDC.sol:MockUSDC \
+  --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --broadcast --json | jq -r .deployedTo)
+BRIDGE=$(cd "$EVM" && forge create src/MosaicBridge.sol:MosaicBridge \
+  --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --broadcast --json \
+  --constructor-args "$ADMIN_EVM" | jq -r .deployedTo)   # --constructor-args MUST come last
+echo "    usdc = $USDC   bridge = $BRIDGE"
+casts "$USDC" 'mint(address,uint256)' "$ADMIN_EVM" "$AMOUNT" >/dev/null
+casts "$BRIDGE" 'registerAsset(uint32,address)' "$ASSET_ID" "$USDC" >/dev/null
 
 echo "==> 2. approve + shield $AMOUNT of asset $ASSET_ID"
-cast send "$USDC" 'approve(address,uint256)' "$BRIDGE" "$AMOUNT" \
-  --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" >/dev/null
-TXH=$(cast send "$BRIDGE" 'shield(uint32,uint256,bytes32)' "$ASSET_ID" "$AMOUNT" "$OWNER_TAG" \
-  --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --json | jq -r .transactionHash)
-BLOCK=$(cast receipt "$TXH" blockNumber --rpc-url "$BASE_RPC")
-BLOCK_HASH=$(cast receipt "$TXH" blockHash --rpc-url "$BASE_RPC")
-echo "    shield tx = $TXH   block = $BLOCK   hash = $BLOCK_HASH"
+casts "$USDC" 'approve(address,uint256)' "$BRIDGE" "$AMOUNT" >/dev/null
+TXH=$(casts "$BRIDGE" 'shield(uint32,uint256,bytes32)' "$ASSET_ID" "$AMOUNT" "$OWNER_TAG" --json | jq -r .transactionHash)
+DEPOSIT_BLOCK=$(cast receipt "$TXH" blockNumber --rpc-url "$BASE_RPC")
+echo "    shield tx = $TXH   deposit block = $DEPOSIT_BLOCK"
 
-echo "==> 3. prove the Shielded event (Groth16) -> seal + journal"
-# Prove against a RECENT block (the deposit lives in current state; pinning the deposit's block
-# fails once it ages out of the RPC's eth_getProof window). The block the proof commits to is read
-# back from the journal and is what we attest below.
+echo "==> 3. prove the deposit (Groth16) -> seal + journal"
+if [ "${UNSAFE_FAST:-0}" = "1" ]; then
+  echo "    UNSAFE_FAST=1: proving at the deposit's non-finalized block $DEPOSIT_BLOCK (reorg-risk)"
+  BLOCK_ARG=(--block "$DEPOSIT_BLOCK")
+else
+  echo "    waiting for Base finality to reach block $DEPOSIT_BLOCK (~10-15 min)..."
+  while :; do
+    FIN=$(cast block finalized --field number --rpc-url "$BASE_RPC" 2>/dev/null || echo 0)
+    [ -n "$FIN" ] && [ "$FIN" -ge "$DEPOSIT_BLOCK" ] && break
+    echo "      finalized=$FIN target=$DEPOSIT_BLOCK; sleeping 30s"
+    sleep 30
+  done
+  BLOCK_ARG=()   # host default = latest finalized block
+fi
 ( cd "$PROVER" && RUST_LOG=info cargo run --release -p host -- \
-    --rpc-url "$BASE_RPC" --bridge "$BRIDGE" --deposit-id "$DEPOSIT_ID" \
+    --rpc-url "$BASE_RPC" --bridge "$BRIDGE" --deposit-id "$DEPOSIT_ID" "${BLOCK_ARG[@]}" \
     --prove --out-dir "$PROVER/out" )
 SEAL="$PROVER/out/seal.bin"; JOURNAL="$PROVER/out/journal.bin"
 [ -s "$SEAL" ] && [ -s "$JOURNAL" ] || { echo "ERROR: proving did not emit seal/journal"; exit 1; }
-# Journal word 0 = commitment.id (block number in low 8 bytes); word 1 = block hash.
+# Journal word 0 = commitment.id (block number in the low 8 bytes); word 1 = block hash.
 BLOCK=$(( 16#$(xxd -p -s 24 -l 8 "$JOURNAL") ))
 BLOCK_HASH=$(xxd -p -s 32 -l 32 "$JOURNAL")
 echo "    proof committed to block $BLOCK ($BLOCK_HASH)"
@@ -108,6 +118,7 @@ inv --send yes -- shield_from_base --seal-file-path "$SEAL" --journal-file-path 
 ROOT_AFTER=$(inv -- root 2>/dev/null | tr -d '"')
 
 echo "==> done"
+echo "    settlement = $CID"
 echo "    root before = $ROOT_BEFORE"
 echo "    root after   = $ROOT_AFTER"
 [ "$ROOT_BEFORE" != "$ROOT_AFTER" ] \

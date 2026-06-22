@@ -25,6 +25,7 @@ use anyhow::{Context, Result};
 use bridge_methods::{BRIDGE_GUEST_ELF, BRIDGE_GUEST_ID};
 use clap::Parser;
 use risc0_op_steel::{
+    host::BlockNumberOrTag,
     optimism::{OpEvmEnv, BASE_SEPOLIA_CHAIN_SPEC},
     Commitment, Contract,
 };
@@ -78,7 +79,8 @@ struct Args {
     #[arg(long, default_value = "out")]
     out_dir: PathBuf,
 
-    /// Block to read the deposit at (defaults to latest). Use the block at/after the shield tx.
+    /// Block to read the deposit at. Defaults to the latest FINALIZED block, which is reorg-safe
+    /// (the deposit lives in persistent state, so any finalized block at/after the shield works).
     #[arg(long)]
     block: Option<u64>,
 }
@@ -94,7 +96,8 @@ async fn main() -> Result<()> {
     let builder = OpEvmEnv::builder().rpc(args.rpc_url).chain_spec(&BASE_SEPOLIA_CHAIN_SPEC);
     let builder = match args.block {
         Some(b) => builder.block_number(b),
-        None => builder,
+        // Default to the latest finalized block so the minted note can't be undone by a reorg.
+        None => builder.block_number_or_tag(BlockNumberOrTag::Finalized),
     };
     let mut env = builder.build().await?;
 
