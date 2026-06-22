@@ -261,6 +261,50 @@ impl Stellar {
         args.extend(call_args.iter().cloned());
         self.run(&args)
     }
+
+    /// Relayer attestation of a canonical Base block hash (WS6 trust anchor). `block_hash` is the
+    /// 64-hex digest (no 0x). Signed by the desk admin/relayer `source`.
+    pub fn attest_base_block(
+        &self,
+        contract_id: &str,
+        source: &str,
+        block_number: u64,
+        block_hash: &str,
+    ) -> AppResult<String> {
+        self.invoke_write(
+            contract_id,
+            source,
+            &[
+                "attest_base_block".into(),
+                "--block_number".into(),
+                block_number.to_string(),
+                "--block_hash".into(),
+                block_hash.to_string(),
+            ],
+        )
+    }
+
+    /// Verify a RISC Zero receipt and mint the bridged note. `seal`/`journal` are files of raw bytes
+    /// (the prover's seal.bin / journal.bin).
+    pub fn shield_from_base(
+        &self,
+        contract_id: &str,
+        source: &str,
+        seal: &Path,
+        journal: &Path,
+    ) -> AppResult<String> {
+        self.invoke_write(
+            contract_id,
+            source,
+            &[
+                "shield_from_base".into(),
+                "--seal-file-path".into(),
+                seal.to_string_lossy().into(),
+                "--journal-file-path".into(),
+                journal.to_string_lossy().into(),
+            ],
+        )
+    }
 }
 
 /// Parse `(oldest, latest)` from an RPC error like

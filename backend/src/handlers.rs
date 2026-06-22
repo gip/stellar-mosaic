@@ -746,6 +746,43 @@ fn decode_strkey_payload(value: &str, version: u8) -> AppResult<[u8; 32]> {
     Ok(out)
 }
 
+// ---- Base->Stellar shield jobs (WS6) ----
+
+/// Enqueue a Base-shield job for `{bridge, deposit_id}`. The server-side worker proves the deposit,
+/// waits for finality, attests the block, and mints the note. Idempotent per (desk, bridge, deposit).
+pub async fn enqueue_base_shield(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> AppResult<(axum::http::StatusCode, Json<crate::db::BaseShieldJob>)> {
+    // Gated like other desk mutations: enqueuing kicks off backend proving (~minutes of CPU) and a
+    // sponsored Stellar tx, so it must not be callable anonymously.
+    crate::auth::require_session(&headers, &st).await?;
+    st.db.get_desk(&id).await?;
+    let bridge = body
+        .get("bridge")
+        .and_then(Value::as_str)
+        .filter(|s| s.len() == 42 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| AppError::BadRequest("bridge must be a 0x EVM address".into()))?;
+    let deposit_id = body
+        .get("deposit_id")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| AppError::BadRequest("deposit_id required".into()))?;
+    tracing::info!(desk = %id, %bridge, deposit_id, "enqueue base-shield");
+    let job = st.db.enqueue_base_shield(&id, bridge, deposit_id as i64).await?;
+    Ok((axum::http::StatusCode::ACCEPTED, Json(job)))
+}
+
+/// List the Base-shield jobs for a desk (status: proving | awaiting_finality | minting | active | failed).
+pub async fn list_base_shields(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<crate::db::BaseShieldJob>>> {
+    st.db.get_desk(&id).await?;
+    Ok(Json(st.db.list_base_shields(&id).await?))
+}
+
 /// Source account for read-only simulations: the desk's sponsor, falling back to the configured
 /// read identity for imported desks whose sponsor key isn't in the local keystore.
 fn read_source(desk: &Desk, st: &AppState) -> String {

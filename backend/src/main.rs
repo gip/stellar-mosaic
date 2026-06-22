@@ -1,4 +1,5 @@
 mod auth;
+mod base_shield;
 mod config;
 mod db;
 mod deploy;
@@ -57,6 +58,12 @@ async fn main() -> anyhow::Result<()> {
         }
     });
     tokio::spawn(durable_indexer::run(state.clone()));
+    // Base->Stellar shield worker (WS6): only runs when a Base RPC is configured.
+    if state.config.base_rpc.is_some() {
+        tokio::spawn(base_shield::run(state.clone()));
+    } else {
+        tracing::info!("base-shield worker disabled (set MOSAIC_BASE_RPC to enable)");
+    }
 
     let app = Router::new()
         .route("/health", get(handlers::health))
@@ -73,6 +80,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/desks/:id/notes", get(handlers::get_notes))
         .route("/desks/:id/fills", get(handlers::get_fills))
         .route("/desks/:id/note-proof", get(handlers::get_note_proof))
+        .route(
+            "/desks/:id/base-shields",
+            get(handlers::list_base_shields).post(handlers::enqueue_base_shield),
+        )
         .route(
             "/client-actions/relay/desks/:id/shield",
             post(handlers::shield_submit),

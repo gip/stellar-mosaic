@@ -1,0 +1,32 @@
+[package]
+name = "groth16_spike"
+version = "0.1.0"
+edition = "2021"
+description = "Spike: a BN254 Groth16 verifier on the Soroban host (g1_msm + multi-pairing). De-risks RISC Zero receipt verification on Stellar for the Base-shield bridge."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# bn254 host fns (g1_msm, pairing_check) live in the default crypto module; no hazmat feature needed.
+soroban-sdk = { version = "26.0.1", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+soroban-sdk = { version = "26.0.1", features = ["testutils", "alloc"] }
+# Off-chain Groth16 prover used only by the test to generate a REAL proof, then verified on-chain.
+# Dev-only, host target — never compiled into the wasm contract.
+ark-bn254 = "0.5"
+ark-groth16 = { version = "0.5", default-features = false }
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-relations = "0.5"
+ark-snark = "0.5"
+ark-std = { version = "0.5", features = ["std"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

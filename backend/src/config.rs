@@ -22,6 +22,13 @@ pub struct Config {
     /// have no stored sponsor key (e.g. imported desks). Reads never submit, so this only needs to
     /// resolve to a valid account address.
     pub read_identity: String,
+    /// Base (Sepolia) RPC URL. When set, the Base-shield worker (WS6) runs; when unset it is
+    /// disabled and `base_shields` jobs are never advanced.
+    pub base_rpc: Option<String>,
+    /// `cast` (foundry) binary, used to read the Base chain head + finalized block.
+    pub cast_bin: String,
+    /// Directory of the `bridge-prover` workspace (the worker shells `cargo run -p host -- --prove`).
+    pub prover_dir: PathBuf,
 }
 
 impl Config {
@@ -56,6 +63,12 @@ impl Config {
                 cwd.join("vks").to_string_lossy().as_ref(),
             )),
             read_identity: env("MOSAIC_READ_IDENTITY", "m0"),
+            base_rpc: std::env::var("MOSAIC_BASE_RPC").ok().filter(|s| !s.is_empty()),
+            cast_bin: env("MOSAIC_CAST_BIN", "cast"),
+            prover_dir: PathBuf::from(env(
+                "MOSAIC_PROVER_DIR",
+                cwd.join("bridge-prover").to_string_lossy().as_ref(),
+            )),
         }
     }
 }

@@ -93,6 +93,12 @@ export const api = {
   }) => req<Desk>('/desks', { method: 'POST', body: JSON.stringify(body) }),
   getNotes: (id: string) => req<{ notes: ChainNote[] }>(`/desks/${id}/notes`),
   getFills: (id: string) => req<{ fills: Fill[] }>(`/desks/${id}/fills`),
+  enqueueBaseShield: (id: string, body: { bridge: string; deposit_id: number }) =>
+    req<BaseShieldJob>(`/desks/${id}/base-shields`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  listBaseShields: (id: string) => req<BaseShieldJob[]>(`/desks/${id}/base-shields`),
   submitShield: (id: string, tx_xdr: string) =>
     req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/shield`, {
       method: 'POST',
@@ -214,6 +220,17 @@ export interface WalletBackupEnvelope {
   generation: number
   nonce_b64: string
   ciphertext_b64: string
+}
+
+export interface BaseShieldJob {
+  id: string
+  desk_id: string
+  bridge: string
+  deposit_id: number
+  status: string
+  block_number?: number | null
+  block_hash?: string | null
+  error?: string | null
 }
 
 export interface NoteProof {

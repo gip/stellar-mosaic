@@ -2,9 +2,10 @@ import { useState } from 'react'
 import type { Desk } from '../api'
 import type { Note } from '../notes'
 import ShieldForm from './ShieldForm'
+import ShieldFromBaseForm from './ShieldFromBaseForm'
 import UnshieldForm from './UnshieldForm'
 
-type TransferMode = 'shield' | 'unshield'
+type TransferMode = 'shield' | 'base' | 'unshield'
 
 export default function ShieldUnshieldPanel({
   desk,
@@ -36,6 +37,17 @@ export default function ShieldUnshieldPanel({
         </button>
         <button
           type="button"
+          className={`tab${mode === 'base' ? ' active' : ''}`}
+          role="tab"
+          id="base-tab"
+          aria-selected={mode === 'base'}
+          aria-controls="asset-transfer-panel"
+          onClick={() => setMode('base')}
+        >
+          Shield from Base
+        </button>
+        <button
+          type="button"
           className={`tab${mode === 'unshield' ? ' active' : ''}`}
           role="tab"
           id="unshield-tab"
@@ -56,6 +68,8 @@ export default function ShieldUnshieldPanel({
         {userPubkey ? (
           mode === 'shield' ? (
             <ShieldForm desk={desk} userPubkey={userPubkey} onDone={onDone} />
+          ) : mode === 'base' ? (
+            <ShieldFromBaseForm desk={desk} userPubkey={userPubkey} onDone={onDone} />
           ) : (
             <UnshieldForm
               key={userPubkey}

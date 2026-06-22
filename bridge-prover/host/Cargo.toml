@@ -1,0 +1,20 @@
+[package]
+name = "host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+bridge-methods = { workspace = true }
+log = { workspace = true }
+risc0-op-steel = { workspace = true, features = ["host"] }
+# `prove` enables the local prover backend (default_prover with RISC0_PROVER=local). The STARK->Groth16
+# wrap additionally shells out to Docker. Add "metal" (Apple GPU) or "cuda" to this list for speed.
+risc0-zkvm = { workspace = true, features = ["prove"] }
+risc0-ethereum-contracts = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
