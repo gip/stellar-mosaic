@@ -47,7 +47,8 @@ accepts this per the equivalence assumption; a Stellar→Base withdraw leg is de
 | WS3 Groth16-on-Soroban feasibility spike | `contracts/groth16_spike/` | ✅ ~26M CPU (~6.6%) |
 | WS4 `shield_from_base` + registry + replay | `contracts/settlement/src/lib.rs` | ✅ 10 tests |
 | WS5 indexer cross-chain note recovery | `tools/indexer`, `backend/` | ✅ works unchanged (shared `shielded` event) |
-| WS6 Boundless proving + receipt → seal | `bridge-prover/host`, `backend/` | ◻ |
+| WS6 proving + receipt → seal | `bridge-prover/host` | ✅ local Groth16 (`--prove`) |
+| WS6-backend orchestration worker | `backend/src/base_shield.rs` | ✅ implemented (live run pending infra) |
 | WS7 frontend (Base wallet + shield + status) | `frontend/` | ◻ |
 | WS8 end-to-end Base-Sepolia ↔ Stellar-testnet demo | `scripts/10_demo_base_shield_testnet.sh` | ✅ validated live (2026-06-21) |
 
@@ -61,6 +62,17 @@ WS3 proved a BN254 Groth16 verify fits the budget; **production verification use
 soroban-sdk 25.1.0, so the settlement contract — on 26.0.1 — cross-calls it by address via
 `env.invoke_contract` instead of linking the crate). Deploy the router separately; configure the
 settlement contract with `configure_base_bridge(router, image_id, config_id, bridge)`.
+
+## Backend automation (WS6-backend)
+
+`backend/src/base_shield.rs` is a durable, crash-resumable worker that automates the validated
+script server-side (proving can't run in a browser). Enqueue a job with
+`POST /desks/:id/base-shields {bridge, deposit_id}`; the worker advances a `base_shields` row through
+`proving → awaiting_finality → minting → active|failed`, persisting the proof in SQL so a restart
+resumes. It shells `cargo run -p host -- --prove` (proving at a recent in-window block), polls Base
+`finalized` via `cast` (prove-then-finalize), then attests + `shield_from_base` via the desk sponsor.
+Disabled unless `MOSAIC_BASE_RPC` is set. Proving is local Groth16; swapping that step for the
+Boundless marketplace (same router-compatible seal) is a drop-in future change.
 
 ## The journal — the WS2 ↔ WS4 contract
 

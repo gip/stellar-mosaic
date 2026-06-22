@@ -53,6 +53,22 @@ pub struct ClientAction {
     pub lease_expires_at: i64,
 }
 
+/// A server-driven Base->Stellar shield job (WS6). The worker advances `status` through
+/// `proving` -> `awaiting_finality` -> `minting` -> `active` (or `failed`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BaseShieldJob {
+    pub id: String,
+    pub desk_id: String,
+    pub bridge: String,
+    pub deposit_id: i64,
+    pub status: String,
+    pub block_number: Option<i64>,
+    pub block_hash: Option<String>,
+    pub seal_hex: Option<String>,
+    pub journal_hex: Option<String>,
+    pub error: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Db {
     pool: AnyPool,
@@ -106,6 +122,11 @@ impl Db {
             "CREATE TABLE IF NOT EXISTS chain_events (contract_id TEXT NOT NULL, event_id TEXT NOT NULL, ledger BIGINT, tx_hash TEXT, topic TEXT, payload_json TEXT NOT NULL, created_at BIGINT NOT NULL, PRIMARY KEY(contract_id, event_id))",
             "CREATE TABLE IF NOT EXISTS indexed_notes (contract_id TEXT NOT NULL, leaf_index BIGINT NOT NULL, asset_id BIGINT NOT NULL, amount TEXT NOT NULL, owner_tag TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY(contract_id, leaf_index), UNIQUE(contract_id, owner_tag))",
             "CREATE TABLE IF NOT EXISTS indexed_fills (contract_id TEXT NOT NULL, event_id TEXT NOT NULL, ledger BIGINT NOT NULL, tx_hash TEXT NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(contract_id, event_id))",
+            // Server-driven Base->Stellar shield jobs (WS6). One row per Base deposit; the worker
+            // advances status proving -> awaiting_finality -> minting -> active (or failed) and
+            // persists the proof so it survives a restart. See backend/src/base_shield.rs.
+            "CREATE TABLE IF NOT EXISTS base_shields (id TEXT PRIMARY KEY, desk_id TEXT NOT NULL, bridge TEXT NOT NULL, deposit_id BIGINT NOT NULL, status TEXT NOT NULL, block_number BIGINT, block_hash TEXT, seal_hex TEXT, journal_hex TEXT, error TEXT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, UNIQUE(desk_id, bridge, deposit_id))",
+            "CREATE INDEX IF NOT EXISTS base_shields_status_idx ON base_shields(status, created_at)",
         ];
         for statement in statements {
             sqlx::query(statement).execute(&self.pool).await?;
@@ -239,6 +260,123 @@ impl Db {
             .await?
             .ok_or_else(|| AppError::NotFound(format!("desk {id}")))?;
         Ok(row.try_get(0)?)
+    }
+
+    // ---- Base->Stellar shield jobs (WS6) ----
+
+    fn base_shield_from_row(row: &sqlx::any::AnyRow) -> AppResult<BaseShieldJob> {
+        Ok(BaseShieldJob {
+            id: row.try_get(0)?,
+            desk_id: row.try_get(1)?,
+            bridge: row.try_get(2)?,
+            deposit_id: row.try_get(3)?,
+            status: row.try_get(4)?,
+            block_number: row.try_get(5)?,
+            block_hash: row.try_get(6)?,
+            seal_hex: row.try_get(7)?,
+            journal_hex: row.try_get(8)?,
+            error: row.try_get(9)?,
+        })
+    }
+
+    const BASE_SHIELD_COLS: &'static str =
+        "id,desk_id,bridge,deposit_id,status,block_number,block_hash,seal_hex,journal_hex,error";
+
+    /// Enqueue a Base-shield job (idempotent per (desk, bridge, deposit_id)). Starts in `proving`.
+    pub async fn enqueue_base_shield(
+        &self,
+        desk_id: &str,
+        bridge: &str,
+        deposit_id: i64,
+    ) -> AppResult<BaseShieldJob> {
+        if let Some(existing) = sqlx::query(&format!(
+            "SELECT {} FROM base_shields WHERE desk_id=? AND bridge=? AND deposit_id=?",
+            Self::BASE_SHIELD_COLS
+        ))
+        .bind(desk_id)
+        .bind(bridge)
+        .bind(deposit_id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            return Self::base_shield_from_row(&existing);
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = now_ms();
+        sqlx::query("INSERT INTO base_shields (id,desk_id,bridge,deposit_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)")
+            .bind(&id).bind(desk_id).bind(bridge).bind(deposit_id).bind("proving").bind(now).bind(now)
+            .execute(&self.pool).await?;
+        self.get_base_shield(&id).await
+    }
+
+    pub async fn get_base_shield(&self, id: &str) -> AppResult<BaseShieldJob> {
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM base_shields WHERE id=?",
+            Self::BASE_SHIELD_COLS
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("base_shield {id}")))?;
+        Self::base_shield_from_row(&row)
+    }
+
+    pub async fn list_base_shields(&self, desk_id: &str) -> AppResult<Vec<BaseShieldJob>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {} FROM base_shields WHERE desk_id=? ORDER BY created_at DESC",
+            Self::BASE_SHIELD_COLS
+        ))
+        .bind(desk_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(Self::base_shield_from_row).collect()
+    }
+
+    /// The oldest job still in an actionable (non-terminal) state, for the worker to advance.
+    pub async fn next_base_shield(&self) -> AppResult<Option<BaseShieldJob>> {
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM base_shields WHERE status IN ('proving','awaiting_finality','minting') ORDER BY created_at LIMIT 1",
+            Self::BASE_SHIELD_COLS
+        ))
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(Self::base_shield_from_row).transpose()
+    }
+
+    /// Record the proof and advance to `awaiting_finality`.
+    pub async fn base_shield_proved(
+        &self,
+        id: &str,
+        block_number: i64,
+        block_hash: &str,
+        seal_hex: &str,
+        journal_hex: &str,
+    ) -> AppResult<()> {
+        sqlx::query("UPDATE base_shields SET status='awaiting_finality',block_number=?,block_hash=?,seal_hex=?,journal_hex=?,updated_at=? WHERE id=?")
+            .bind(block_number).bind(block_hash).bind(seal_hex).bind(journal_hex).bind(now_ms()).bind(id)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Set a job's status (e.g. `minting`, `active`).
+    pub async fn base_shield_status(&self, id: &str, status: &str) -> AppResult<()> {
+        sqlx::query("UPDATE base_shields SET status=?,updated_at=? WHERE id=?")
+            .bind(status)
+            .bind(now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn base_shield_failed(&self, id: &str, error: &str) -> AppResult<()> {
+        sqlx::query("UPDATE base_shields SET status='failed',error=?,updated_at=? WHERE id=?")
+            .bind(error)
+            .bind(now_ms())
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn get_wallet_backup(&self, backup_id: &str) -> AppResult<WalletBackup> {
@@ -787,6 +925,41 @@ mod tests {
 
     async fn db() -> Db {
         Db::open("sqlite::memory:").await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn base_shield_job_lifecycle() {
+        let db = db().await;
+        let job = db.enqueue_base_shield("desk1", "0xabc", 0).await.unwrap();
+        assert_eq!(job.status, "proving");
+        // idempotent per (desk, bridge, deposit_id)
+        assert_eq!(db.enqueue_base_shield("desk1", "0xabc", 0).await.unwrap().id, job.id);
+
+        // the worker claims the oldest actionable job
+        assert_eq!(db.next_base_shield().await.unwrap().unwrap().id, job.id);
+
+        // prove -> awaiting_finality, with the proof persisted
+        db.base_shield_proved(&job.id, 100, "ab", "deadbeef", "cafe").await.unwrap();
+        let n = db.next_base_shield().await.unwrap().unwrap();
+        assert_eq!(n.status, "awaiting_finality");
+        assert_eq!(n.block_number, Some(100));
+        assert_eq!(n.seal_hex.as_deref(), Some("deadbeef"));
+        assert_eq!(n.journal_hex.as_deref(), Some("cafe"));
+
+        // minting -> active is terminal (not re-claimed)
+        db.base_shield_status(&job.id, "minting").await.unwrap();
+        db.base_shield_status(&job.id, "active").await.unwrap();
+        assert!(db.next_base_shield().await.unwrap().is_none(), "active is terminal");
+
+        let list = db.list_base_shields("desk1").await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, "active");
+
+        // a failed job is also terminal
+        let j2 = db.enqueue_base_shield("desk1", "0xabc", 1).await.unwrap();
+        db.base_shield_failed(&j2.id, "boom").await.unwrap();
+        assert!(db.next_base_shield().await.unwrap().is_none(), "failed is terminal");
+        assert_eq!(db.get_base_shield(&j2.id).await.unwrap().error.as_deref(), Some("boom"));
     }
 
     #[tokio::test]
