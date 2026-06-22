@@ -49,7 +49,7 @@ accepts this per the equivalence assumption; a Stellar→Base withdraw leg is de
 | WS5 indexer cross-chain note recovery | `tools/indexer`, `backend/` | ✅ works unchanged (shared `shielded` event) |
 | WS6 proving + receipt → seal | `bridge-prover/host` | ✅ local Groth16 (`--prove`) |
 | WS6-backend orchestration worker | `backend/src/base_shield.rs` | ✅ implemented (live run pending infra) |
-| WS7 frontend (Base wallet + shield + status) | `frontend/` | ◻ |
+| WS7 frontend (Base wallet + shield + status) | `frontend/` | ✅ "Shield from Base" tab |
 | WS8 end-to-end Base-Sepolia ↔ Stellar-testnet demo | `scripts/10_demo_base_shield_testnet.sh` | ✅ validated live (2026-06-21) |
 
 **OP-stack note:** Base is an OP-stack chain, so the bridge proves a deposit from **contract state**
