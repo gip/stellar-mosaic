@@ -49,7 +49,12 @@ accepts this per the equivalence assumption; a Stellar→Base withdraw leg is de
 | WS5 indexer cross-chain note recovery | `tools/indexer`, `backend/` | ◻ |
 | WS6 Boundless proving + receipt → seal | `bridge-prover/host`, `backend/` | ◻ |
 | WS7 frontend (Base wallet + shield + status) | `frontend/` | ◻ |
-| WS8 end-to-end Base-Sepolia ↔ Stellar-testnet demo | `scripts/10_demo_base_shield_testnet.sh` | ◻ script authored (live run pending infra) |
+| WS8 end-to-end Base-Sepolia ↔ Stellar-testnet demo | `scripts/10_demo_base_shield_testnet.sh` | ✅ validated live (2026-06-21) |
+
+**OP-stack note:** Base is an OP-stack chain, so the bridge proves a deposit from **contract state**
+(a `deposits(uint64)` view call via `eth_getProof`, using `risc0-op-steel`), not from an event —
+every Base block carries a type-`0x7e` deposit tx that the Ethereum receipt decoder (needed for
+event/log proofs) rejects. State proofs read only the account/storage trie, so they sidestep it.
 
 WS3 proved a BN254 Groth16 verify fits the budget; **production verification uses the Nethermind
 [`stellar-risc0-verifier`](https://github.com/NethermindEth/stellar-risc0-verifier) router** (pins
@@ -73,15 +78,15 @@ ABI-encoded, fixed 256 bytes (8 × 32-byte words), all fields static:
 | 7 | `ownerTag` | BN254 Fr; leaf = `Poseidon(assetId, amount, ownerTag)` |
 
 Reference values for the current guest (regenerate via `bridge-prover` `print_journal_fixture`):
-image id `703c618ff04997c2937552d40103472081aa87c16c711de5c6ece5607f0ee281`, Base Sepolia config
-digest `96db42921002cf403b4d9b5255f9743aa8ab15f0f8480f4296ddf068d322e71d`.
+image id `333e192f991c82a12d4fbf779342c918af4eca4d8eba66908f2ac020c46d26a5`, Base Sepolia config
+digest `3519660d6ecbd34367740f5ca18449cba8b389594f69f177bbf21c46e505c61e`, seal selector `73c457ba`.
 
 ## Running the end-to-end demo (WS8)
 
 `scripts/10_demo_base_shield_testnet.sh` orchestrates: deploy `MosaicBridge` on Base Sepolia →
-shield → prove (`bridge-prover --prove`, pinned to the deposit's block) → deploy + configure
-settlement on Stellar testnet → `attest_base_block` (the relayer step) → `shield_from_base` → assert
-the tree root advanced.
+shield → prove (`bridge-prover --prove` against a recent block via state proof) → deploy + configure
+settlement on Stellar testnet → `attest_base_block` (the relayer step, for the block the proof
+committed to) → `shield_from_base` → assert the tree root advanced.
 
 Prerequisites (the script gates on them): foundry + a funded Base Sepolia key (`PRIVATE_KEY`); the
 RISC Zero Groth16 prover stack (`r0vm`/Docker, or `RISC0_PROVER=bonsai`); the stellar CLI + a funded
@@ -89,12 +94,29 @@ testnet identity; and the **Nethermind verifier router deployed on Stellar testn
 in `ROUTER_ID`. Deploy the router once from `vendor/stellar-risc0-verifier`:
 
 ```bash
-./scripts/manage.sh deploy-router   -n testnet -a <acct> --min-delay 0
-./scripts/manage.sh deploy-verifier -n testnet -a <acct>
-./scripts/manage.sh schedule-add-verifier -n testnet -a <acct> --selector <seal-selector>
+./scripts/manage.sh deploy-router         -n testnet -a <acct> --min-delay 0
+./scripts/manage.sh deploy-verifier       -n testnet -a <acct>
+./scripts/manage.sh schedule-add-verifier -n testnet -a <acct> --selector 73c457ba
+./scripts/manage.sh execute-add-verifier  -n testnet -a <acct> --selector 73c457ba
 ```
 
-What a live run still validates (untested locally without the above): that Groth16 proving succeeds;
-that the live router accepts our seal selector; that the `configID` our chain spec computes matches
-what Steel commits at proving time; and that Base (OP-stack) headers validate inside the guest during
-proving (the host preflight already fetches Base blocks fine under `SpecId::PRAGUE`).
+## Validated live (2026-06-21, Base Sepolia ↔ Stellar testnet)
+
+Full chain proven end to end: Base deposit → `risc0-op-steel` state proof → local Groth16 (Docker
+wrap) → Nethermind router verify on Soroban → `shield_from_base` minted the note (tree root advanced;
+`shielded` event `{assetId 1, amount 1000000, ownerTag 0x11..11}`).
+
+| thing | value |
+|---|---|
+| Base `MosaicBridge` | `0x0217703571840aCcb70eF602A788F5fbBC599e47` (Base Sepolia) |
+| RISC Zero router | `CB3ISULTPMQXHUH6BVRO7VQIQE3TTDRGSHWBJ72V7GRO6VF63BMGNWOU` (testnet) |
+| groth16 verifier / selector | `CDAWHGC5CX6JZAWYFVVKMRHVM7Z5PAXBERKVMLQ2ZFYFVNCIYZ373UEN` / `73c457ba` |
+| seal / journal | 260 bytes / 256 bytes; STARK exec ~40ms, Groth16 wrap ~4.5 min |
+| mint tx | `146096d8e4980c74489b3b98b322766a1477a4c478b7bd04219aa272e9786245` |
+
+Resolved unknowns: Groth16 proving works locally (Docker); risc0 3.0 seal matches the Nethermind
+verifier (selector `73c457ba`); the op-steel `configID` matches between guest and host; OP-stack state
+proofs work on Base (the receipt/`0x7e` issue is avoided by proving from state, not events). The
+`eth_getProof` window means proofs must target a recent block, not the deposit's block — the bridge
+records the deposit in state so any recent block works, and the host reports the committed block to
+attest.
