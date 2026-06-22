@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, type Desk } from '../api'
+import { useWallet } from '../WalletContext'
 import CreateDeskForm from '../components/CreateDeskForm'
 import ImportDeskForm from '../components/ImportDeskForm'
 
 export default function Home() {
+  const { address } = useWallet()
   const [desks, setDesks] = useState<Desk[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -60,17 +62,23 @@ export default function Home() {
         </div>
       ))}
 
-      <h2>Create desk</h2>
-      <CreateDeskForm onDone={load} />
+      {address ? (
+        <>
+          <h2>Create desk</h2>
+          <CreateDeskForm onDone={load} />
 
-      <details style={{ marginTop: 24 }}>
-        <summary className="muted" style={{ cursor: 'pointer' }}>
-          Import an existing contract instead
-        </summary>
-        <div style={{ marginTop: 12 }}>
-          <ImportDeskForm onDone={load} />
-        </div>
-      </details>
+          <details style={{ marginTop: 24 }}>
+            <summary className="muted" style={{ cursor: 'pointer' }}>
+              Import an existing contract instead
+            </summary>
+            <div style={{ marginTop: 12 }}>
+              <ImportDeskForm onDone={load} />
+            </div>
+          </details>
+        </>
+      ) : (
+        <p className="muted">Connect your wallet to create or import a desk.</p>
+      )}
     </>
   )
 }

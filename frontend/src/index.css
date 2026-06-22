@@ -57,6 +57,13 @@ header.topbar h1 a {
   align-items: center;
   gap: 10px;
 }
+.topnav {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
 
 main {
   max-width: 880px;

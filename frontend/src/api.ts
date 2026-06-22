@@ -13,6 +13,32 @@ export interface Pair {
   quote_asset: number
 }
 
+/** An entry in the app-wide asset catalog: a cross-chain definition (Stellar side always present,
+ * Base side optional). Off-chain metadata only — on-chain support is set at contract deployment. */
+export interface CatalogAsset {
+  id: string
+  symbol: string
+  stellar_token: string | null
+  stellar_decimals: number | null
+  base_chain_id: number | null
+  base_token: string | null
+  base_decimals: number | null
+  proposer_address: string | null
+  is_default: boolean
+  created_at: number
+  trust_count: number
+  trusted_by_me: boolean
+}
+
+export interface ProposeAssetBody {
+  symbol: string
+  stellar_token?: string | null
+  stellar_decimals?: number | null
+  base_chain_id?: number | null
+  base_token?: string | null
+  base_decimals?: number | null
+}
+
 export interface Desk {
   id: string
   name: string
@@ -91,6 +117,13 @@ export const api = {
     assets: { asset_id: number; symbol: string; token: string; decimals: number }[]
     pairs: { base_asset: number; quote_asset: number }[]
   }) => req<Desk>('/desks', { method: 'POST', body: JSON.stringify(body) }),
+  listCatalogAssets: () => req<CatalogAsset[]>('/assets'),
+  proposeAsset: (body: ProposeAssetBody) =>
+    req<CatalogAsset>('/assets', { method: 'POST', body: JSON.stringify(body) }),
+  trustAsset: (id: string) =>
+    req<{ ok: boolean }>(`/assets/${id}/trust`, { method: 'POST' }),
+  untrustAsset: (id: string) =>
+    req<{ ok: boolean }>(`/assets/${id}/trust`, { method: 'DELETE' }),
   getNotes: (id: string) => req<{ notes: ChainNote[] }>(`/desks/${id}/notes`),
   getFills: (id: string) => req<{ fills: Fill[] }>(`/desks/${id}/fills`),
   enqueueBaseShield: (id: string, body: { bridge: string; deposit_id: number }) =>
