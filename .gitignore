@@ -29,6 +29,7 @@ bridge-prover/out/
 # misc
 .DS_Store
 .gstack/
+.skills/
 
 # bulky one-off worst-case testnet fixtures (regenerable via scripts/gen_worstcase_fixtures.sh)
 contracts/settlement/tests/fixtures/book_worst/

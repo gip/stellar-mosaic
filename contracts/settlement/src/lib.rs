@@ -1,6 +1,6 @@
 #![no_std]
 //! Merged Desk + custody contract. Single contract owns custody, the nullifier registry, matching,
-//! and settlement. See docs/architecture.md, docs/lift-circuit-spec.md.
+//! and settlement. See docs/architecture.md, docs/implementation.md.
 //!
 //! `shield`  = move a real Soroban token into custody and mint an AssetNote. Proof-free: amounts are
 //!             public and the token transfer enforces the amount, so conservation needs no ZK.
@@ -11,7 +11,7 @@
 //!             public inputs, records both nullifiers, and emits proceeds. No resting on-chain order
 //!             entries, no separate lift step: two crossing order proofs are matched off-chain and
 //!             settled together here. Feasible because two UltraHonk verifies (~160M) fit the 400M
-//!             per-tx budget (see docs/tx-instruction-limit-spike.md).
+//!             per-tx budget (see docs/benchmarks.md).
 //! `unshield`= spend an asset note with a proof and transfer the real token out, with the recipient
 //!             bound into the proof so a relayer cannot redirect it.
 //!
@@ -47,7 +47,7 @@ const BOOK_CAPACITY: u32 = 64;
 /// = 220M). With the fixed verify (~80M), worst case ≈ 80M + (2*MAX_FILLS + 1 IOC)*40M + book
 /// load/store. Book DEPTH is cheap (~58M local to load a full 64-deep side). The absolute worst case
 /// (full 64-deep book + this many fills) is measured on testnet by
-/// scripts/07_book_worstcase_testnet.sh. See docs/order-book.md.
+/// scripts/07_book_worstcase_testnet.sh. See docs/simple-order-book.md.
 const MAX_FILLS_PER_SUBMIT: u32 = 4;
 /// Side encoding for `DataKey::Book(pair, side)`. Matches `Side`.
 const SIDE_BUY: u32 = 0;

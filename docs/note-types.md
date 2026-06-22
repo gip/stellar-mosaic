@@ -48,7 +48,7 @@ Created by: `shield`, or `settle` (proceeds/change). Consumed by: `lift_order`, 
 ```
 Created by: `lift_order` (consuming an asset note). Consumed by `settle`/`settle_exact` (atomic) or
 rested in the on-chain book and consumed by fills, `cancel_order`, or `prune_expired` (see
-`order-book.md`). The book stores these terms in plaintext; `cancel_order` proves knowledge of the
+`simple-order-book.md`). The book stores these terms in plaintext; `cancel_order` proves knowledge of the
 `cancel_owner_tag` secret (no nullifier — removing the book entry is the single-use guard).
 
 ## How settle creates proceeds (no proof, no secret)
@@ -83,6 +83,6 @@ breaks at the proceeds' next spend via membership). To hide even that, use a sep
   plaintext. Choose the scale to avoid rounding leak/loss.
 - `amount` should snap to standard denominations (1/10/100/1000 + change) for a real anonymity
   set (`privacy-model.md`).
-- The `lift_order` proof's public inputs must bind: the consumed nullifier, value conservation
-  (input note amount == amount_in + change), and the new order note's fields including
-  `output_owner_tag` and `cancel_owner_tag`.
+- The `lift_order` proof's public inputs bind: the consumed nullifier, the consumed note's full
+  amount as `amount_in` (v1 is full-consumption — no change at lift), and the new order note's fields
+  including `output_owner_tag` and `cancel_owner_tag`. See `implementation.md` for the full vector.
