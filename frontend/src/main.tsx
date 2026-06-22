@@ -10,6 +10,7 @@ import './index.css'
 import App from './App'
 import Home from './pages/Home'
 import DeskPage from './pages/DeskPage'
+import AssetsPage from './pages/AssetsPage'
 import { WalletProvider } from './WalletContext'
 import { RecoveryProvider } from './RecoveryContext'
 import { ActivityProvider } from './ActivityContext'
@@ -20,6 +21,7 @@ const router = createBrowserRouter([
     element: <App />,
     children: [
       { index: true, element: <Home /> },
+      { path: 'assets', element: <AssetsPage /> },
       { path: 'desk/:deskId', element: <DeskPage /> },
     ],
   },

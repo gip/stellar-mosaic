@@ -15,6 +15,10 @@ export default function App() {
         <h1>
           <Link to="/">STELLAR MOSAIC</Link>
         </h1>
+        <nav className="topnav">
+          <Link to="/">Desks</Link>
+          <Link to="/assets">Assets</Link>
+        </nav>
         <div>
           {address ? (
             <div className="wallet-controls">

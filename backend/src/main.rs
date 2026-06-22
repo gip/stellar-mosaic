@@ -1,5 +1,6 @@
 mod auth;
 mod base_shield;
+mod catalog;
 mod config;
 mod db;
 mod deploy;
@@ -69,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(handlers::health))
         .merge(auth::routes())
         .merge(operations::routes())
+        .merge(catalog::routes())
         .route(
             "/desks",
             get(handlers::list_desks).post(handlers::create_desk),

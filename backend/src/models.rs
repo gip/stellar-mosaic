@@ -28,6 +28,28 @@ fn default_decimals() -> u32 {
     7
 }
 
+/// An entry in the app-wide asset catalog: a cross-chain asset definition linking a Stellar side
+/// (always present) to an optional Base side. This is off-chain metadata; actual on-chain support
+/// is still configured at contract deployment on both chains.
+#[derive(Clone, Debug, Serialize)]
+pub struct CatalogAsset {
+    pub id: String,
+    pub symbol: String,
+    /// Stellar token: `"native"` (XLM), `"CODE:ISSUER"`, or a `C...` contract id. `None` if the
+    /// asset is not on Stellar.
+    pub stellar_token: Option<String>,
+    pub stellar_decimals: Option<u32>,
+    /// Base chain id (e.g. 84532 for Base Sepolia); `None` if the asset is not on Base.
+    pub base_chain_id: Option<i64>,
+    /// Base token: `"native"` (ETH) or an ERC20 address (`0x...`); `None` if not on Base.
+    pub base_token: Option<String>,
+    pub base_decimals: Option<u32>,
+    /// The G... wallet that proposed this asset; `None` for built-in defaults.
+    pub proposer_address: Option<String>,
+    pub is_default: bool,
+    pub created_at: i64,
+}
+
 /// A canonical trading pair registered on the desk. `pair_id` is assigned by the contract,
 /// sequentially from 0, in registration order.
 #[derive(Clone, Debug, Serialize, Deserialize)]

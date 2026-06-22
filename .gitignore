@@ -5,6 +5,8 @@ circuits/**/target/
 
 # proof + vk outputs
 artifacts/
+# stray root-level VK dump (canonical copies live in backend/vks/); anchored so backend/vks stays tracked
+/vks/
 
 # vendored verifier repos (cloned separately, pinned to specific commits)
 vendor/

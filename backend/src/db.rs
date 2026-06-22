@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::models::{Asset, Desk, Pair};
+use crate::models::{Asset, CatalogAsset, Desk, Pair};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -127,9 +127,36 @@ impl Db {
             // persists the proof so it survives a restart. See backend/src/base_shield.rs.
             "CREATE TABLE IF NOT EXISTS base_shields (id TEXT PRIMARY KEY, desk_id TEXT NOT NULL, bridge TEXT NOT NULL, deposit_id BIGINT NOT NULL, status TEXT NOT NULL, block_number BIGINT, block_hash TEXT, seal_hex TEXT, journal_hex TEXT, error TEXT, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, UNIQUE(desk_id, bridge, deposit_id))",
             "CREATE INDEX IF NOT EXISTS base_shields_status_idx ON base_shields(status, created_at)",
+            // App-wide catalog of cross-chain asset definitions (symbol + Stellar side and optional
+            // Base side). This is off-chain metadata only; on-chain support is still set at contract
+            // deployment. `proposer_address` is the G... wallet that proposed it (NULL for built-in
+            // defaults). See backend/src/catalog.rs.
+            "CREATE TABLE IF NOT EXISTS catalog_assets (id TEXT PRIMARY KEY, symbol TEXT NOT NULL, stellar_token TEXT, stellar_decimals BIGINT, base_chain_id BIGINT, base_token TEXT, base_decimals BIGINT, proposer_address TEXT, is_default BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL)",
+            // Per-user trust of a catalog asset; trust count is COUNT(*) per asset. Built-in
+            // defaults are trusted implicitly (no rows required).
+            "CREATE TABLE IF NOT EXISTS asset_trusts (catalog_asset_id TEXT NOT NULL, trusting_address TEXT NOT NULL, created_at BIGINT NOT NULL, PRIMARY KEY (catalog_asset_id, trusting_address))",
         ];
         for statement in statements {
             sqlx::query(statement).execute(&self.pool).await?;
+        }
+        // Seed the two built-in defaults: USDC (Base Sepolia <-> Stellar) and Stellar-only XLM.
+        let now = now_ms();
+        let seeds: [(&str, &str, &str, i64, Option<i64>, Option<&str>, Option<i64>); 2] = [
+            (
+                "default-usdc",
+                "USDC",
+                "USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+                7,
+                Some(84532),
+                Some("0x036CbD53842c5426634e7929541eC2318f3dCF7e"),
+                Some(6),
+            ),
+            ("default-xlm", "XLM", "native", 7, None, None, None),
+        ];
+        for (id, symbol, stoken, sdec, bchain, btoken, bdec) in seeds {
+            sqlx::query("INSERT INTO catalog_assets (id,symbol,stellar_token,stellar_decimals,base_chain_id,base_token,base_decimals,proposer_address,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,?,NULL,1,?,?) ON CONFLICT(id) DO NOTHING")
+                .bind(id).bind(symbol).bind(stoken).bind(sdec).bind(bchain).bind(btoken).bind(bdec).bind(now).bind(now)
+                .execute(&self.pool).await?;
         }
         // Databases created by the first operations preview did not have bounded retry attempts.
         let _ =
@@ -374,6 +401,116 @@ impl Db {
             .bind(error)
             .bind(now_ms())
             .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ---- Asset catalog ----
+
+    const CATALOG_COLS: &'static str = "id,symbol,stellar_token,stellar_decimals,base_chain_id,base_token,base_decimals,proposer_address,is_default,created_at";
+
+    fn catalog_from_row(row: &sqlx::any::AnyRow) -> AppResult<CatalogAsset> {
+        Ok(CatalogAsset {
+            id: row.try_get(0)?,
+            symbol: row.try_get(1)?,
+            stellar_token: row.try_get(2)?,
+            stellar_decimals: row.try_get::<Option<i64>, _>(3)?.map(|x| x as u32),
+            base_chain_id: row.try_get(4)?,
+            base_token: row.try_get(5)?,
+            base_decimals: row.try_get::<Option<i64>, _>(6)?.map(|x| x as u32),
+            proposer_address: row.try_get(7)?,
+            is_default: row.try_get::<i64, _>(8)? != 0,
+            created_at: row.try_get(9)?,
+        })
+    }
+
+    pub async fn insert_catalog_asset(&self, a: &CatalogAsset) -> AppResult<()> {
+        let now = now_ms();
+        sqlx::query("INSERT INTO catalog_assets (id,symbol,stellar_token,stellar_decimals,base_chain_id,base_token,base_decimals,proposer_address,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&a.id).bind(&a.symbol).bind(a.stellar_token.as_deref()).bind(a.stellar_decimals.map(|x| x as i64))
+            .bind(a.base_chain_id).bind(a.base_token.as_deref()).bind(a.base_decimals.map(|x| x as i64))
+            .bind(a.proposer_address.as_deref()).bind(if a.is_default { 1_i64 } else { 0 }).bind(a.created_at).bind(now)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    /// List every catalog asset with its trust count and whether `viewer` trusts it. Built-in
+    /// defaults count as trusted by everyone.
+    pub async fn list_catalog_assets(
+        &self,
+        viewer: Option<&str>,
+    ) -> AppResult<Vec<(CatalogAsset, i64, bool)>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {} FROM catalog_assets ORDER BY is_default DESC, created_at",
+            Self::CATALOG_COLS
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut counts = std::collections::HashMap::new();
+        for r in sqlx::query("SELECT catalog_asset_id, COUNT(*) FROM asset_trusts GROUP BY catalog_asset_id")
+            .fetch_all(&self.pool)
+            .await?
+        {
+            counts.insert(r.try_get::<String, _>(0)?, r.try_get::<i64, _>(1)?);
+        }
+        let mut mine = std::collections::HashSet::new();
+        if let Some(v) = viewer {
+            for r in sqlx::query("SELECT catalog_asset_id FROM asset_trusts WHERE trusting_address=?")
+                .bind(v)
+                .fetch_all(&self.pool)
+                .await?
+            {
+                mine.insert(r.try_get::<String, _>(0)?);
+            }
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let asset = Self::catalog_from_row(row)?;
+            let trust_count = *counts.get(&asset.id).unwrap_or(&0);
+            let trusted_by_me = asset.is_default || mine.contains(&asset.id);
+            out.push((asset, trust_count, trusted_by_me));
+        }
+        Ok(out)
+    }
+
+    pub async fn catalog_asset_exists(&self, id: &str) -> AppResult<bool> {
+        Ok(sqlx::query("SELECT 1 FROM catalog_assets WHERE id=?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .is_some())
+    }
+
+    /// Whether a catalog entry already links this exact (stellar_token, base_token) pair.
+    pub async fn catalog_asset_exists_tokens(
+        &self,
+        stellar_token: Option<&str>,
+        base_token: Option<&str>,
+    ) -> AppResult<bool> {
+        for r in sqlx::query("SELECT stellar_token, base_token FROM catalog_assets")
+            .fetch_all(&self.pool)
+            .await?
+        {
+            let st: Option<String> = r.try_get(0)?;
+            let bt: Option<String> = r.try_get(1)?;
+            if st.as_deref() == stellar_token && bt.as_deref() == base_token {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub async fn add_asset_trust(&self, asset_id: &str, address: &str) -> AppResult<()> {
+        sqlx::query("INSERT INTO asset_trusts (catalog_asset_id,trusting_address,created_at) VALUES (?,?,?) ON CONFLICT(catalog_asset_id,trusting_address) DO NOTHING")
+            .bind(asset_id).bind(address).bind(now_ms()).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn remove_asset_trust(&self, asset_id: &str, address: &str) -> AppResult<()> {
+        sqlx::query("DELETE FROM asset_trusts WHERE catalog_asset_id=? AND trusting_address=?")
+            .bind(asset_id)
+            .bind(address)
             .execute(&self.pool)
             .await?;
         Ok(())

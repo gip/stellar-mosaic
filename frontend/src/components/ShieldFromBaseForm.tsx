@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { bytesToHex } from 'viem'
 import { api, type BaseShieldJob, type Desk } from '../api'
 import { toRaw } from '../amount'
@@ -36,6 +36,8 @@ export default function ShieldFromBaseForm({
   const [bridge, setBridge] = useState(() => localStorage.getItem(BRIDGE_KEY) ?? '')
   const [assetId, setAssetId] = useState(desk.assets[0]?.asset_id ?? 1)
   const [amount, setAmount] = useState('1')
+  // Symbols of catalog assets that have a Base side; only these can be shielded from Base.
+  const [baseSymbols, setBaseSymbols] = useState<Set<string> | null>(null)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -43,6 +45,35 @@ export default function ShieldFromBaseForm({
   const [job, setJob] = useState<BaseShieldJob | null>(null)
   const recovery = useRecovery()
   const recoveryReady = recovery.unlocked && !recovery.error
+
+  // Load which assets exist on Base (per the catalog) and restrict the picker to those.
+  useEffect(() => {
+    let active = true
+    api
+      .listCatalogAssets()
+      .then((all) => {
+        if (active)
+          setBaseSymbols(
+            new Set(all.filter((c) => c.base_token).map((c) => c.symbol.toUpperCase())),
+          )
+      })
+      .catch(() => active && setBaseSymbols(new Set()))
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const baseAssets = useMemo(
+    () => (baseSymbols ? desk.assets.filter((a) => baseSymbols.has(a.symbol.toUpperCase())) : []),
+    [baseSymbols, desk.assets],
+  )
+
+  // Keep the selection on a Base-eligible asset once the catalog has loaded.
+  useEffect(() => {
+    if (baseSymbols && !baseAssets.some((a) => a.asset_id === assetId)) {
+      setAssetId(baseAssets[0]?.asset_id ?? -1)
+    }
+  }, [baseSymbols, baseAssets, assetId])
 
   // Poll the backend job until it reaches a terminal state.
   useEffect(() => {
@@ -78,7 +109,8 @@ export default function ShieldFromBaseForm({
       const addr = bridge.trim()
       if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) throw new Error('Enter the Base MosaicBridge address (0x…).')
       localStorage.setItem(BRIDGE_KEY, addr)
-      const asset = desk.assets.find((a) => a.asset_id === assetId)!
+      const asset = baseAssets.find((a) => a.asset_id === assetId)
+      if (!asset) throw new Error('Pick an asset that is available on Base.')
       const rawAmount = toRaw(amount, asset.decimals)
 
       setStatus('Connecting Base wallet…')
@@ -145,25 +177,29 @@ export default function ShieldFromBaseForm({
           spellCheck={false}
         />
       </div>
-      <div className="row" style={{ alignItems: 'flex-end' }}>
-        <div>
-          <label>Asset</label>
-          <select value={assetId} onChange={(e) => setAssetId(Number(e.target.value))}>
-            {desk.assets.map((a) => (
-              <option key={a.asset_id} value={a.asset_id}>
-                {a.symbol}
-              </option>
-            ))}
-          </select>
+      {baseSymbols && baseAssets.length === 0 ? (
+        <span className="muted">None of this desk’s assets are available on Base.</span>
+      ) : (
+        <div className="row" style={{ alignItems: 'flex-end' }}>
+          <div>
+            <label>Asset</label>
+            <select value={assetId} onChange={(e) => setAssetId(Number(e.target.value))}>
+              {baseAssets.map((a) => (
+                <option key={a.asset_id} value={a.asset_id}>
+                  {a.symbol}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label>Amount ({baseAssets.find((a) => a.asset_id === assetId)?.symbol ?? ''})</label>
+            <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
+          </div>
+          <button type="submit" disabled={busy || !recoveryReady || !baseSymbols}>
+            {busy ? 'Working…' : recoveryReady ? 'Shield from Base' : 'Enable / repair recovery first'}
+          </button>
         </div>
-        <div>
-          <label>Amount ({desk.assets.find((a) => a.asset_id === assetId)?.symbol ?? ''})</label>
-          <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
-        </div>
-        <button type="submit" disabled={busy || !recoveryReady}>
-          {busy ? 'Working…' : recoveryReady ? 'Shield from Base' : 'Enable / repair recovery first'}
-        </button>
-      </div>
+      )}
       {status && <span className="muted">{status}</span>}
       {error && <span className="err">{error}</span>}
       {job && (
