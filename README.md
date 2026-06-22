@@ -1,106 +1,76 @@
-# stellar-mosaic
+# Stellar Mosaic
 
-A privacy-preserving DEX on Stellar. Trade resting offers without leaking who owns
-what, with non-custodial atomic settlement. Built on Soroban smart contracts, Noir
-circuits, and a complete UltraHonk verifier using native BN254 Soroban host functions.
+In the context of a hackathon, the goal is to explore the Stellar blockchain, specifically smart contracts and the new ZK features.
 
-Start with [docs/architecture.md](docs/architecture.md). Detailed references:
+As AI will be heavily involved in this project, it is important to make sure the implementation goals are clear and well-defined in writing — that will be an input. Opus 4.8 was used for orchestration and documentation, cheaper models for coding.
 
-- [docs/privacy-model.md](docs/privacy-model.md) - owner-anonymous, amount-transparent privacy model.
-- [docs/note-types.md](docs/note-types.md) - asset and order note structures.
-- [docs/lift-circuit-spec.md](docs/lift-circuit-spec.md) - production lift circuit: public-input vector and bindings.
-- [docs/milestone-0-results.md](docs/milestone-0-results.md) - measurement/provenance log.
+## What are we building
 
-## Current status
+Mosaic wants to give users better opportunities to trade onchain. Today users can pick from a DEX, a CEX, or OTC desks (like Binance, Coinbase, etc.) if they want some privacy. Trustless OTC trading that ensures privacy while making sure funds may not be lost even when shielded is an exciting opportunity and what we'd like to build on Mosaic. 
 
-A trade settles **atomically in one transaction** that verifies both sides' order proofs. In
-addition, the contract now keeps an **on-chain resting limit-order book** (owner-anonymous; up to 64
-orders per side per canonical pair) with cancellation, validity/expiry times, a per-order
-partial-execution flag, and auto-matching on submit. See [docs/order-book.md](docs/order-book.md).
+The goal in WS1 is to design and implement a simplistic desk on Stellar where users may shield assets and trade. WS2 is about going multichain and supporting shielded assets on Base and swapping to Stellar. WS3 is about a great UI/UX experience. WS4 is trying to move from a simplistic onchain order book to a more advanced offchain order book where trade matching happens in Noir and is verified onchain. WS5 is a moonshot to explore offchain order book matching in a decentralized manner, as that would achieve a fully trustless solution — but it is probably impossible to achieve in the short term, or at all.
 
-Measured facts (Stellar testnet):
+## Workstreams
 
-- Verifier: `NethermindEth/rs-soroban-ultrahonk`.
-- The per-transaction CPU limit is **400,000,000 instructions** (testnet and mainnet).
-- One UltraHonk verify: ~**80M** (~20% of budget). Two verifies in one tx fit.
-- `shield` (token custody + 1 on-chain tree insert): **~38M (~9%)**.
-- Atomic `settle` (verify both order proofs, cross, record nullifiers, insert 2 proceeds notes):
-  **230.5M (~58%)**.
-- `unshield` (verify + recipient-bound payout): ~**81M** (~20%).
-- Valid proofs accepted on testnet; corrupted/tampered proofs and replays rejected.
+**Status legend:** ⬜ not started · 🟡 in progress · 🟢 done · 🔴 impossible / not pursued for now
 
-The note commitment tree is maintained **on-chain** (depth-32 append-only; `shield`/`settle` insert,
-the root advances automatically, no admin publisher). The on-chain Poseidon `compress` is
-byte-identical to the circuits (host `poseidon2_permutation` with `stellar/rs-soroban-poseidon`
-constants, unit-tested against Noir). Each order proof (`circuits/lift`) binds every order field
-settlement trusts; `settle` verifies two crossing proofs against on-chain roots and constructs
-proceeds from the bound tags. Order matching is off-chain; settlement + the tree are on-chain. See
-[docs/architecture.md](docs/architecture.md), [docs/tx-instruction-limit-spike.md](docs/tx-instruction-limit-spike.md),
-and [docs/milestone-0-results.md](docs/milestone-0-results.md).
+### WS0 — AI loop & foundations
 
-## Commands
+| ID | Title | Description | Status |
+|------|-------|-------------|:------:|
+| WS0.0 | Set up the AI loop | Opus 4.8 for orchestration, smaller models for coding | 🟢 |
+| WS0.1 | Create a knowledge base for AI | Stellar skills, own ZK skills, Ethereum | 🟢 |
+| WS0.2 | Simple smart contract | Deploy a simple smart contract to test Stellar | 🟢 |
 
-Run the local prove/verify half:
+### WS1 — Simple Stellar OTC built on private notes
 
-```bash
-./scripts/01_build_prove.sh
-```
+| ID | Title | Description | Status |
+|------|-------|-------------|:------:|
+| WS1.0 | High-level architecture | Specify the overall desk architecture and components — [architecture.md](docs/architecture.md) | 🟢 |
+| WS1.1 | Private note design | Define the private-note scheme underpinning shielded balances — [note-types.md](docs/note-types.md), [privacy-model.md](docs/privacy-model.md) | 🟢 |
+| WS1.2 | Ability to shield USDC or XLM | Enable users to shield USDC or XLM into private notes — [implementation.md](docs/implementation.md) | 🟢 |
+| WS1.3 | Sponsored transactions | Support sponsored (fee-paid) transactions for smoother UX — [implementation.md](docs/implementation.md) | 🟢 |
+| WS1.4 | Simple UX/UI | Build a minimal interface for shielding and trading — [ui-ux.md](docs/ui-ux.md) | 🟢 |
+| WS1.5 | Benchmark | Measure performance / proving costs of the desk — [benchmarks.md](docs/benchmarks.md) | 🟢 |
 
-Run the integration test on the local Soroban host (real verifier, no testnet):
+### WS2 — Going multichain (Base → Stellar)
 
-```bash
-cd contracts/settlement && cargo test --test integration
-```
+| ID | Title | Description | Status |
+|------|-------|-------------|:------:|
+| WS2.0 | Design document | Base → Stellar shield bridge design and trust model — [base-bridge.md](docs/base-bridge.md) | 🟢 |
+| WS2.1 | Base bridge contract | `MosaicBridge.sol`: lock USDC on Base and emit a `Shielded` event matching the Stellar note | 🟢 |
+| WS2.2 | ZK deposit proof | RISC Zero / Steel guest + host proving the Base deposit via an OP-stack state proof (`eth_getProof`) | 🟢 |
+| WS2.3 | On-chain verify + mint | Groth16 router verify + `shield_from_base` on Stellar, with the block-hash registry and deposit-id replay guard — [benchmarks.md](docs/benchmarks.md) | 🟢 |
+| WS2.4 | Orchestration, recovery & UI | Durable backend Base-shield worker, indexer making bridged notes discoverable/spendable, "Shield from Base" frontend tab | 🟢 |
+| WS2.5 | E2E functional test | Shield funds on Base and swap to Stellar, end to end — validated live on testnet | 🟢 |
+| WS2.6 | Deploy contract to Base | Ability to deploy the contract to the Base during desk creation | 🟢 |
+| WS2.7 | Hosted proving service | Build and deploy a standalone proving server (Base deposit → Groth16 seal) reachable over HTTP, decoupled from the backend | ⬜ |
 
-This exercises the full custody loop — `shield` (token custody), atomic `settle` (verify two
-crossing order proofs in one tx), and `unshield` (asset-note spend with the payout recipient bound
-into the proof) — plus the negative cases (unpublished root, replayed settle, tampered order
-field, incompatible orders, wrong unshield recipient). Proof fixtures live in
-`contracts/settlement/tests/fixtures/` (see `regen.sh`). 14 tests, all green.
+### WS3 — UI/UX
 
-Current on-chain measurements are summarized in [docs/milestone-0-results.md](docs/milestone-0-results.md).
-`scripts/02_deploy_verify_testnet.sh` is the legacy verifier spike script.
+| ID | Title | Description | Status |
+|------|-------|-------------|:------:|
+| WS3.0 | Design document | UI/UX principles, information architecture, and planned refinements — [ui-ux.md](docs/ui-ux.md) | 🟢 |
+| WS3.1 | Great UI/UX experience | Deliver a polished, intuitive trading experience | 🟡 |
 
-### Version pinning
+### WS4 — Order book matching in Noir
 
-The testnet-compatible artifact recipe uses:
+| ID | Title | Description | Status |
+|------|-------|-------------|:------:|
+| WS4.0 | Design document | Off-chain matching-in-Noir + tree-backed orders/nullifiers design — [noir-matching.md](docs/noir-matching.md) | 🟡 |
+| WS4.1 | Orders & nullifiers in a merkle tree | Replace the per-key nullifier set with an indexed-merkle-tree accumulator (non-membership proven in-circuit) and move the order book into a commitment tree — [noir-matching.md](docs/noir-matching.md) | ⬜ |
+| WS4.2 | Offchain order book with onchain verification | Move from a simple onchain order book to an offchain book where trade matching runs in Noir and is verified onchain — [noir-matching.md](docs/noir-matching.md) | ⬜ |
 
-| | required | installed here |
-|--|----------|----------------|
-| nargo | **1.0.0-beta.9** | 1.0.0-beta.3 |
-| bb | **v0.87.0** | 0.82.2 |
+### WS5 — Shared merkle tree for Stellar ⇄ Base
 
-`bb` proof format differs across versions, so mismatches can make valid proofs fail
-verification. The legacy on-chain script installs the pinned pair into `~/.nargo`
-and `~/.bb` and puts them first on PATH.
+| ID | Title | Description | Status |
+|------|-------|-------------|:------:|
+| WS5.0 | Design document | Shared cross-chain note tree + KYC/permissioned desk design — [shared-merkle-tree.md](docs/shared-merkle-tree.md) | 🟡 |
+| WS5.1 | Shared merkle tree feasibility | Explore the feasibility of sharing the note merkle tree between Stellar and Base — [shared-merkle-tree.md](docs/shared-merkle-tree.md) | ⬜ |
+| WS5.2 | KYC / permissioned desk | Investigate a KYC'd / permissioned desk variant — [shared-merkle-tree.md](docs/shared-merkle-tree.md) | ⬜ |
 
-Confirmed artifact recipe:
-- `bb prove/write_vk --scheme ultra_honk --oracle_hash keccak --output_format bytes_and_fields`
-  (`bytes_and_fields` emits the separate `public_inputs` file the contract needs).
+## Non-goals
 
-Confirmed contract interface:
-- VK is set once at deploy via the constructor: `--vk_bytes-file-path target/vk`.
-- Verify: `verify_proof --public_inputs-file-path ... --proof_bytes-file-path ...`.
-- Build: `stellar contract build --optimize`, target `wasm32v1-none`.
-
-## Layout
-
-```
-circuits/spend/      Noir spend circuit (Milestone 0 sizing spike)
-circuits/lift/       order proof circuit (binds the full order; see docs/lift-circuit-spec.md)
-circuits/unshield/   unshield proof circuit (recipient-bound asset-note spend)
-circuits/wallet/     in-browser Noir helpers (note_tag, order_terms) for the web wallet
-contracts/settlement merged custody + matching: shield, atomic settle (2 verifies), unshield
-backend/             web backend (Rust/axum): desk registry + fully-sponsored relayer
-frontend/            web client (Vite/React): wallet login, shield, order book, in-browser proving
-scripts/             01 = local prove/verify; 02 = legacy on-chain verify spike; 08 = web artifacts
-docs/                current design docs and measurement provenance (see web-app.md)
-vendor/              verifier dependencies (gitignored)
-artifacts/           proof + vk outputs (gitignored)
-```
-
-## Web app
-
-A web frontend + Rust backend let users browse desks, log in with a Stellar wallet, shield USDC/XLM,
-and place limit orders — proofs generated in-browser, transactions relayed fully-sponsored. See
-[docs/web-app.md](docs/web-app.md).
+- Hardening
+- Connection to Boundless
+- Contract auditing

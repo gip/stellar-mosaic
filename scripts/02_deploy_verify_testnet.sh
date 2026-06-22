@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Legacy Milestone 0 on-chain half: verify our spend proof on Stellar testnet using the
 # indextree UltraHonk Soroban verifier. Current architecture and Nethermind-based
-# measurements are summarized in docs/architecture.md and docs/milestone-0-results.md.
+# measurements are summarized in docs/architecture.md and docs/benchmarks.md.
 #
 # WARNING: step 0 changes your GLOBAL nargo/bb (installed under ~/.nargo and ~/.bb)
 # to the versions the verifier requires. Your system currently has the wrong ones.
@@ -80,6 +80,6 @@ else
 fi
 
 echo
-echo ">>> If these metrics change, update docs/milestone-0-results.md."
+echo ">>> If these metrics change, update docs/benchmarks.md."
 echo ">>> Current architecture: atomic settle verifies BOTH order proofs in one tx (~160M = ~40% of"
-echo ">>> the 400M per-tx budget). See docs/architecture.md + docs/tx-instruction-limit-spike.md."
+echo ">>> the 400M per-tx budget). See docs/architecture.md + docs/benchmarks.md."

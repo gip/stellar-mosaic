@@ -1,124 +1,121 @@
-# Architecture: atomic settlement
+# Architecture
 
-This is the entry-point design document for Stellar Mosaic. See `privacy-model.md` for the privacy
-model, `note-types.md` for concrete note structures, `tx-instruction-limit-spike.md` for the budget,
-and `milestone-0-results.md` for measurement provenance.
+The entry-point design document for Stellar Mosaic — a privacy-preserving DEX on Stellar/Soroban.
+Companion docs: `privacy-model.md` (the privacy model), `note-types.md` (note structures),
+`simple-order-book.md` (the on-chain book), `base-bridge.md` (Base → Stellar shield),
+`implementation.md` (how it's built and run, the order-proof circuit spec, storage), and
+`benchmarks.md` (all cost measurements and the verifier-choice provenance).
 
-## Current verdict
+## The verdict
 
 The v1 design is **owner-anonymous and amount-transparent**:
 
-- Public: note asset/amount, order pair/price/size, matches, fill amounts, and timing.
-- Hidden: the owner behind each note/order, the create-to-spend link, and which note a spend consumed.
+- **Public:** note asset/amount, order pair/price/size, matches, fill amounts, and timing.
+- **Hidden:** the owner behind each note/order, the create-to-spend link, and which note a spend
+  consumed.
 - A trade settles **atomically in one transaction** that verifies both sides' order proofs.
-- UltraHonk is used for order/unshield proofs, with no per-circuit trusted setup.
+- UltraHonk is used for order/unshield proofs — no per-circuit trusted setup.
 
-The privacy claim is "no direct owner/wallet linkage inside the pool," not amount privacy. Amounts
-and timing remain followable; standard denominations and delayed unshields are privacy mitigations,
-not complete fixes.
+The privacy claim is "no direct owner/wallet linkage inside the pool," not amount privacy. Amounts and
+timing remain followable; standard denominations and delayed unshields are mitigations, not complete
+fixes (`privacy-model.md`).
 
 ## Budget and the settlement shape
 
-The per-transaction CPU limit is **400,000,000 instructions** (testnet and mainnet; see
-`tx-instruction-limit-spike.md`). One UltraHonk verify is ~80M (~20%), so **two verifies in one tx
-(~160M, ~40%) fit comfortably**. A two-sided trade is therefore a single atomic transaction:
+The per-transaction CPU limit is **400,000,000 instructions** (testnet and mainnet). One UltraHonk
+verify is ~80M (~20%), so **two verifies in one tx (~160M, ~40%) fit comfortably**. A two-sided trade
+is therefore a single atomic transaction:
 
 ```
 TX: settle    verify order proof A + verify order proof B, check they cross,
-              record both nullifiers, emit proceeds  (measured 160.8M = ~40% of budget)
+              record both nullifiers, mint proceeds notes
 ```
 
-This replaces the earlier verify-at-lift / settle-cheap design (a 3-tx maker-lift / taker-lift /
-settle dance with on-chain resting order entries), which existed only because we wrongly believed
-the limit was ~100M. With the real 400M budget the split is unnecessary.
+This replaced an earlier verify-at-lift / settle-cheap design (a 3-tx maker-lift / taker-lift / settle
+dance), which existed only because we wrongly believed the limit was ~100M. With the real 400M budget
+the split is unnecessary. The full budget story and every measurement are in `benchmarks.md`.
 
-The **order book is off-chain**: a party generates an order proof (the lift circuit) and hands it to
-a matcher; the matcher pairs two crossing proofs and submits `settle`. Order data (pair/price/size)
-is public anyway, so a lit off-chain book preserves the "lit pool" property while settlement stays
-on-chain and atomic (the Renegade-style off-chain-book / on-chain-settlement shape).
+The **order book is lit and off-chain-matched**: a party generates an order proof (`circuits/lift`)
+and hands it to a matcher; the matcher pairs two crossing proofs and submits `settle`. Order data
+(pair/price/size) is public anyway, so a lit book preserves the "lit pool" property while settlement
+stays on-chain and atomic (the Renegade-style off-chain-book / on-chain-settlement shape). Orders can
+also be **rested on-chain** in the contract's order book (`simple-order-book.md`).
 
-## Contracts and state
+## Contract and state
 
-One merged contract, `contracts/settlement`, owns custody, the nullifier registry, matching, and
-settlement (registry-ownership DECIDED: a split Assets/Desk design would add a cross-contract call,
+One merged contract, `contracts/settlement`, owns custody, the nullifier registry, the note tree,
+matching, settlement, and the order book (a split Assets/Desk design would add a cross-contract call
 and is not needed). Roles:
 
 - **Custody:** holds real Soroban tokens (`shield`/`unshield`), keyed by an admin-registered
-  asset-id -> token map; maintains the canonical nullifier registry and published roots.
-- **Desk:** atomic matching/settlement (`settle`).
+  asset-id → token map; maintains the canonical nullifier registry and the on-chain note tree.
+- **Desk:** atomic matching/settlement (`settle`/`settle_exact`) and the resting order book.
 
-Supported assets are admin-gated. USDC and XLM can be native Stellar/Soroban assets. ETH and XRP
-require wrapped issuers or bridge integrations before they can be custodied.
+Supported assets are admin-gated. USDC and XLM can be native Stellar/Soroban assets; ETH and XRP
+require wrapped issuers or bridge integrations (the Base bridge shields Base-USDC; see
+`base-bridge.md`).
 
 **Trading pairs** are admin-registered in a canonical orientation via `register_pair(base, quote)`
 (e.g. `XLM/USDC`, never `USDC/XLM`). The orientation is fixed by the pair definition, so an order's
-side is well-defined regardless of how the user phrased its assets: SELL = give base / want quote,
-BUY = give quote / want base. Registering the reverse orientation of an existing pair is rejected
-(it is the same market). Pair ids are assigned sequentially from 0. Pairs are the basis for the
-Phase 2 on-chain order book; today they also gate `settle_exact`.
+side is well-defined regardless of how the user phrased its assets: SELL = give base / want quote, BUY
+= give quote / want base. Registering the reverse orientation of an existing pair is rejected (same
+market). Pair ids are assigned sequentially from 0.
+
+## The note commitment tree (on-chain)
+
+The contract maintains the depth-32 append-only note tree itself — `shield`/`settle`/book fills insert
+leaves, the root advances and is accepted automatically, no admin publisher. The on-chain `compress`
+is **byte-identical to the circuits**: host `poseidon2_permutation` with the
+`stellar/rs-soroban-poseidon` BN254 t=4 constants, unit-tested against Noir (`compress(1,2)`,
+`compress(0,0)`, and the full zeros ladder all match).
+
+`tools/indexer` (crate `mosaic-indexer`) is a read-only off-chain path server that rebuilds membership
+paths from `shielded`/`settled`/`noteins` events (the tree stores only filled subtrees on-chain, not
+all leaves). It is **not a trust anchor** — the on-chain root is. It reuses the contract's exact
+`compress` (via a local Soroban `Env` as a hash engine), so its roots are byte-identical by
+construction. The integration test cross-checks that the indexer's reconstructed root equals the
+on-chain `root()` *and* the root the committed proofs were generated against, and that every
+indexer-derived path folds back to that root.
 
 ## Flow
 
-1. **Shield** (IMPLEMENTED: `shield` + `register_asset`)
-   - User transfers a supported asset into custody; the contract mints an active
-     `AssetNote { asset, amount, owner_tag }` by inserting `Poseidon(asset, amount, owner_tag)` into
-     the **on-chain** Merkle tree (the root advances and is accepted), and emits a `shielded` event
-     so an off-chain client can rebuild membership paths.
-   - Proof-free: the token transfer enforces the amount and amounts are public. Measured ~38M (~9%).
+1. **Shield** — user transfers a supported asset into custody; the contract mints an
+   `AssetNote { asset, amount, owner_tag }` by inserting `Poseidon(asset, amount, owner_tag)` into the
+   tree and emits a `shielded` event so off-chain clients can rebuild paths. Proof-free: the token
+   transfer enforces the amount and amounts are public.
 
-2. **Order** (off-chain; proof = `circuits/lift`)
-   - A party generates an order proof: proves membership of an asset note in the tree, reveals its
-     nullifier, and binds the order terms (`asset_in`, `amount_in`, `asset_out`, `min_out`,
-     `output_owner_tag`). No on-chain step; the proof is handed to a matcher.
-   - The order proof can be matched off-chain and atomically settled (`settle`/`settle_exact`), OR
-     rested in the **on-chain order book** via `submit_order` (see [order-book.md](order-book.md)).
-   - A resting order is cancelled on-chain with a cancel proof (`cancel_order`), or expires and is
-     pruned (`prune_expired`); a purely off-chain order is still "cancelled" by spending its note
-     another way (e.g. `unshield`), which nullifies it and makes the held proof unusable.
+2. **Order** (off-chain; proof = `circuits/lift`) — a party proves membership of an asset note,
+   reveals its nullifier, and binds the order terms (`asset_in`, `amount_in`, `asset_out`, `min_out`,
+   `output_owner_tag`, plus `cancel_owner_tag`/`expiry`/`partial_allowed` for the book). The proof is
+   handed to a matcher (atomic `settle`/`settle_exact`) OR rested on-chain via `submit_order`. A
+   purely off-chain order is "cancelled" by spending its note another way (e.g. `unshield`); a resting
+   order is cancelled with a cancel proof or pruned on expiry.
 
-3. **Settle** (IMPLEMENTED: `settle`, atomic, two verifies)
-   - A matcher submits two crossing order proofs. The contract verifies BOTH, derives each order
-     from its verified public inputs, checks asset + price compatibility in plaintext, requires the
-     two notes to be distinct and unspent, records both nullifiers, and emits proceeds descriptors
-     stamped with each order's bound `output_owner_tag`.
-   - Proceeds are minted as new asset notes by inserting them into the on-chain tree (no
-     caller-supplied output commitments). No proof-free pre-verified entries.
-   - Measured on testnet at **230.5M instructions (~58% of the 400M budget)**: ~160M for the two
-     verifies plus ~70M for the two proceeds inserts.
-   - **`settle_exact`** (IMPLEMENTED) is the strict-equality sibling of `settle`: it requires the two
-     orders to be *exact reverses* (`a.amount_in == b.min_out && b.amount_in == a.min_out`) on a
-     registered canonical pair, so there is no surplus and no partial execution. It is the matching
-     primitive the Phase 2 order book settles against. The general crossing check (limit prices
-     overlap) is the `orders_cross` helper — an exact-integer `U256` cross-multiplication
-     `a.min_out * b.min_out <= a.amount_in * b.amount_in` — which the book uses for partial fills.
+3. **Settle** (atomic, two verifies) — a matcher submits two crossing order proofs. The contract
+   verifies BOTH, derives each order from its verified public inputs, checks asset + price
+   compatibility in plaintext, requires the two notes distinct and unspent, records both nullifiers,
+   and mints proceeds as new asset notes stamped with each order's bound `output_owner_tag` (no
+   caller-supplied output commitments). `settle_exact` is the strict-equality sibling (exact reverses
+   on a registered canonical pair — no surplus, no partial); it is the primitive the order book
+   settles against. The general crossing check is `orders_cross` (an exact-integer `U256`
+   cross-multiplication), which the book uses for partial fills.
 
-4. **Unshield** (IMPLEMENTED: `unshield`, circuit `circuits/unshield`)
-   - User spends an asset note with a proof that binds the payout **recipient** (public input
-     `[5] == sha256(to.to_xdr())`, top byte zeroed), so a relayer can submit but cannot redirect.
-   - Contract records the nullifier, then transfers the public `asset`/`amount` to `to`.
-   - Per-operation VKs: `set_vk(op, vk)` registers the unshield VK (op 2) alongside the order VK
-     (op 1, set at construction). Measured on testnet at ~81.3% of budget.
+4. **Unshield** (proof = `circuits/unshield`) — user spends an asset note with a proof that binds the
+   payout **recipient** (public input `[5] == sha256(to.to_xdr())`, top byte zeroed), so a relayer can
+   submit but cannot redirect. The contract records the nullifier, then transfers the public
+   `asset`/`amount` to `to`.
+
+Per-operation VKs: the order VK (op 1) is set at construction; `set_vk(op, vk)` registers the unshield
+(op 2) and cancel VKs.
 
 ## End-to-end demo
 
-`scripts/03_demo_e2e.sh` + `contracts/settlement/tests/e2e_demo.rs` run the FULL lifecycle with real
-UltraHonk proofs whose membership witnesses are reconstructed by the path server: A shields asset 1,
-trades into asset 2 via an atomic `settle`, then **unshields the proceeds note `settle` created** —
-a note that exists only as a tree leaf, whose Merkle path the indexer rebuilds from the
-shield+settle event history (impossible without the path server). The script derives every
-`Prover.toml` field (owner tags, nullifiers, order leaf, recipient binding, path) via the `witness`
-tool; the test executes shield→settle→unshield against the contract on the local host and checks
-custody/recipient balances. Run: `./scripts/03_demo_e2e.sh` then `cargo test -p settlement`.
-
-`scripts/04_demo_e2e_testnet.sh` is the authoritative TESTNET version: it deploys the contract and
-submits the same flow as real transactions, reusing the local-host proofs unchanged (they bind the
-protocol asset-id and the Merkle root, not token addresses, and the on-chain tree is deterministic,
-so shielding the same notes reproduces the exact roots R2/R4 the proofs were made against). Both
-protocol asset-ids map to the native XLM SAC for a robust run (the protocol distinguishes them by
-id; two real tokens would only add issuance/trustline setup). Validated on testnet 2026-06-18: the
-on-chain root after the shields equalled proof A's bound root; **atomic settle = 230,529,644 CPU
-(~57% of 400M; ~160M two verifies + ~70M two proceeds inserts), unshield = 81,755,747 CPU (~20%)**;
-the recipient's balance rose by exactly the 2000 unshielded.
+`scripts/03_demo_e2e.sh` + `contracts/settlement/tests/e2e_demo.rs` run the full lifecycle on the
+local host with real proofs whose membership witnesses are reconstructed by the path server: A shields
+asset 1, trades into asset 2 via atomic `settle`, then **unshields the proceeds note `settle` created**
+— a note that exists only as a tree leaf, whose Merkle path the indexer rebuilds from event history
+(impossible without the path server). `scripts/04_demo_e2e_testnet.sh` is the authoritative testnet
+version. Step-by-step run instructions and measured costs: `implementation.md` and `benchmarks.md`.
 
 ## Soundness invariants
 
@@ -126,55 +123,22 @@ the recipient's balance rose by exactly the 2000 unshielded.
   `amount_in`, `asset_out`, `min_out`, `output_owner_tag`, the membership `root`, and a domain
   separator. `settle` trusts nothing the caller passes outside the verified public inputs.
 - **Both sides verified:** `settle` verifies both proofs before any state change.
-- **Distinct, unspent notes:** the two sides must have different nullifiers, both unused; both are
-  recorded before proceeds are emitted (single-use).
+- **Distinct, unspent notes:** the two sides must have different nullifiers, both unused, recorded
+  before any proceeds are minted (single-use).
 - **Settlement constructs outputs:** proceeds are built from the bound `output_owner_tag` and the
   matched fill amounts; the contract never accepts caller-supplied output commitments.
-- **Canonical registry:** one merged contract holds the single nullifier registry (no split
-  registries -> no double-spend risk).
-- **Published roots only:** proofs must be made against an admin-published Merkle root.
+- **Canonical registry:** one merged contract holds the single nullifier registry (no split registries
+  → no double-spend risk).
+- **Accepted roots only:** proofs must be made against a root in the on-chain root-history ring.
+- **Durable state:** all fund-critical state is persistent/instance storage (never temporary), TTL
+  bumped to max on write, with permissionless `keep_alive` heartbeats. See `implementation.md`.
 
-## Open implementation gaps
+## Status
 
-- **On-chain Merkle tree (DONE):** the contract maintains the depth-32 append-only tree itself
-  (`shield`/`settle` insert; root advances and is accepted automatically; no admin `push_root`). The
-  on-chain `compress` is byte-identical to the circuits (host `poseidon2_permutation` with the
-  `stellar/rs-soroban-poseidon` BN254 t=4 constants; unit-tested against Noir). Validated end-to-end
-  on testnet: shield A + shield B reproduce the exact root the order proofs were made against, then
-  `settle` accepts them with no push_root.
-- **Path-server client (DONE):** `tools/indexer` (crate `mosaic-indexer`) is a read-only off-chain
-  indexer that rebuilds membership paths from `shielded`/`settled` events (the tree stores only
-  filled subtrees on-chain, not all leaves). It is NOT a trust anchor — the on-chain root is. It
-  reuses the contract's exact `compress` (host `poseidon2_permutation` + `soroban-poseidon` BN254
-  t=4 constants, via a local `Env` as a hash engine), so its roots are byte-identical by
-  construction. API: `NoteTree::{ingest_shielded, ingest_settled, ingest_note, root, path, circuit_fold}` (the book emits
-  one `noteins` event per minted leaf, replayed via `ingest_note`); the
-  `witness` bin replays an event log on stdin and prints `Prover.toml` path/index_bits witnesses
-  (this is what makes `tests/fixtures/regen.sh` reproducible and what a wallet calls before proving).
-  Cross-checked in `contracts/settlement/tests/integration.rs`: the indexer's reconstructed root
-  equals the on-chain `root()` AND the root the committed order/unshield proofs were generated
-  against, and every indexer-derived path folds (via the circuit's membership algorithm) back to
-  that root.
-- **Root history is unbounded:** every produced root stays accepted (nullifiers prevent
-  double-spend regardless of root recency); a bounded ring is a later refinement.
-- **Partial fills:** `settle`/`settle_exact` are full-fill. The on-chain **order book**
-  (`submit_order`) does support partial fills (per-order flag), executing in exact integer "lots" of
-  the maker's price ratio so no change note or rounding is needed — leftover stays locked as the
-  order's `remaining_in` and is returned on cancel/prune. See [order-book.md](order-book.md).
-- **Order circuit naming:** `circuits/lift` is the order proof; the contract has no `lift`
-  entrypoint anymore. All 12 of its public inputs are used on-chain (`order_leaf`,
-  `cancel_owner_tag`, `expiry`, `partial_allowed` by the order book; `settle` uses `[0..8]`).
-- **Book storage:** v1 stores each side as a bounded `Vec<OrderEntry>`; individually-keyed entries +
-  a price-sorted index are the gas optimization, deferred until ledger-byte cost is measured.
-- **Storage durability:** all fund-critical state is in persistent/instance storage (never temporary,
-  so never deletable) and its TTL is bumped to max on write, with permissionless `keep_alive` /
-  `keep_alive_keys` heartbeats + restore as the backstop. Data cannot be lost or silently missed; see
-  [storage-durability.md](storage-durability.md). The only unbounded rent surface is the per-nullifier
-  set — an accumulator-root redesign is the long-term fix.
-- **Wrapped assets:** define issuers/bridges before advertising ETH/XRP support.
-- **Standalone build:** the contract depends on a vendored Nethermind verifier path that is
-  gitignored; make it reproducible before treating it as a buildable package.
-- **Recovery:** new notes are account-scoped and included in an AES-GCM snapshot encrypted with a
-  key deterministically recovered from Freighter `signMessage`. The backend stores ciphertext under
-  opaque read/write capabilities; encrypted file export is the independent fallback. Legacy notes
-  without an account association intentionally remain local-only.
+Functionally complete and demonstrable end-to-end on testnet (un-hardened): atomic settle lifecycle,
+the on-chain order book, and the Base → Stellar shield all validated live. The production-blocking
+safety items (storage durability; worst case fits all per-tx resource limits) are done. The remaining
+work is robustness and productionization — a crossed-book crank, bounded root-history eviction, keyed
+book storage, an admin/pause surface, a nullifier accumulator to bound the one unbounded rent surface,
+and making the vendored verifier build reproducible. **None of the open gaps can lose funds.** The full
+list with rationale is in `implementation.md`.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generate the order-book test fixtures (contracts/settlement/tests/fixtures/book/): four lift order
 # proofs (S1/S2/S3 sells + B1 buy) all proven against the root after four shields, plus a cancel
-# proof for S2. Consumed by `cargo test --test book`. See docs/order-book.md for the scenario.
+# proof for S2. Consumed by `cargo test --test book`. See docs/simple-order-book.md for the scenario.
 #
 # Scenario (pair: base = asset 1, quote = asset 2):
 #   shield notes: S1=100 a1 (leaf0), S2=100 a1 (leaf1), B1=2400 a2 (leaf2), S3=50 a1 (leaf3) -> R4
