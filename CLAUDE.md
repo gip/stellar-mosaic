@@ -23,10 +23,11 @@ tree-backed orders/nullifiers), `docs/shared-merkle-tree.md` (WS5 — cross-chai
 
 There is **no root Cargo workspace** — the Rust crates are separate (different targets/toolchains:
 the contract is `wasm32v1-none` no_std, the hosts are std, `bridge-prover` pins Rust 1.96 + risc0).
-Build each piece from its own directory. The verifier/poseidon deps are now fetched from the network
-(crates.io + a pinned git rev), so `contracts/settlement` and `tools/indexer` build **standalone**
-from a fresh checkout with plain `cargo`. The one remaining exception is `bridge-prover`, which still
-depends on a gitignored `../../PICO/bless` Steel checkout.
+Build each piece from its own directory. All external deps are now fetched from the network
+(crates.io + pinned git revs/tags) rather than gitignored local checkouts, so every crate —
+including `contracts/settlement`, `tools/indexer`, and `bridge-prover` — builds **standalone** from a
+fresh checkout. (Note: changing `bridge-prover`'s Steel source can change the guest image ID; if it
+does, the committed image ID and the on-chain config must be regenerated together.)
 
 - `circuits/{lift,unshield,cancel,join,spend,wallet}/` — Noir circuits. `lift` is the **order
   proof** (binds the full order; there is no on-chain `lift` entrypoint). `unshield` is the
@@ -48,7 +49,8 @@ depends on a gitignored `../../PICO/bless` Steel checkout.
 - `evm/` — Foundry project. `MosaicBridge.sol`: the Base-side one-way peg that emits a `Shielded`
   event a RISC Zero/Steel proof later attests so Stellar mints the note.
 - `bridge-prover/` — RISC Zero zkVM workspace (`host` + `methods`) that proves a Base deposit
-  (state/view-call via `eth_getProof`, OP-Steel). Depends on a gitignored `../../PICO/bless` checkout.
+  (state/view-call via `eth_getProof`, OP-Steel). Pulls Steel from `boundless-xyz/steel` (pinned tag),
+  so it builds without an external checkout.
 - `scripts/` — numbered demo/measurement scripts (see below). `docs/` — design + provenance.
 - `vendor/` (gitignored) — optional local checkouts only (e.g. `stellar-risc0-verifier` for bridge
   spikes). The settlement verifier (`ultrahonk_soroban_verifier`, pinned git rev of NethermindEth's
@@ -87,7 +89,8 @@ npm run lint      # eslint
 **EVM (Foundry):** `cd evm && forge build && forge test`. Needs `BASE_SEPOLIA_RPC_URL` /
 `BASESCAN_API_KEY` env for `base_sepolia` RPC/etherscan.
 
-**Bridge prover:** `cd bridge-prover && cargo build` (requires the gitignored `../../PICO/bless` Steel checkout).
+**Bridge prover:** `cd bridge-prover && cargo build` (Steel pulled from `boundless-xyz/steel` at a
+pinned tag; needs the risc0 toolchain — `r0vm`/`cargo-risczero` — for the guest build).
 
 **Scripts** (run from repo root): `01` local prove/verify · `02` legacy on-chain verifier spike ·
 `03` e2e demo fixtures (local host) · `04` authoritative testnet e2e · `05`/`06`/`07` order-book
