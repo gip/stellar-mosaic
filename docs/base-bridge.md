@@ -84,12 +84,19 @@ digest `3519660d6ecbd34367740f5ca18449cba8b389594f69f177bbf21c46e505c61e`, seal 
 ## Running the end-to-end demo (WS8)
 
 `scripts/10_demo_base_shield_testnet.sh` orchestrates: deploy `MosaicBridge` on Base Sepolia →
-shield → prove (`bridge-prover --prove`) → deploy + configure settlement on Stellar testnet →
+shield → prove → wait for finality → deploy + configure settlement on Stellar testnet →
 `attest_base_block` (the relayer step, for the block the proof committed to) → `shield_from_base` →
 assert the tree root advanced. It deploys a MockUSDC on Base (no faucet) and reuses the deployed
-router. The prover anchors to the latest **finalized** Base block by default (reorg-safe), so the
-script waits for the deposit to finalize (~10–15 min on Base Sepolia); `UNSAFE_FAST=1` skips the wait
-and proves at the deposit's own non-finalized block (quick but reorg-risky — demo only).
+router.
+
+**Prove-then-finalize.** `eth_getProof` only serves a recent block window (~128 on a non-archive
+RPC), but a *finalized* block is hundreds of blocks back — so you can't prove directly at a finalized
+block without an archive endpoint. Instead the script proves **immediately** at the deposit's block
+(recent → in-window); the seal/journal commit `(blockNumber, blockHash)` and never expire, so it
+**holds the proof and waits for that block to finalize** (a pure block-number check — no `getProof`)
+before minting. True finality, no archive RPC. If the proven block reorgs out before finalizing, the
+relayer won't attest its hash and `shield_from_base` fails safely (`BaseBlockNotAttested`) — just
+re-run. `UNSAFE_FAST=1` mints without the finality wait (quick but reorg-risky — demo only).
 
 Prerequisites (the script gates on them): foundry + a funded Base Sepolia key (`PRIVATE_KEY`); the
 RISC Zero Groth16 prover stack (`r0vm`/Docker, or `RISC0_PROVER=bonsai`); the stellar CLI + a funded

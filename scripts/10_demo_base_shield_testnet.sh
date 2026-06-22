@@ -78,33 +78,35 @@ TXH=$(casts --nonce "$NONCE" "$BRIDGE" 'shield(uint32,uint256,bytes32)' "$ASSET_
 DEPOSIT_BLOCK=$(cast receipt "$TXH" blockNumber --rpc-url "$BASE_RPC")
 echo "    shield tx = $TXH   deposit block = $DEPOSIT_BLOCK"
 
-echo "==> 3. prove the deposit (Groth16) -> seal + journal"
-if [ "${UNSAFE_FAST:-0}" = "1" ]; then
-  echo "    UNSAFE_FAST=1: proving at the deposit's non-finalized block $DEPOSIT_BLOCK (reorg-risk)"
-  BLOCK_OPT="--block $DEPOSIT_BLOCK"
-else
-  echo "    waiting for Base finality to reach block $DEPOSIT_BLOCK (~10-15 min)..."
-  while :; do
-    FIN=$(cast block finalized --field number --rpc-url "$BASE_RPC" 2>/dev/null || echo 0)
-    [ -n "$FIN" ] && [ "$FIN" -ge "$DEPOSIT_BLOCK" ] && break
-    echo "      finalized=$FIN target=$DEPOSIT_BLOCK; sleeping 30s"
-    sleep 30
-  done
-  BLOCK_OPT=""   # host default = latest finalized block
-fi
-# $BLOCK_OPT is intentionally unquoted so it word-splits to "--block N" or to nothing (a plain
-# string avoids the macOS bash 3.2 "unbound variable" trap on empty "${array[@]}" under set -u).
+echo "==> 3. prove the deposit NOW, while its block is in the eth_getProof window -> seal + journal"
+# Prove immediately against the deposit's (recent => in-window) block. The seal/journal commit to
+# (blockNumber, blockHash) and never expire, so we HOLD them and only mint after that block finalizes
+# (next step). This gives true finality safety WITHOUT an archive getProof RPC: the proof's getProof
+# happens now while in-window, and the finality wait is a pure block-number check (no getProof).
 ( cd "$PROVER" && RUST_LOG=info cargo run --release -p host -- \
-    --rpc-url "$BASE_RPC" --bridge "$BRIDGE" --deposit-id "$DEPOSIT_ID" $BLOCK_OPT \
+    --rpc-url "$BASE_RPC" --bridge "$BRIDGE" --deposit-id "$DEPOSIT_ID" --block "$DEPOSIT_BLOCK" \
     --prove --out-dir "$PROVER/out" )
 SEAL="$PROVER/out/seal.bin"; JOURNAL="$PROVER/out/journal.bin"
 [ -s "$SEAL" ] && [ -s "$JOURNAL" ] || { echo "ERROR: proving did not emit seal/journal"; exit 1; }
-# Journal word 0 = commitment.id (block number in the low 8 bytes); word 1 = block hash.
-# `-c` keeps each value on ONE line (xxd -p wraps at 60 hex cols by default, which corrupts a 64-hex
-# block hash with an embedded newline).
+# Journal word 0 = commitment.id (block number in the low 8 bytes); word 1 = block hash. `-c` keeps
+# each value on ONE line (xxd -p wraps at 60 hex cols, which would corrupt the 64-hex block hash).
 BLOCK=$(( 16#$(xxd -p -c 8 -s 24 -l 8 "$JOURNAL") ))
 BLOCK_HASH=$(xxd -p -c 32 -s 32 -l 32 "$JOURNAL")
 echo "    proof committed to block $BLOCK ($BLOCK_HASH)"
+
+# Hold the proof until its block FINALIZES on Base, then mint (true finality; just a number check,
+# no getProof, so no proof-window limit). UNSAFE_FAST=1 mints immediately (reorg-risk; demo only).
+if [ "${UNSAFE_FAST:-0}" = "1" ]; then
+  echo "    UNSAFE_FAST=1: minting without waiting for finality (reorg-risk; demo only)"
+else
+  echo "    holding proof; waiting for block $BLOCK to finalize on Base (~10-15 min)..."
+  while :; do
+    FIN=$(cast block finalized --field number --rpc-url "$BASE_RPC" 2>/dev/null || echo 0)
+    [ -n "$FIN" ] && [ "$FIN" -ge "$BLOCK" ] && break
+    echo "      finalized=$FIN target=$BLOCK; sleeping 30s"
+    sleep 30
+  done
+fi
 
 echo "==> 4. deploy + configure settlement on Stellar testnet"
 ( cd "$CONTRACT" && stellar contract build >/dev/null )
