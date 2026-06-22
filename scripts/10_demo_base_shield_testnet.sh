@@ -59,26 +59,29 @@ STELLAR_ADDR=$(stellar keys address "$IDENTITY" 2>/dev/null) \
 XLM_SAC=$(stellar contract id asset --asset native --network "$NETWORK")
 echo "    stellar admin = $STELLAR_ADDR   router = $ROUTER_ID"
 
-echo "==> 1. deploy MockUSDC + MosaicBridge on Base Sepolia, register + mint"
+# Manage nonces explicitly: public RPCs lag on pending-nonce, which makes rapid back-to-back txs
+# collide ("replacement transaction underpriced"). We assign sequential nonces ourselves.
+NONCE=$(cast nonce "$ADMIN_EVM" --rpc-url "$BASE_RPC")
+echo "==> 1. deploy MockUSDC + MosaicBridge on Base Sepolia, register + mint (nonce base $NONCE)"
 USDC=$(cd "$EVM" && forge create test/mocks/MockUSDC.sol:MockUSDC \
-  --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --broadcast --json | jq -r .deployedTo)
+  --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --broadcast --json --nonce "$NONCE" | jq -r .deployedTo); NONCE=$((NONCE+1))
 BRIDGE=$(cd "$EVM" && forge create src/MosaicBridge.sol:MosaicBridge \
   --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --broadcast --json \
-  --constructor-args "$ADMIN_EVM" | jq -r .deployedTo)   # --constructor-args MUST come last
+  --nonce "$NONCE" --constructor-args "$ADMIN_EVM" | jq -r .deployedTo); NONCE=$((NONCE+1))   # --constructor-args last
 echo "    usdc = $USDC   bridge = $BRIDGE"
-casts "$USDC" 'mint(address,uint256)' "$ADMIN_EVM" "$AMOUNT" >/dev/null
-casts "$BRIDGE" 'registerAsset(uint32,address)' "$ASSET_ID" "$USDC" >/dev/null
+casts --nonce "$NONCE" "$USDC" 'mint(address,uint256)' "$ADMIN_EVM" "$AMOUNT" >/dev/null; NONCE=$((NONCE+1))
+casts --nonce "$NONCE" "$BRIDGE" 'registerAsset(uint32,address)' "$ASSET_ID" "$USDC" >/dev/null; NONCE=$((NONCE+1))
 
 echo "==> 2. approve + shield $AMOUNT of asset $ASSET_ID"
-casts "$USDC" 'approve(address,uint256)' "$BRIDGE" "$AMOUNT" >/dev/null
-TXH=$(casts "$BRIDGE" 'shield(uint32,uint256,bytes32)' "$ASSET_ID" "$AMOUNT" "$OWNER_TAG" --json | jq -r .transactionHash)
+casts --nonce "$NONCE" "$USDC" 'approve(address,uint256)' "$BRIDGE" "$AMOUNT" >/dev/null; NONCE=$((NONCE+1))
+TXH=$(casts --nonce "$NONCE" "$BRIDGE" 'shield(uint32,uint256,bytes32)' "$ASSET_ID" "$AMOUNT" "$OWNER_TAG" --json | jq -r .transactionHash); NONCE=$((NONCE+1))
 DEPOSIT_BLOCK=$(cast receipt "$TXH" blockNumber --rpc-url "$BASE_RPC")
 echo "    shield tx = $TXH   deposit block = $DEPOSIT_BLOCK"
 
 echo "==> 3. prove the deposit (Groth16) -> seal + journal"
 if [ "${UNSAFE_FAST:-0}" = "1" ]; then
   echo "    UNSAFE_FAST=1: proving at the deposit's non-finalized block $DEPOSIT_BLOCK (reorg-risk)"
-  BLOCK_ARG=(--block "$DEPOSIT_BLOCK")
+  BLOCK_OPT="--block $DEPOSIT_BLOCK"
 else
   echo "    waiting for Base finality to reach block $DEPOSIT_BLOCK (~10-15 min)..."
   while :; do
@@ -87,22 +90,35 @@ else
     echo "      finalized=$FIN target=$DEPOSIT_BLOCK; sleeping 30s"
     sleep 30
   done
-  BLOCK_ARG=()   # host default = latest finalized block
+  BLOCK_OPT=""   # host default = latest finalized block
 fi
+# $BLOCK_OPT is intentionally unquoted so it word-splits to "--block N" or to nothing (a plain
+# string avoids the macOS bash 3.2 "unbound variable" trap on empty "${array[@]}" under set -u).
 ( cd "$PROVER" && RUST_LOG=info cargo run --release -p host -- \
-    --rpc-url "$BASE_RPC" --bridge "$BRIDGE" --deposit-id "$DEPOSIT_ID" "${BLOCK_ARG[@]}" \
+    --rpc-url "$BASE_RPC" --bridge "$BRIDGE" --deposit-id "$DEPOSIT_ID" $BLOCK_OPT \
     --prove --out-dir "$PROVER/out" )
 SEAL="$PROVER/out/seal.bin"; JOURNAL="$PROVER/out/journal.bin"
 [ -s "$SEAL" ] && [ -s "$JOURNAL" ] || { echo "ERROR: proving did not emit seal/journal"; exit 1; }
 # Journal word 0 = commitment.id (block number in the low 8 bytes); word 1 = block hash.
-BLOCK=$(( 16#$(xxd -p -s 24 -l 8 "$JOURNAL") ))
-BLOCK_HASH=$(xxd -p -s 32 -l 32 "$JOURNAL")
+# `-c` keeps each value on ONE line (xxd -p wraps at 60 hex cols by default, which corrupts a 64-hex
+# block hash with an embedded newline).
+BLOCK=$(( 16#$(xxd -p -c 8 -s 24 -l 8 "$JOURNAL") ))
+BLOCK_HASH=$(xxd -p -c 32 -s 32 -l 32 "$JOURNAL")
 echo "    proof committed to block $BLOCK ($BLOCK_HASH)"
 
 echo "==> 4. deploy + configure settlement on Stellar testnet"
 ( cd "$CONTRACT" && stellar contract build >/dev/null )
 WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
-inv() { stellar contract invoke --id "$CID" --source "$IDENTITY" --network "$NETWORK" "$@"; }
+# Retry transient public-RPC failures (e.g. 502 gateway errors) up to 5x. Retry notices go to stderr
+# so they don't pollute values captured via $(inv -- ...).
+inv() {
+  local i
+  for i in 1 2 3 4 5; do
+    stellar contract invoke --id "$CID" --source "$IDENTITY" --network "$NETWORK" "$@" && return 0
+    echo "    (stellar invoke failed; retry $i/5 in 5s)" >&2; sleep 5
+  done
+  return 1
+}
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
   -- --vk_bytes-file-path "$FIX/vk" --admin "$STELLAR_ADDR")
 echo "    settlement = $CID"
