@@ -254,3 +254,87 @@ fn shield_from_base_rejects_unregistered_asset() {
     let err = call(&env, &id, good_seal(&env), journal_bytes(&env, &j)).expect_err("asset");
     assert_eq!(err as u32, Error::AssetNotRegistered as u32);
 }
+
+// ---- WS5: a bridged note is discoverable + spendable via the off-chain indexer ----
+// `shield_from_base` emits the same `shielded(asset_id, amount, owner_tag)` event and inserts the
+// same `Poseidon(asset_id, amount, owner_tag)` leaf as a native shield, so the existing indexer
+// (tools/indexer) and backend event scanner reconstruct it with no changes. These tests prove the
+// minted note's membership path folds to the on-chain root — i.e. a wallet can prove membership and
+// thus trade/unshield it like any native note.
+
+#[test]
+fn base_minted_note_reconstructs_and_membership_path_folds() {
+    use mosaic_indexer::{u256_to_word, NoteTree};
+
+    let env = test_env();
+    let (id, _router) = setup(&env);
+    let client = SettlementClient::new(&env, &id);
+
+    client.shield_from_base(&good_seal(&env), &journal_bytes(&env, &fixture_journal()));
+    let onchain_root = client.root().to_array();
+
+    // Replay the `shielded` event (what the backend scanner does from chain) into the indexer.
+    let mut tree = NoteTree::new(&env);
+    let idx = tree.ingest_shielded(ASSET_ID, AMOUNT, &OWNER_TAG);
+    assert_eq!(idx, 0, "the base mint is the first leaf");
+
+    // (1) off-chain reconstruction reproduces the on-chain root exactly.
+    assert_eq!(u256_to_word(&tree.root()), onchain_root, "indexer root == on-chain root");
+    // (2) the reconstructed membership path folds (via the circuit's algorithm) to that root, so a
+    //     lift/unshield proof built from this witness will satisfy the membership constraint.
+    let leaf = tree.leaf(0).unwrap();
+    let path = tree.path(0);
+    assert_eq!(
+        u256_to_word(&tree.circuit_fold(&leaf, &path)),
+        onchain_root,
+        "base-minted note's membership path must fold to the on-chain root",
+    );
+}
+
+#[test]
+fn base_and_native_notes_coexist_in_one_tree() {
+    use mosaic_indexer::{u256_to_word, NoteTree};
+    use soroban_sdk::token::StellarAssetClient;
+
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let router = env.register(MockRouter, ());
+    let client = SettlementClient::new(&env, &id);
+    client.configure_base_bridge(
+        &router,
+        &BytesN::from_array(&env, &IMAGE_ID),
+        &BytesN::from_array(&env, &CONFIG_ID),
+        &BytesN::from_array(&env, &BRIDGE20),
+    );
+    client.attest_base_block(&BLOCK_NUMBER, &BytesN::from_array(&env, &BLOCK_HASH));
+
+    // Register asset 1 to a real SAC and fund a holder so we can do a NATIVE shield too.
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    client.register_asset(&ASSET_ID, &sac.address());
+    let holder = Address::generate(&env);
+    let native_amount: i128 = 50;
+    let native_tag = [0x22u8; 32]; // a valid (< r) field element
+    StellarAssetClient::new(&env, &sac.address()).mint(&holder, &native_amount);
+
+    // leaf 0 = native shield; leaf 1 = bridged mint.
+    client.shield(&holder, &ASSET_ID, &native_amount, &BytesN::from_array(&env, &native_tag));
+    client.shield_from_base(&good_seal(&env), &journal_bytes(&env, &fixture_journal()));
+    let onchain_root = client.root().to_array();
+
+    // The indexer replays both `shielded` events in insertion order — native and bridged are
+    // indistinguishable to it (same event, same leaf function).
+    let mut tree = NoteTree::new(&env);
+    tree.ingest_shielded(ASSET_ID, native_amount, &native_tag);
+    tree.ingest_shielded(ASSET_ID, AMOUNT, &OWNER_TAG);
+
+    assert_eq!(u256_to_word(&tree.root()), onchain_root, "mixed tree root == on-chain root");
+    for i in 0..tree.len() {
+        let leaf = tree.leaf(i).unwrap();
+        let path = tree.path(i);
+        assert_eq!(
+            u256_to_word(&tree.circuit_fold(&leaf, &path)),
+            onchain_root,
+            "leaf {i} path must fold to the on-chain root",
+        );
+    }
+}

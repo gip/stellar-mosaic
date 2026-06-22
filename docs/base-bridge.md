@@ -46,7 +46,7 @@ accepts this per the equivalence assumption; a Stellar→Base withdraw leg is de
 | WS2 RISC Zero / Steel guest + host | `bridge-prover/` | ✅ builds; image id fixed |
 | WS3 Groth16-on-Soroban feasibility spike | `contracts/groth16_spike/` | ✅ ~26M CPU (~6.6%) |
 | WS4 `shield_from_base` + registry + replay | `contracts/settlement/src/lib.rs` | ✅ 10 tests |
-| WS5 indexer cross-chain note recovery | `tools/indexer`, `backend/` | ◻ |
+| WS5 indexer cross-chain note recovery | `tools/indexer`, `backend/` | ✅ works unchanged (shared `shielded` event) |
 | WS6 Boundless proving + receipt → seal | `bridge-prover/host`, `backend/` | ◻ |
 | WS7 frontend (Base wallet + shield + status) | `frontend/` | ◻ |
 | WS8 end-to-end Base-Sepolia ↔ Stellar-testnet demo | `scripts/10_demo_base_shield_testnet.sh` | ✅ validated live (2026-06-21) |
