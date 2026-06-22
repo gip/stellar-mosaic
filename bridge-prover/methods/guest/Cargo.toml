@@ -8,8 +8,8 @@ edition = "2021"
 [dependencies]
 alloy-primitives = { version = "1.5.3", features = ["tiny-keccak"] }
 alloy-sol-types = { version = "1.5" }
-# Steel lives outside this repo; path mirrors the upstream steel/examples/events guest layout.
-risc0-steel = { path = "../../../../PICO/bless/steel/crates/steel" }
+# Steel lives outside this repo; OP abstraction (Base is OP-stack). Mirrors steel/examples/op/l2.
+risc0-op-steel = { path = "../../../../PICO/bless/steel/crates/op-steel" }
 risc0-zkvm = { version = "3.0", default-features = false, features = ["std", "unstable"] }
 
 [patch.crates-io]

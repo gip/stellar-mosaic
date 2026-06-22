@@ -40,10 +40,10 @@ AMOUNT="${AMOUNT:-1000000}"                  # 1 USDC (6 dp)
 DEPOSIT_ID="${DEPOSIT_ID:-0}"                # fresh bridge -> first deposit is 0
 # owner_tag = an opaque BN254 Fr element (< r). A real wallet derives Poseidon(pk_o, rho); for the
 # demo any small constant works (it only governs who can later spend the minted note).
-OWNER_TAG="${OWNER_TAG:-0x3333333333333333333333333333333333333333333333333333333333333333}"
+OWNER_TAG="${OWNER_TAG:-0x1111111111111111111111111111111111111111111111111111111111111111}"
 # Pinned guest image id + Base Sepolia config digest (regenerate via bridge-prover print_journal_fixture).
-IMAGE_ID="${IMAGE_ID:-703c618ff04997c2937552d40103472081aa87c16c711de5c6ece5607f0ee281}"
-CONFIG_ID="${CONFIG_ID:-96db42921002cf403b4d9b5255f9743aa8ab15f0f8480f4296ddf068d322e71d}"
+IMAGE_ID="${IMAGE_ID:-333e192f991c82a12d4fbf779342c918af4eca4d8eba66908f2ac020c46d26a5}"
+CONFIG_ID="${CONFIG_ID:-3519660d6ecbd34367740f5ca18449cba8b389594f69f177bbf21c46e505c61e}"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found on PATH"; exit 1; }; }
 need forge; need cast; need stellar; need jq
@@ -76,11 +76,18 @@ BLOCK_HASH=$(cast receipt "$TXH" blockHash --rpc-url "$BASE_RPC")
 echo "    shield tx = $TXH   block = $BLOCK   hash = $BLOCK_HASH"
 
 echo "==> 3. prove the Shielded event (Groth16) -> seal + journal"
+# Prove against a RECENT block (the deposit lives in current state; pinning the deposit's block
+# fails once it ages out of the RPC's eth_getProof window). The block the proof commits to is read
+# back from the journal and is what we attest below.
 ( cd "$PROVER" && RUST_LOG=info cargo run --release -p host -- \
-    --rpc-url "$BASE_RPC" --bridge "$BRIDGE" --deposit-id "$DEPOSIT_ID" --block "$BLOCK" \
+    --rpc-url "$BASE_RPC" --bridge "$BRIDGE" --deposit-id "$DEPOSIT_ID" \
     --prove --out-dir "$PROVER/out" )
 SEAL="$PROVER/out/seal.bin"; JOURNAL="$PROVER/out/journal.bin"
 [ -s "$SEAL" ] && [ -s "$JOURNAL" ] || { echo "ERROR: proving did not emit seal/journal"; exit 1; }
+# Journal word 0 = commitment.id (block number in low 8 bytes); word 1 = block hash.
+BLOCK=$(( 16#$(xxd -p -s 24 -l 8 "$JOURNAL") ))
+BLOCK_HASH=$(xxd -p -s 32 -l 32 "$JOURNAL")
+echo "    proof committed to block $BLOCK ($BLOCK_HASH)"
 
 echo "==> 4. deploy + configure settlement on Stellar testnet"
 ( cd "$CONTRACT" && stellar contract build >/dev/null )
@@ -92,8 +99,8 @@ echo "    settlement = $CID"
 inv --send yes -- register_asset --asset_id "$ASSET_ID" --token "$XLM_SAC" >/dev/null
 inv --send yes -- configure_base_bridge \
   --router "$ROUTER_ID" --image_id "$IMAGE_ID" --config_id "$CONFIG_ID" --bridge "${BRIDGE#0x}" >/dev/null
-# The trust anchor: the relayer attests the Base block hash as canonical.
-inv --send yes -- attest_base_block --block_number "$BLOCK" --block_hash "${BLOCK_HASH#0x}" >/dev/null
+# The trust anchor: the relayer attests the Base block hash (the one the proof committed to).
+inv --send yes -- attest_base_block --block_number "$BLOCK" --block_hash "$BLOCK_HASH" >/dev/null
 
 echo "==> 5. shield_from_base: verify the proof on-chain and mint the note"
 ROOT_BEFORE=$(inv -- root 2>/dev/null | tr -d '"')

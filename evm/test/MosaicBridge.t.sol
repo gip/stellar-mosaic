@@ -85,6 +85,18 @@ contract MosaicBridgeTest is Test {
         assertEq(usdc.balanceOf(alice), 1_000_000_000 - amount);
     }
 
+    function test_shield_storesDepositRecord() public {
+        uint256 amount = 100_000_000;
+        vm.prank(alice);
+        bridge.shield(USDC_ASSET_ID, amount, OWNER_TAG);
+
+        // The OP-compatible proof reads this record via eth_getProof.
+        (uint32 assetId, uint256 amt, bytes32 ownerTag) = bridge.deposits(0);
+        assertEq(assetId, USDC_ASSET_ID);
+        assertEq(amt, amount);
+        assertEq(ownerTag, OWNER_TAG);
+    }
+
     function test_shield_incrementsDepositId() public {
         vm.startPrank(alice);
         uint64 id0 = bridge.shield(USDC_ASSET_ID, 10_000_000, OWNER_TAG);

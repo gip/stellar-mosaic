@@ -1,52 +1,45 @@
-//! Bridge host: preflight the `Shielded` event query on Base Sepolia, build the Steel input, and
-//! either EXECUTE the guest (fast journal-only check) or PROVE it into a Groth16 receipt and emit
-//! the router-ready `seal` + `journal` artifacts that Stellar `shield_from_base` consumes.
+//! Bridge host: read the Base `MosaicBridge` deposit record via a Steel state proof, and either
+//! EXECUTE the guest (fast journal-only check) or PROVE it into a Groth16 receipt and emit the
+//! router-ready `seal` + `journal` artifacts that Stellar `shield_from_base` consumes.
 //!
-//! Execute only (needs a real Shielded event on-chain — deploy via `evm/` and shield first):
-//!   RPC_URL=https://sepolia.base.org RUST_LOG=info \
-//!     cargo run --release -- --bridge 0x<MosaicBridge> --deposit-id 0
+//! Base is an OP-stack chain, so this uses risc0-op-steel and proves from CONTRACT STATE (a
+//! `deposits(depositId)` view call, via `eth_getProof`) — event/receipt proofs don't work on OP
+//! (every block carries a type-0x7e deposit tx the Ethereum receipt decoder rejects).
 //!
-//! Prove (Groth16) and write out/{seal.hex,journal.hex}:
-//!   RPC_URL=... RUST_LOG=info cargo run --release -- --bridge 0x.. --deposit-id 0 --prove
+//! Execute only:
+//!   RPC_URL=<base sepolia rpc> RUST_LOG=info \
+//!     cargo run --release -- --bridge 0x<MosaicBridge> --deposit-id 1 --block <N>
 //!
-//! Local Groth16 proving needs the RISC Zero prover stack (`r0vm` / Docker on Apple Silicon, or
-//! `RISC0_PROVER=bonsai`). The emitted `seal` is byte-for-byte what the Boundless marketplace
-//! returns and what the Nethermind verifier router (and thus `shield_from_base`) accepts — see
-//! `bridge-prover/README.md` for the Boundless production path.
+//! Prove (Groth16) and write out/{seal.hex,journal.hex,seal.bin,journal.bin}:
+//!   RPC_URL=... RUST_LOG=info cargo run --release -- --bridge 0x.. --deposit-id 1 --block <N> --prove
+//!
+//! Local Groth16 proving needs the RISC Zero prover stack (`r0vm`/Docker, or `RISC0_PROVER=bonsai`).
+//! The emitted `seal` is what the Boundless marketplace returns and what the Nethermind verifier
+//! router (and thus `shield_from_base`) accepts — see `bridge-prover/README.md`.
 
-use std::{fs, path::PathBuf, sync::LazyLock};
+use std::{fs, path::PathBuf};
 
-use alloy_primitives::{hex, Address, B256, U256};
-use alloy_sol_types::{sol, SolEvent, SolValue};
+use alloy_primitives::{hex, Address};
+use alloy_sol_types::{sol, SolValue};
 use anyhow::{Context, Result};
 use bridge_methods::{BRIDGE_GUEST_ELF, BRIDGE_GUEST_ID};
 use clap::Parser;
-use risc0_steel::{
-    config::ChainSpec, ethereum::EthChainSpec, ethereum::EthEvmEnv,
-    revm::primitives::hardfork::SpecId, Commitment, Event,
+use risc0_op_steel::{
+    optimism::{OpEvmEnv, BASE_SEPOLIA_CHAIN_SPEC},
+    Commitment, Contract,
 };
 use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
 use tokio::task;
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
-/// Base Sepolia. MUST stay identical to the guest so the committed `configID` matches.
-const BASE_SEPOLIA_CHAIN_ID: u64 = 84532;
-static BASE_SEPOLIA_CHAIN_SPEC: LazyLock<EthChainSpec> =
-    LazyLock::new(|| ChainSpec::new_single(BASE_SEPOLIA_CHAIN_ID, SpecId::PRAGUE));
-
 sol! {
-    /// MUST match `MosaicBridge.sol` and the guest exactly.
-    #[derive(Debug)]
-    interface MosaicBridge {
-        event Shielded(
-            uint64 indexed depositId,
-            uint32 indexed assetId,
-            uint256 amount,
-            bytes32 ownerTag,
-            address token,
-            address from
-        );
+    /// MUST match `MosaicBridge.sol`'s public `deposits` getter and the guest.
+    interface IMosaicBridge {
+        function deposits(uint64 depositId)
+            external
+            view
+            returns (uint32 assetId, uint256 amount, bytes32 ownerTag);
     }
 }
 
@@ -73,7 +66,7 @@ struct Args {
     #[arg(short, long, env = "BRIDGE_ADDRESS")]
     bridge: Address,
 
-    /// The deposit id (indexed) of the Shielded event to prove.
+    /// The deposit id to prove.
     #[arg(short, long)]
     deposit_id: u64,
 
@@ -85,8 +78,7 @@ struct Args {
     #[arg(long, default_value = "out")]
     out_dir: PathBuf,
 
-    /// Block to query the event in. Steel scopes an event query to ONE block, so this must be the
-    /// block that contains the deposit (defaults to latest, which is usually wrong for a past tx).
+    /// Block to read the deposit at (defaults to latest). Use the block at/after the shield tx.
     #[arg(long)]
     block: Option<u64>,
 }
@@ -98,39 +90,36 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
 
-    // EVM environment from the RPC, pinned to the deposit's block (Steel queries one block).
-    let builder = EthEvmEnv::builder().rpc(args.rpc_url).chain_spec(&BASE_SEPOLIA_CHAIN_SPEC);
+    // OP EVM environment from the RPC, optionally pinned to a block.
+    let builder = OpEvmEnv::builder().rpc(args.rpc_url).chain_spec(&BASE_SEPOLIA_CHAIN_SPEC);
     let builder = match args.block {
         Some(b) => builder.block_number(b),
         None => builder,
     };
     let mut env = builder.build().await?;
 
-    // Preflight the event query (same filter the guest applies) to prepare the guest input.
-    let deposit_topic = B256::from(U256::from(args.deposit_id));
-    let event = Event::preflight::<MosaicBridge::Shielded>(&mut env);
-    let logs = event.address(args.bridge).topic1(deposit_topic).query().await?;
+    // Read the deposit record from contract state (proven against the block's state root).
+    let call = IMosaicBridge::depositsCall { depositId: args.deposit_id };
+    let returns = Contract::preflight(args.bridge, &mut env)
+        .call_builder(&call)
+        .call()
+        .await?;
     log::info!(
-        "Bridge {} emitted {} Shielded event(s) for depositId {} (sig: {})",
+        "Deposit {} on bridge {}: assetId={} amount={} ownerTag={}",
+        args.deposit_id,
         args.bridge,
-        logs.len(),
-        args.deposit_id,
-        MosaicBridge::Shielded::SIGNATURE,
+        returns.assetId,
+        returns.amount,
+        returns.ownerTag,
     );
-    anyhow::ensure!(
-        logs.len() == 1,
-        "expected exactly one Shielded event for depositId {}, found {}",
-        args.deposit_id,
-        logs.len()
-    );
+    anyhow::ensure!(returns.assetId != 0, "no deposit recorded for id {}", args.deposit_id);
 
     let evm_input = env.into_input().await?;
     let bridge_bytes: [u8; 20] = args.bridge.into();
     let deposit_id = args.deposit_id;
     let do_prove = args.prove;
 
-    // Execute (journal only) or prove (Groth16 receipt -> router-ready seal). Returns the journal
-    // bytes and, when proving, the encoded seal.
+    // Execute (journal only) or prove (Groth16 receipt -> router-ready seal).
     let (journal_bytes, seal): (Vec<u8>, Option<Vec<u8>>) = task::spawn_blocking(move || {
         let env = ExecutorEnv::builder()
             .write(&evm_input)
@@ -143,7 +132,6 @@ async fn main() -> Result<()> {
             .context("failed to build env")?;
 
         if do_prove {
-            // Groth16 receipt: the seal verifies on Stellar via the Nethermind router.
             let receipt = default_prover()
                 .prove_with_opts(env, BRIDGE_GUEST_ELF, &ProverOpts::groth16())
                 .context("failed to prove guest")?
@@ -165,21 +153,24 @@ async fn main() -> Result<()> {
 
     let journal = Journal::abi_decode(&journal_bytes).context("failed to decode journal")?;
     log::debug!("Steel commitment: {:?}", journal.commitment);
+    // The commitment's id packs the version in the top 16 bits and the block number in the low 64.
+    let commit_block = journal.commitment.id.as_limbs()[0];
     log::info!(
-        "Shielded: depositId={} assetId={} amount={} ownerTag={} (bridge {}, block digest {})",
+        "Journal: depositId={} assetId={} amount={} ownerTag={} (bridge {})",
         journal.depositId,
         journal.assetId,
         journal.amount,
         journal.ownerTag,
         journal.bridgeAddress,
+    );
+    log::info!(
+        "ATTEST THIS BLOCK ON STELLAR -> block_number={} block_hash={}",
+        commit_block,
         journal.commitment.digest,
     );
 
     if let Some(seal) = seal {
-        // `shield_from_base(seal, journal)` on Stellar consumes exactly these two artifacts (it
-        // computes the sha256 journal digest itself).
         fs::create_dir_all(&args.out_dir).context("failed to create out dir")?;
-        // Raw .bin for the stellar CLI `--arg-file-path` convention; .hex for human inspection.
         fs::write(args.out_dir.join("journal.bin"), &journal_bytes)?;
         fs::write(args.out_dir.join("seal.bin"), &seal)?;
         fs::write(args.out_dir.join("journal.hex"), hex::encode(&journal_bytes))?;
@@ -197,20 +188,19 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod fixture {
-    //! Emits ground-truth values for the Stellar WS4 tests: the ABI-encoded journal byte layout,
-    //! the guest image id, and the Base Sepolia config digest. Run with:
-    //!   cargo test -p host --release -- --nocapture print_journal_fixture
+    //! Emits ground-truth values for the Stellar WS4 config: the guest image id and the Base Sepolia
+    //! config digest. Run: `cargo test -p host --release -- --nocapture print_journal_fixture`
     use super::{Journal, BASE_SEPOLIA_CHAIN_SPEC};
     use alloy_primitives::{hex, Address, B256, U256};
     use alloy_sol_types::SolValue;
     use bridge_methods::BRIDGE_GUEST_ID;
-    use risc0_steel::Commitment;
+    use risc0_op_steel::Commitment;
     use risc0_zkvm::sha::Digest;
 
     #[test]
     fn print_journal_fixture() {
         let commitment = Commitment {
-            id: U256::from(0x1234u64), // version 0 (Block) in top bits, blockNumber = 0x1234
+            id: U256::from(0x1234u64),
             digest: B256::repeat_byte(0x11),
             configID: B256::repeat_byte(0x22),
         };
@@ -219,15 +209,13 @@ mod fixture {
             bridgeAddress: Address::from([0xABu8; 20]),
             depositId: 7,
             assetId: 1,
-            amount: U256::from(100_000_000u64), // 100 USDC (6 dp)
+            amount: U256::from(100_000_000u64),
             ownerTag: B256::repeat_byte(0x33),
         };
         let enc = journal.abi_encode();
         println!("JOURNAL_LEN={}", enc.len());
         println!("JOURNAL_HEX={}", hex::encode(&enc));
-
-        let image_id = Digest::from(BRIDGE_GUEST_ID);
-        println!("IMAGE_ID_HEX={}", hex::encode(image_id.as_bytes()));
+        println!("IMAGE_ID_HEX={}", hex::encode(Digest::from(BRIDGE_GUEST_ID).as_bytes()));
         println!("CONFIG_DIGEST_HEX={}", hex::encode(BASE_SEPOLIA_CHAIN_SPEC.digest()));
     }
 }

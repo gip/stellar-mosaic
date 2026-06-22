@@ -36,6 +36,18 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
     /// (scoped by this bridge's chain id + address, which the proof's journal binds).
     uint64 public depositCount;
 
+    /// The note descriptor recorded for each deposit. Base is an OP-stack chain, so the RISC Zero
+    /// proof reads this from CONTRACT STATE via a Steel `eth_getProof` view call (event/receipt
+    /// proofs can't work on OP — every block carries a type-0x7e deposit tx the receipt decoder
+    /// rejects). The public getter `deposits(uint64)` is what the bridge guest proves.
+    struct Deposit {
+        uint32 assetId;
+        uint256 amount;
+        bytes32 ownerTag;
+    }
+
+    mapping(uint64 depositId => Deposit) public deposits;
+
     event AssetRegistered(uint32 indexed assetId, address indexed token);
     event Shielded(
         uint64 indexed depositId,
@@ -87,6 +99,8 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
         if (received == 0 || received > MAX_AMOUNT) revert InvalidAmount();
 
         depositId = depositCount++;
+        // Record the note in state so the OP-compatible Steel proof can read it via eth_getProof.
+        deposits[depositId] = Deposit({assetId: assetId, amount: received, ownerTag: ownerTag});
         emit Shielded(depositId, assetId, received, ownerTag, token, msg.sender);
     }
 
