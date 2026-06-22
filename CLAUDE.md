@@ -21,9 +21,12 @@ tree-backed orders/nullifiers), `docs/shared-merkle-tree.md` (WS5 — cross-chai
 
 ## Repository shape
 
-There is **no root Cargo workspace** — the Rust crates are separate and several depend on
-**gitignored** paths under `vendor/` and `../../PICO/`, so they do not build standalone. Build each
-piece from its own directory.
+There is **no root Cargo workspace** — the Rust crates are separate (different targets/toolchains:
+the contract is `wasm32v1-none` no_std, the hosts are std, `bridge-prover` pins Rust 1.96 + risc0).
+Build each piece from its own directory. The verifier/poseidon deps are now fetched from the network
+(crates.io + a pinned git rev), so `contracts/settlement` and `tools/indexer` build **standalone**
+from a fresh checkout with plain `cargo`. The one remaining exception is `bridge-prover`, which still
+depends on a gitignored `../../PICO/bless` Steel checkout.
 
 - `circuits/{lift,unshield,cancel,join,spend,wallet}/` — Noir circuits. `lift` is the **order
   proof** (binds the full order; there is no on-chain `lift` entrypoint). `unshield` is the
@@ -47,7 +50,9 @@ piece from its own directory.
 - `bridge-prover/` — RISC Zero zkVM workspace (`host` + `methods`) that proves a Base deposit
   (state/view-call via `eth_getProof`, OP-Steel). Depends on a gitignored `../../PICO/bless` checkout.
 - `scripts/` — numbered demo/measurement scripts (see below). `docs/` — design + provenance.
-- `vendor/` (gitignored) — Nethermind `rs-soroban-ultrahonk` verifier and `rs-soroban-poseidon`.
+- `vendor/` (gitignored) — optional local checkouts only (e.g. `stellar-risc0-verifier` for bridge
+  spikes). The settlement verifier (`ultrahonk_soroban_verifier`, pinned git rev of NethermindEth's
+  public repo) and `soroban-poseidon` (crates.io `26.0.0`) are now resolved by cargo, not vendored.
 - `artifacts/`, `vks/` — proof/vk outputs (mostly gitignored; some VKs committed for the backend).
 
 ## Build, test, run
