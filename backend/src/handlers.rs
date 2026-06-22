@@ -752,15 +752,19 @@ fn decode_strkey_payload(value: &str, version: u8) -> AppResult<[u8; 32]> {
 /// waits for finality, attests the block, and mints the note. Idempotent per (desk, bridge, deposit).
 pub async fn enqueue_base_shield(
     State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> AppResult<(axum::http::StatusCode, Json<crate::db::BaseShieldJob>)> {
+    // Gated like other desk mutations: enqueuing kicks off backend proving (~minutes of CPU) and a
+    // sponsored Stellar tx, so it must not be callable anonymously.
+    crate::auth::require_session(&headers, &st).await?;
     st.db.get_desk(&id).await?;
     let bridge = body
         .get("bridge")
         .and_then(Value::as_str)
-        .filter(|s| s.starts_with("0x") && s.len() == 42)
-        .ok_or_else(|| AppError::BadRequest("bridge (0x EVM address) required".into()))?;
+        .filter(|s| s.len() == 42 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| AppError::BadRequest("bridge must be a 0x EVM address".into()))?;
     let deposit_id = body
         .get("deposit_id")
         .and_then(Value::as_u64)
