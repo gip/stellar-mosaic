@@ -227,7 +227,6 @@ export default function DeskPage() {
             <BookView
               desk={desk}
               pairId={p.pair_id}
-              side={1}
               label="Asks (sell base)"
               inDecimals={dec(p.base_asset)}
               outDecimals={dec(p.quote_asset)}
@@ -240,7 +239,6 @@ export default function DeskPage() {
             <BookView
               desk={desk}
               pairId={p.pair_id}
-              side={0}
               label="Bids (buy base)"
               inDecimals={dec(p.quote_asset)}
               outDecimals={dec(p.base_asset)}

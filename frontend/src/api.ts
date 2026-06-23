@@ -112,6 +112,28 @@ export interface BookOrder {
   active: boolean
 }
 
+/** Order-tree membership path for an order_leaf (`GET /desks/:id/order-proof`). */
+export interface OrderProof {
+  leaf_index: number
+  order_root: string
+  siblings: string[]
+  index_bits: number[]
+}
+
+/** The nullifier-IMT insert witness for a value (`GET /desks/:id/imt-witness`). The exact private
+ * inputs a WS4 spend circuit's imt_insert needs, plus the root transition. */
+export interface ImtWitnessResp {
+  nullifier_root_in: string
+  nullifier_root_out: string
+  low_value: string
+  low_next_value: string
+  low_next_index: number
+  low_path: string[]
+  low_index_bits: number[]
+  new_path: string[]
+  new_index_bits: number[]
+}
+
 export const api = {
   listDesks: () => req<Desk[]>('/desks'),
   getDesk: (id: string) => req<Desk>(`/desks/${id}`),
@@ -153,6 +175,16 @@ export const api = {
     }),
   getNoteProof: (id: string, ownerTag: string) =>
     req<NoteProof>(`/desks/${id}/note-proof?owner_tag=${ownerTag}`),
+  // WS4 proving inputs: order-tree path (for match/cancel) + the nullifier-IMT insert witness.
+  getOrderProof: (id: string, orderLeaf: string) =>
+    req<OrderProof>(`/desks/${id}/order-proof?order_leaf=${orderLeaf}`),
+  getImtWitness: (id: string, value: string) =>
+    req<ImtWitnessResp>(`/desks/${id}/imt-witness?value=${value}`),
+  relayMatch: (id: string, proof_b64: string, public_inputs_b64: string) =>
+    req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/match`, {
+      method: 'POST',
+      body: JSON.stringify({ proof_b64, public_inputs_b64 }),
+    }),
   relayOrder: (id: string, proof_b64: string, public_inputs_b64: string) =>
     req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/order`, {
       method: 'POST',

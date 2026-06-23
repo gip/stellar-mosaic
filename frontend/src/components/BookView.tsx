@@ -25,7 +25,6 @@ function normLeaf(h: string): string {
 export default function BookView({
   desk,
   pairId,
-  side,
   label,
   inDecimals,
   outDecimals,
@@ -37,7 +36,6 @@ export default function BookView({
 }: {
   desk: Desk
   pairId: number
-  side: number
   label: string
   /** Decimals of the asset offered (amount_in). */
   inDecimals: number
