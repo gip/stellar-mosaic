@@ -14,8 +14,10 @@ tree are on-chain.
 Read `docs/architecture.md` first — it is the entry-point design doc. Other docs:
 `docs/privacy-model.md`, `docs/note-types.md`, `docs/simple-order-book.md` (the on-chain book),
 `docs/base-bridge.md` (Base → Stellar shield), `docs/implementation.md` (how to build/run, the
-order-proof circuit spec, storage durability, current status), and `docs/benchmarks.md` (all cost
-measurements, the 400M CPU budget, and the verifier-choice provenance). Forward-looking design docs
+order-proof circuit spec, storage durability, current status), `docs/e2e-testing.md` (the operator's
+guide for running both testnet legs via the stateful `scripts/e2e.sh` driver), and
+`docs/benchmarks.md` (all cost measurements, the 400M CPU budget, and the verifier-choice
+provenance). Forward-looking design docs
 for planned/unbuilt work: `docs/ui-ux.md` (WS3), `docs/noir-matching.md` (WS4 — matching in Noir +
 tree-backed orders/nullifiers), `docs/shared-merkle-tree.md` (WS5 — cross-chain tree + KYC desk).
 
@@ -95,6 +97,8 @@ pinned tag; needs the risc0 toolchain — `r0vm`/`cargo-risczero` — for the gu
 **Scripts** (run from repo root): `01` local prove/verify · `02` legacy on-chain verifier spike ·
 `03` e2e demo fixtures (local host) · `04` authoritative testnet e2e · `05`/`06`/`07` order-book
 fixtures + budget · `08` web artifacts · `09` join fixtures · `10` Base-shield testnet demo.
+`scripts/e2e.sh` is the stateful driver over `04`+`10` (status/show/run/regen/clean); it persists
+deployed contracts/addresses to `.e2e/state.env`. See `docs/e2e-testing.md`.
 
 ## Hard invariants — do not weaken these
 

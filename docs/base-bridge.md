@@ -90,8 +90,10 @@ ABI-encoded, fixed 256 bytes (8 × 32-byte words), all fields static:
 | 7 | `ownerTag` | BN254 Fr; leaf = `Poseidon(assetId, amount, ownerTag)` |
 
 Reference values for the current guest (regenerate via `bridge-prover` `print_journal_fixture`):
-image id `333e192f991c82a12d4fbf779342c918af4eca4d8eba66908f2ac020c46d26a5`, Base Sepolia config
+image id `69c430391c303a1db21811ee9cc29a9e6997ce2d0dbcd62cdd0539ca5732ca03`, Base Sepolia config
 digest `3519660d6ecbd34367740f5ca18449cba8b389594f69f177bbf21c46e505c61e`, seal selector `73c457ba`.
+(The image id changed from `333e192f…` when Steel moved to `boundless-xyz/steel` on the
+standalone-build branch — the guest ELF changed, so its id did too; the config digest is unchanged.)
 
 ## Running the end-to-end demo (WS8)
 
@@ -103,12 +105,15 @@ router.
 
 **Prove-then-finalize.** `eth_getProof` only serves a recent block window (~128 on a non-archive
 RPC), but a *finalized* block is hundreds of blocks back — so you can't prove directly at a finalized
-block without an archive endpoint. Instead the script proves **immediately** at the deposit's block
-(recent → in-window); the seal/journal commit `(blockNumber, blockHash)` and never expire, so it
-**holds the proof and waits for that block to finalize** (a pure block-number check — no `getProof`)
-before minting. True finality, no archive RPC. If the proven block reorgs out before finalizing, the
-relayer won't attest its hash and `shield_from_base` fails safely (`BaseBlockNotAttested`) — just
-re-run. `UNSAFE_FAST=1` mints without the finality wait (quick but reorg-risky — demo only).
+block without an archive endpoint. Instead the script always proves **immediately** at the deposit's
+block (recent → in-window); the seal/journal commit `(blockNumber, blockHash)` and never expire.
+
+By **default the script then mints immediately** (fast mode) — quick but reorg-risky, so demo only:
+if the proven block reorgs out before the relayer attests it, `shield_from_base` fails safely
+(`BaseBlockNotAttested`) and you just re-run. Set **`WAIT_FINALITY=1`** for the reorg-safe path: it
+**holds the proof and waits for that block to finalize** on Base (a pure block-number check — no
+`getProof`) before minting. True finality, no archive RPC. (Earlier versions defaulted to the wait
+and exposed the inverse `UNSAFE_FAST` flag; fast is now the default and the wait is opt-in.)
 
 Prerequisites (the script gates on them): foundry + a funded Base Sepolia key (`PRIVATE_KEY`); the
 RISC Zero Groth16 prover stack (`r0vm`/Docker, or `RISC0_PROVER=bonsai`); the stellar CLI + a funded

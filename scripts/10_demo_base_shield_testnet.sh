@@ -18,9 +18,10 @@
 #         ./scripts/manage.sh schedule-add-verifier -n testnet -a <acct> --selector 73c457ba
 #         ./scripts/manage.sh execute-add-verifier  -n testnet -a <acct> --selector 73c457ba
 #
-# By default the proof anchors to the latest FINALIZED Base block (reorg-safe), which means waiting
-# for the deposit to finalize (~10-15 min on Base Sepolia). Set UNSAFE_FAST=1 to instead prove
-# immediately against the deposit's own (non-finalized) block — quick, but reorg-risky; demo only.
+# FINALITY TOGGLE. By DEFAULT this runs in FAST mode: it mints as soon as the proof is generated,
+# against the proven (recent, not-yet-finalized) Base block — quick, but reorg-risky, so demo only.
+# Set WAIT_FINALITY=1 for the reorg-safe path: hold the proof and wait for its block to finalize on
+# Base (~10-15 min; a pure block-number check, no archive getProof) before minting.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,8 +31,14 @@ CONTRACT="$ROOT/contracts/settlement"
 FIX="$CONTRACT/tests/fixtures"
 export PATH="$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH"
 
+# Persist key outputs (Base contracts, settlement id, router, roots) to <repo>/.e2e/state.env so the
+# e2e driver (scripts/e2e.sh) can report what was generated. Harmless on a direct run.
+source "$ROOT/scripts/lib/e2e_state.sh"
+
 # --- config (override via env) ---
-BASE_RPC="${BASE_RPC:-https://sepolia.base.org}"
+# BASE_RPC has no default ON PURPOSE: it must be an eth_getProof-capable endpoint (Alchemy/Infura).
+# The public https://sepolia.base.org does NOT serve eth_getProof, so the prove step would fail.
+BASE_RPC="${BASE_RPC:-}"
 NETWORK="${NETWORK:-testnet}"
 IDENTITY="${IDENTITY:-m0}"
 ASSET_ID="${ASSET_ID:-1}"
@@ -41,16 +48,18 @@ DEPOSIT_ID="${DEPOSIT_ID:-0}"                # fresh bridge -> first deposit is 
 # the demo; a real wallet uses Poseidon(pk_o, rho). NOTE: must be < r (0x11.. ok; 0x33.. is NOT).
 OWNER_TAG="${OWNER_TAG:-0x1111111111111111111111111111111111111111111111111111111111111111}"
 # Pinned guest image id + Base Sepolia config digest (regenerate via bridge-prover print_journal_fixture).
-IMAGE_ID="${IMAGE_ID:-333e192f991c82a12d4fbf779342c918af4eca4d8eba66908f2ac020c46d26a5}"
+IMAGE_ID="${IMAGE_ID:-69c430391c303a1db21811ee9cc29a9e6997ce2d0dbcd62cdd0539ca5732ca03}"
 CONFIG_ID="${CONFIG_ID:-3519660d6ecbd34367740f5ca18449cba8b389594f69f177bbf21c46e505c61e}"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found on PATH"; exit 1; }; }
 need forge; need cast; need stellar; need jq; need xxd
 : "${PRIVATE_KEY:?set PRIVATE_KEY to a funded Base Sepolia key}"
+: "${BASE_RPC:?set BASE_RPC to a Base Sepolia RPC that serves eth_getProof (Alchemy/Infura), e.g. https://base-sepolia.g.alchemy.com/v2/<key> — the public sepolia.base.org will NOT work}"
 : "${ROUTER_ID:?set ROUTER_ID to the deployed Stellar RISC Zero verifier router (see header)}"
 
 casts() { cast send --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" "$@"; }
 
+run_begin "Base"
 echo "==> 0. context"
 ADMIN_EVM=$(cast wallet address --private-key "$PRIVATE_KEY")
 echo "    base deployer = $ADMIN_EVM   rpc = $BASE_RPC"
@@ -58,6 +67,12 @@ STELLAR_ADDR=$(stellar keys address "$IDENTITY" 2>/dev/null) \
   || { stellar keys generate "$IDENTITY" --network "$NETWORK"; stellar keys fund "$IDENTITY" --network "$NETWORK"; STELLAR_ADDR=$(stellar keys address "$IDENTITY"); }
 XLM_SAC=$(stellar contract id asset --asset native --network "$NETWORK")
 echo "    stellar admin = $STELLAR_ADDR   router = $ROUTER_ID"
+stage "context"
+note "base deployer" "$ADMIN_EVM"
+note "base rpc"      "$BASE_RPC"
+note "stellar admin" "$STELLAR_ADDR"
+note "router"        "$ROUTER_ID"
+endstage
 
 # Manage nonces explicitly: public RPCs lag on pending-nonce, which makes rapid back-to-back txs
 # collide ("replacement transaction underpriced"). We assign sequential nonces ourselves.
@@ -69,14 +84,34 @@ BRIDGE=$(cd "$EVM" && forge create src/MosaicBridge.sol:MosaicBridge \
   --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --broadcast --json \
   --nonce "$NONCE" --constructor-args "$ADMIN_EVM" | jq -r .deployedTo); NONCE=$((NONCE+1))   # --constructor-args last
 echo "    usdc = $USDC   bridge = $BRIDGE"
+state_set BASE_DEPOSITOR "$ADMIN_EVM"
+state_set BASE_USDC "$USDC"
+state_set BASE_BRIDGE "$BRIDGE"
+state_set BASE_RPC "$BASE_RPC"
+state_set ROUTER_ID "$ROUTER_ID"
 casts --nonce "$NONCE" "$USDC" 'mint(address,uint256)' "$ADMIN_EVM" "$AMOUNT" >/dev/null; NONCE=$((NONCE+1))
 casts --nonce "$NONCE" "$BRIDGE" 'registerAsset(uint32,address)' "$ASSET_ID" "$USDC" >/dev/null; NONCE=$((NONCE+1))
+stage "deploy (Base)"
+note "MockUSDC"     "$USDC"
+note "MosaicBridge" "$BRIDGE"
+note "minted"       "$AMOUNT to $ADMIN_EVM"
+note "registered"  "asset $ASSET_ID -> $USDC"
+note "explorer"    "https://sepolia.basescan.org/address/$BRIDGE"
+endstage
 
 echo "==> 2. approve + shield $AMOUNT of asset $ASSET_ID"
 casts --nonce "$NONCE" "$USDC" 'approve(address,uint256)' "$BRIDGE" "$AMOUNT" >/dev/null; NONCE=$((NONCE+1))
 TXH=$(casts --nonce "$NONCE" "$BRIDGE" 'shield(uint32,uint256,bytes32)' "$ASSET_ID" "$AMOUNT" "$OWNER_TAG" --json | jq -r .transactionHash); NONCE=$((NONCE+1))
 DEPOSIT_BLOCK=$(cast receipt "$TXH" blockNumber --rpc-url "$BASE_RPC")
 echo "    shield tx = $TXH   deposit block = $DEPOSIT_BLOCK"
+state_set BASE_SHIELD_TX "$TXH"
+stage "shield (Base)"
+note "asset / amount" "$ASSET_ID / $AMOUNT"
+note "owner tag"      "$OWNER_TAG"
+note "shield tx"      "$TXH"
+note "deposit block"  "$DEPOSIT_BLOCK"
+note "tx explorer"    "https://sepolia.basescan.org/tx/$TXH"
+endstage
 
 echo "==> 3. prove the deposit NOW, while its block is in the eth_getProof window -> seal + journal"
 # Prove immediately against the deposit's (recent => in-window) block. The seal/journal commit to
@@ -93,19 +128,28 @@ SEAL="$PROVER/out/seal.bin"; JOURNAL="$PROVER/out/journal.bin"
 BLOCK=$(( 16#$(xxd -p -c 8 -s 24 -l 8 "$JOURNAL") ))
 BLOCK_HASH=$(xxd -p -c 32 -s 32 -l 32 "$JOURNAL")
 echo "    proof committed to block $BLOCK ($BLOCK_HASH)"
+stage "prove"
+note "seal"          "$SEAL"
+note "journal"       "$JOURNAL"
+note "committed block" "$BLOCK"
+note "block hash"    "$BLOCK_HASH"
+endstage
 
-# Hold the proof until its block FINALIZES on Base, then mint (true finality; just a number check,
-# no getProof, so no proof-window limit). UNSAFE_FAST=1 mints immediately (reorg-risk; demo only).
-if [ "${UNSAFE_FAST:-0}" = "1" ]; then
-  echo "    UNSAFE_FAST=1: minting without waiting for finality (reorg-risk; demo only)"
-else
-  echo "    holding proof; waiting for block $BLOCK to finalize on Base (~10-15 min)..."
+# Finality toggle. DEFAULT (WAIT_FINALITY=0) is FAST: mint immediately against the proven (recent,
+# not-yet-finalized) block — quick, reorg-risky, demo only. WAIT_FINALITY=1 holds the proof until its
+# block finalizes on Base (true finality; just a number check, no getProof, so no proof-window limit).
+WAIT_FINALITY="${WAIT_FINALITY:-0}"
+if [ "$WAIT_FINALITY" = "1" ]; then
+  echo "    WAIT_FINALITY=1: holding proof; waiting for block $BLOCK to finalize on Base (~10-15 min)..."
   while :; do
     FIN=$(cast block finalized --field number --rpc-url "$BASE_RPC" 2>/dev/null || echo 0)
     [ -n "$FIN" ] && [ "$FIN" -ge "$BLOCK" ] && break
     echo "      finalized=$FIN target=$BLOCK; sleeping 30s"
     sleep 30
   done
+else
+  echo "    fast mode (default): minting immediately without waiting for finality (reorg-risk; demo only)"
+  echo "      → set WAIT_FINALITY=1 for the reorg-safe finality wait"
 fi
 
 echo "==> 4. deploy + configure settlement on Stellar testnet"
@@ -124,21 +168,39 @@ inv() {
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
   -- --vk_bytes-file-path "$FIX/vk" --admin "$STELLAR_ADDR")
 echo "    settlement = $CID"
+state_set BASE_SETTLEMENT_CID "$CID"
+state_set BASE_DEPOSIT_BLOCK "$BLOCK"
 inv --send yes -- register_asset --asset_id "$ASSET_ID" --token "$XLM_SAC" >/dev/null
 inv --send yes -- configure_base_bridge \
   --router "$ROUTER_ID" --image_id "$IMAGE_ID" --config_id "$CONFIG_ID" --bridge "${BRIDGE#0x}" >/dev/null
 # The trust anchor: the relayer attests the Base block hash (the one the proof committed to).
 inv --send yes -- attest_base_block --block_number "$BLOCK" --block_hash "$BLOCK_HASH" >/dev/null
+stage "configure (Stellar)"
+note "settlement contract" "$CID"
+note "asset $ASSET_ID -> token" "$XLM_SAC"
+note "base bridge"   "${BRIDGE#0x}"
+note "attested block" "$BLOCK"
+note "explorer"      "https://stellar.expert/explorer/$NETWORK/contract/$CID"
+endstage
 
 echo "==> 5. shield_from_base: verify the proof on-chain and mint the note"
 ROOT_BEFORE=$(inv -- root 2>/dev/null | tr -d '"')
 inv --send yes -- shield_from_base --seal-file-path "$SEAL" --journal-file-path "$JOURNAL" >/dev/null
 ROOT_AFTER=$(inv -- root 2>/dev/null | tr -d '"')
+stage "shield_from_base (Stellar)"
+note "root before" "$ROOT_BEFORE"
+note "root after"  "$ROOT_AFTER"
+note "result"      "$([ "$ROOT_BEFORE" != "$ROOT_AFTER" ] && echo 'note minted — tree root advanced' || echo 'FAILED — root did not advance')"
+endstage
 
 echo "==> done"
 echo "    settlement = $CID"
 echo "    root before = $ROOT_BEFORE"
 echo "    root after   = $ROOT_AFTER"
+state_set BASE_STELLAR_ADDR "$STELLAR_ADDR"
+state_set BASE_ROOT_AFTER "$ROOT_AFTER"
+state_set BASE_LAST_RUN "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+print_summary "Base"
 [ "$ROOT_BEFORE" != "$ROOT_AFTER" ] \
   && echo "    OK: tree root advanced — the Base deposit is now an active note on Stellar." \
   || { echo "    FAIL: root did not advance"; exit 1; }

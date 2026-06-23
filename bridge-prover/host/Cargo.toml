@@ -18,3 +18,9 @@ risc0-ethereum-contracts = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
+# alloy's HTTP transport (pulled transitively via risc0-op-steel) uses reqwest, but nothing in this
+# dep tree enables a TLS backend on it — so an https:// RPC (Alchemy/Infura) fails at runtime with
+# "invalid URL, scheme is not http". We don't call reqwest directly; this dep exists only so cargo's
+# feature unification turns on rustls (self-contained: aws-lc-rs provider + platform cert verifier)
+# for the reqwest the transport already uses. Keep the version aligned with the locked 0.13.x.
+reqwest = { version = "0.13", features = ["rustls"] }
