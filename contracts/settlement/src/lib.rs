@@ -21,11 +21,77 @@
 //! settle uses [0..8]; cancel_owner_tag/order_leaf are unused here (no on-chain order note).
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, crypto::bn254::Bn254Fr, symbol_short,
-    token::TokenClient, vec, xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Vec, U256,
+    contract, contractevent, contracterror, contractimpl, contracttype, crypto::bn254::Bn254Fr,
+    symbol_short, token::TokenClient, vec, xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Vec,
+    U256,
 };
 use soroban_poseidon::{Field, Poseidon2Config, Poseidon2Sponge};
 use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
+
+// --- Events ---------------------------------------------------------------------------------------
+// These are the cross-chain/indexer WIRE CONTRACT (the indexer and backend reconstruct the note tree
+// by parsing them positionally: one Symbol topic + a data Vec). They replace the deprecated
+// `env.events().publish((symbol_short!(name),), (..tuple..))` form.
+//
+// `data_format = "vec"` is REQUIRED (the macro default is `"map"`): it makes the emitted data an
+// `ScVal::Vec` of the fields in declaration order — byte-identical to the old tuple encoding the
+// indexer reads. The explicit `topics = [name]` reproduces the single short-Symbol topic. Do not add
+// `#[topic]` fields, reorder fields, or change `data_format` without updating every event consumer
+// (tools/indexer, backend/src/indexer.rs) and the wire-format test in tests/events.rs.
+
+/// One AssetNote shielded into the tree (native `shield` and `shield_from_base`).
+#[contractevent(topics = ["shielded"], data_format = "vec")]
+pub struct Shielded {
+    pub asset_id: u32,
+    pub amount: i128,
+    pub owner_tag: BytesN<32>,
+}
+
+/// One AssetNote minted by an internal path (e.g. `join` outputs). Same shape as `Shielded`, distinct
+/// topic so consumers can tell a mint from a user shield.
+#[contractevent(topics = ["noteins"], data_format = "vec")]
+pub struct NoteInserted {
+    pub asset: u32,
+    pub amount: i128,
+    pub owner_tag: BytesN<32>,
+}
+
+/// An atomic two-order settlement: the two proceeds notes (A's, then B's), in tree-insert order.
+#[contractevent(topics = ["settled"], data_format = "vec")]
+pub struct Settled {
+    pub a_asset_out: u32,
+    pub b_amount_in: i128,
+    pub a_output_owner_tag: BytesN<32>,
+    pub b_asset_out: u32,
+    pub a_amount_in: i128,
+    pub b_output_owner_tag: BytesN<32>,
+}
+
+/// An asset note spent out of custody to a real recipient.
+#[contractevent(topics = ["unshield"], data_format = "vec")]
+pub struct Unshielded {
+    pub asset: u32,
+    pub amount: i128,
+    pub nullifier: BytesN<32>,
+}
+
+/// A join: two consumed notes' nullifiers (the two minted outputs are separate `noteins`).
+#[contractevent(topics = ["joined"], data_format = "vec")]
+pub struct Joined {
+    pub asset: u32,
+    pub nf1: BytesN<32>,
+    pub nf2: BytesN<32>,
+}
+
+/// Informational taker-fill summary from the on-chain book (indexers may ignore it).
+#[contractevent(topics = ["filled"], data_format = "vec")]
+pub struct Filled {
+    pub asset_in: u32,
+    pub amount_in: i128,
+    pub asset_out: u32,
+    pub amount_out: i128,
+    pub output_owner_tag: BytesN<32>,
+}
 
 /// Poseidon2 S-box degree (BN254). The crate's SBOX_D is pub(crate); the value is fixed at 5.
 const SBOX_D: u32 = 5;
@@ -354,8 +420,7 @@ impl Settlement {
         let h = Hasher::new(&env);
         let leaf = asset_note_leaf(&env, &h, asset_id, amount, &owner_tag);
         tree_insert(&env, &h, &leaf);
-        env.events()
-            .publish((symbol_short!("shielded"),), (asset_id, amount, owner_tag));
+        Shielded { asset_id, amount, owner_tag }.publish(&env);
         bump_core(&env);
         Ok(())
     }
@@ -503,8 +568,7 @@ impl Settlement {
         let h = Hasher::new(&env);
         let leaf = asset_note_leaf(&env, &h, asset_id, amount, &owner_tag);
         tree_insert(&env, &h, &leaf);
-        env.events()
-            .publish((symbol_short!("shielded"),), (asset_id, amount, owner_tag));
+        Shielded { asset_id, amount, owner_tag }.publish(&env);
         bump_core(&env);
         Ok(())
     }
@@ -564,17 +628,15 @@ impl Settlement {
         tree_insert(&env, &h, &leaf_a);
         tree_insert(&env, &h, &leaf_b);
 
-        env.events().publish(
-            (symbol_short!("settled"),),
-            (
-                a.asset_out,
-                b.amount_in,
-                a.output_owner_tag,
-                b.asset_out,
-                a.amount_in,
-                b.output_owner_tag,
-            ),
-        );
+        Settled {
+            a_asset_out: a.asset_out,
+            b_amount_in: b.amount_in,
+            a_output_owner_tag: a.output_owner_tag.clone(),
+            b_asset_out: b.asset_out,
+            a_amount_in: a.amount_in,
+            b_output_owner_tag: b.output_owner_tag.clone(),
+        }
+        .publish(&env);
         bump_core(&env);
         Ok(())
     }
@@ -631,17 +693,15 @@ impl Settlement {
         tree_insert(&env, &h, &leaf_a);
         tree_insert(&env, &h, &leaf_b);
 
-        env.events().publish(
-            (symbol_short!("settled"),),
-            (
-                a.asset_out,
-                b.amount_in,
-                a.output_owner_tag,
-                b.asset_out,
-                a.amount_in,
-                b.output_owner_tag,
-            ),
-        );
+        Settled {
+            a_asset_out: a.asset_out,
+            b_amount_in: b.amount_in,
+            a_output_owner_tag: a.output_owner_tag.clone(),
+            b_asset_out: b.asset_out,
+            a_amount_in: a.amount_in,
+            b_output_owner_tag: b.output_owner_tag.clone(),
+        }
+        .publish(&env);
         bump_core(&env);
         Ok(())
     }
@@ -704,8 +764,7 @@ impl Settlement {
         bump(&env, &nf_key);
         TokenClient::new(&env, &token).transfer(&env.current_contract_address(), &to, &amount);
 
-        env.events()
-            .publish((symbol_short!("unshield"),), (asset, amount, nullifier));
+        Unshielded { asset, amount, nullifier }.publish(&env);
         bump_core(&env);
         Ok(())
     }
@@ -766,8 +825,7 @@ impl Settlement {
         mint_note(&env, &h, asset, out_amount_1, &out_tag_1);
         mint_note(&env, &h, asset, out_amount_2, &out_tag_2);
 
-        env.events()
-            .publish((symbol_short!("joined"),), (asset, nf1, nf2));
+        Joined { asset, nf1, nf2 }.publish(&env);
         bump_core(&env);
         Ok(())
     }
@@ -866,16 +924,14 @@ impl Settlement {
         // this event is purely informational (indexers ignore unknown topics).
         let filled_in = taker.amount_in - remaining_in;
         if filled_in > 0 {
-            env.events().publish(
-                (symbol_short!("filled"),),
-                (
-                    taker.asset_in,
-                    filled_in,
-                    taker.asset_out,
-                    filled_out,
-                    taker.output_owner_tag.clone(),
-                ),
-            );
+            Filled {
+                asset_in: taker.asset_in,
+                amount_in: filled_in,
+                asset_out: taker.asset_out,
+                amount_out: filled_out,
+                output_owner_tag: taker.output_owner_tag.clone(),
+            }
+            .publish(&env);
         }
 
         // Rest or IOC-return the taker's remainder.
@@ -1209,8 +1265,7 @@ fn mint_note(env: &Env, h: &Hasher, asset: u32, amount: i128, owner_tag: &BytesN
     }
     let leaf = asset_note_leaf(env, h, asset, amount, owner_tag);
     tree_insert(env, h, &leaf);
-    env.events()
-        .publish((symbol_short!("noteins"),), (asset, amount, owner_tag.clone()));
+    NoteInserted { asset, amount, owner_tag: owner_tag.clone() }.publish(env);
 }
 
 /// Load a book side (price-sorted, best first), or an empty vector if none yet.

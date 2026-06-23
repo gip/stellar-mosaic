@@ -1455,6 +1455,8 @@ dependencies = [
 [[package]]
 name = "soroban-poseidon"
 version = "26.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cae04db4ef0b9079ca7ce23bab0e859222ec6a0e9b81480770524475eef91746"
 dependencies = [
  "soroban-sdk",
 ]
@@ -1710,6 +1712,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "ultrahonk_soroban_verifier"
 version = "0.1.0"
+source = "git+https://github.com/NethermindEth/rs-soroban-ultrahonk?rev=661db07200f890b1bd9a7349ed787c70a706dd12#661db07200f890b1bd9a7349ed787c70a706dd12"
 dependencies = [
  "soroban-sdk",
 ]

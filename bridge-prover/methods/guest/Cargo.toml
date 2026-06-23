@@ -8,8 +8,9 @@ edition = "2021"
 [dependencies]
 alloy-primitives = { version = "1.5.3", features = ["tiny-keccak"] }
 alloy-sol-types = { version = "1.5" }
-# Steel lives outside this repo; OP abstraction (Base is OP-stack). Mirrors steel/examples/op/l2.
-risc0-op-steel = { path = "../../../../PICO/bless/steel/crates/op-steel" }
+# Steel from its canonical public home; OP abstraction (Base is OP-stack). Mirrors steel/examples/op/l2.
+# Pinned to the same tag as the host workspace so guest/host share one op-steel.
+risc0-op-steel = { git = "https://github.com/boundless-xyz/steel", tag = "v3.0.0" }
 risc0-zkvm = { version = "3.0", default-features = false, features = ["std", "unstable"] }
 
 [patch.crates-io]

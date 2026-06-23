@@ -10,11 +10,11 @@ crate-type = ["cdylib", "rlib"]
 # Matched to Nethermind's workspace pin so the verifier crate and this crate share one soroban-sdk.
 # hazmat-crypto exposes env.crypto_hazmat().poseidon2_permutation for the on-chain Merkle tree.
 soroban-sdk = { version = "26.0.1", default-features = false, features = ["alloc", "hazmat-crypto"] }
-# Vendored Nethermind UltraHonk verifier (native BN254 host fns). NOTE: path into gitignored
-# vendor/; this contract does not build standalone without it (acceptable for the spike).
-ultrahonk_soroban_verifier = { path = "../../vendor/rs-soroban-ultrahonk/crates/ultrahonk-soroban-verifier", default-features = false }
+# Nethermind UltraHonk verifier (native BN254 host fns), pinned to a public-repo commit so a fresh
+# checkout builds standalone with `cargo build` (no vendor/ checkout required).
+ultrahonk_soroban_verifier = { git = "https://github.com/NethermindEth/rs-soroban-ultrahonk", rev = "661db07200f890b1bd9a7349ed787c70a706dd12", default-features = false }
 # Stellar's Poseidon2 constants (BN254 t=4, matches Noir) for the on-chain tree's compress.
-soroban-poseidon = { path = "../../vendor/rs-soroban-poseidon" }
+soroban-poseidon = "26.0.0"
 
 [dev-dependencies]
 soroban-sdk = { version = "26.0.1", default-features = false, features = ["testutils", "alloc", "hazmat-crypto"] }

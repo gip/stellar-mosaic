@@ -19,7 +19,7 @@ path = "src/bin/witness.rs"
 # hashing is the deliberate choice that guarantees byte-identical roots with zero second impl.
 soroban-sdk = { version = "26.0.1", features = ["testutils", "hazmat-crypto"] }
 # Stellar's Poseidon2 BN254 t=4 constants — the SAME ones the contract's compress uses.
-soroban-poseidon = { path = "../../vendor/rs-soroban-poseidon" }
+soroban-poseidon = "26.0.0"
 
 [dev-dependencies]
 soroban-sdk = { version = "26.0.1", features = ["testutils", "hazmat-crypto"] }

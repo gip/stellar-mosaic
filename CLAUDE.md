@@ -14,16 +14,22 @@ tree are on-chain.
 Read `docs/architecture.md` first — it is the entry-point design doc. Other docs:
 `docs/privacy-model.md`, `docs/note-types.md`, `docs/simple-order-book.md` (the on-chain book),
 `docs/base-bridge.md` (Base → Stellar shield), `docs/implementation.md` (how to build/run, the
-order-proof circuit spec, storage durability, current status), and `docs/benchmarks.md` (all cost
-measurements, the 400M CPU budget, and the verifier-choice provenance). Forward-looking design docs
+order-proof circuit spec, storage durability, current status), `docs/e2e-testing.md` (the operator's
+guide for running both testnet legs via the stateful `scripts/e2e.sh` driver), and
+`docs/benchmarks.md` (all cost measurements, the 400M CPU budget, and the verifier-choice
+provenance). Forward-looking design docs
 for planned/unbuilt work: `docs/ui-ux.md` (WS3), `docs/noir-matching.md` (WS4 — matching in Noir +
 tree-backed orders/nullifiers), `docs/shared-merkle-tree.md` (WS5 — cross-chain tree + KYC desk).
 
 ## Repository shape
 
-There is **no root Cargo workspace** — the Rust crates are separate and several depend on
-**gitignored** paths under `vendor/` and `../../PICO/`, so they do not build standalone. Build each
-piece from its own directory.
+There is **no root Cargo workspace** — the Rust crates are separate (different targets/toolchains:
+the contract is `wasm32v1-none` no_std, the hosts are std, `bridge-prover` pins Rust 1.96 + risc0).
+Build each piece from its own directory. All external deps are now fetched from the network
+(crates.io + pinned git revs/tags) rather than gitignored local checkouts, so every crate —
+including `contracts/settlement`, `tools/indexer`, and `bridge-prover` — builds **standalone** from a
+fresh checkout. (Note: changing `bridge-prover`'s Steel source can change the guest image ID; if it
+does, the committed image ID and the on-chain config must be regenerated together.)
 
 - `circuits/{lift,unshield,cancel,join,spend,wallet}/` — Noir circuits. `lift` is the **order
   proof** (binds the full order; there is no on-chain `lift` entrypoint). `unshield` is the
@@ -45,9 +51,12 @@ piece from its own directory.
 - `evm/` — Foundry project. `MosaicBridge.sol`: the Base-side one-way peg that emits a `Shielded`
   event a RISC Zero/Steel proof later attests so Stellar mints the note.
 - `bridge-prover/` — RISC Zero zkVM workspace (`host` + `methods`) that proves a Base deposit
-  (state/view-call via `eth_getProof`, OP-Steel). Depends on a gitignored `../../PICO/bless` checkout.
+  (state/view-call via `eth_getProof`, OP-Steel). Pulls Steel from `boundless-xyz/steel` (pinned tag),
+  so it builds without an external checkout.
 - `scripts/` — numbered demo/measurement scripts (see below). `docs/` — design + provenance.
-- `vendor/` (gitignored) — Nethermind `rs-soroban-ultrahonk` verifier and `rs-soroban-poseidon`.
+- `vendor/` (gitignored) — optional local checkouts only (e.g. `stellar-risc0-verifier` for bridge
+  spikes). The settlement verifier (`ultrahonk_soroban_verifier`, pinned git rev of NethermindEth's
+  public repo) and `soroban-poseidon` (crates.io `26.0.0`) are now resolved by cargo, not vendored.
 - `artifacts/`, `vks/` — proof/vk outputs (mostly gitignored; some VKs committed for the backend).
 
 ## Build, test, run
@@ -82,11 +91,14 @@ npm run lint      # eslint
 **EVM (Foundry):** `cd evm && forge build && forge test`. Needs `BASE_SEPOLIA_RPC_URL` /
 `BASESCAN_API_KEY` env for `base_sepolia` RPC/etherscan.
 
-**Bridge prover:** `cd bridge-prover && cargo build` (requires the gitignored `../../PICO/bless` Steel checkout).
+**Bridge prover:** `cd bridge-prover && cargo build` (Steel pulled from `boundless-xyz/steel` at a
+pinned tag; needs the risc0 toolchain — `r0vm`/`cargo-risczero` — for the guest build).
 
 **Scripts** (run from repo root): `01` local prove/verify · `02` legacy on-chain verifier spike ·
 `03` e2e demo fixtures (local host) · `04` authoritative testnet e2e · `05`/`06`/`07` order-book
 fixtures + budget · `08` web artifacts · `09` join fixtures · `10` Base-shield testnet demo.
+`scripts/e2e.sh` is the stateful driver over `04`+`10` (status/show/run/regen/clean); it persists
+deployed contracts/addresses to `.e2e/state.env`. See `docs/e2e-testing.md`.
 
 ## Hard invariants — do not weaken these
 

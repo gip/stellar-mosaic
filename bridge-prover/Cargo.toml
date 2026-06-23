@@ -3,10 +3,12 @@ resolver = "2"
 members = ["host", "methods"]
 
 [workspace.dependencies]
-# Steel lives outside this repo (the PICO/bless checkout). Base is an OP-stack chain, so we use the
-# OP abstraction (risc0-op-steel) and prove deposits via a state/view-call (eth_getProof), not events
-# (OP receipts carry a type-0x7e deposit tx the Ethereum receipt decoder rejects). See README.
-risc0-op-steel = { path = "../../PICO/bless/steel/crates/op-steel" }
+# Steel's canonical home is github.com/boundless-xyz/steel (risc0-ethereum's op-steel now redirects
+# there). Pinned to a public release tag so the prover builds standalone — no external checkout. Base
+# is an OP-stack chain, so we use the OP abstraction (risc0-op-steel) and prove deposits via a
+# state/view-call (eth_getProof), not events (OP receipts carry a type-0x7e deposit tx the Ethereum
+# receipt decoder rejects). See README.
+risc0-op-steel = { git = "https://github.com/boundless-xyz/steel", tag = "v3.0.0" }
 
 # risc0 monorepo dependencies.
 risc0-build = { version = "3.0" }
