@@ -1,123 +1,95 @@
-// lift_order circuit - production replacement for the Milestone 0 spike (circuits/spend).
+// lift_order circuit (WS4) - the order-PLACEMENT proof.
 //
-// Consumes one active asset note and authorizes creating one active order note.
-// See docs/lift-circuit-spec.md for the full public-input vector, the v1
-// "full consumption, no change at lift" decision, and the contract obligations
-// that make the whole thing sound. See docs/note-types.md for the notes.
+// Consumes one active asset note and authorizes resting one order in the on-chain order-commitment
+// tree. Unlike WS1 (where `settle` crossed two lift proofs in the clear), matching now happens in a
+// separate `match` circuit; lift only proves a sound placement.
 //
 // What this proves (the contract trusts these because the proof verifies):
-//   (1) the owner knows sk_o behind the consumed note's owner_tag
-//   (2) the consumed asset note is in the tree at `root` (membership hides WHICH note)
-//   (3) `nullifier_in` is the correct nullifier for that note (double-spend guard)
-//   (4) `order_leaf` is exactly H(the public order fields) - so the contract can
-//       insert it without paying Poseidon, and settle/cancel can trust the fields
-//   (5) the proof is domain-separated to `lift` (not replayable as unshield/cancel)
+//   (1) the owner knows sk_o behind the consumed note's tag
+//   (2) the consumed asset note is in the note tree at `note_root` (membership hides WHICH note)
+//   (3) `nullifier_in` is the correct note-spend nullifier for that note, AND inserting it advances
+//       the nullifier IMT from `nullifier_root_in` to `nullifier_root_out` (non-membership proven
+//       in-circuit; the contract just CAS-checks the root and stores the new one - no on-chain hash)
+//   (4) `order_leaf` is exactly H8(the public order fields), so the contract appends it to the order
+//       tree without paying Poseidon over the fields and the match/cancel circuits can trust them
+//   (5) the proof is domain-separated to `lift`
 //
-// Unlike the spike, `root` and `nullifier_in` are public INPUTS asserted against
-// witness-derived values (the spike returned them as outputs, which any witness
-// satisfied - fine only for sizing).
-//
-// beta.9 note: stdlib `Poseidon2` is private; the public primitive is
-// `std::hash::poseidon2_permutation`. We build a 2-to-1 compression from it and
-// fold left-to-right for multi-input hashes. The contract and wallet MUST use the
-// identical convention or leaves/nullifiers will not match.
+// Per-note nonce: the consumed note's tag/nullifier fold in a public `nonce_in` (see mosaic lib),
+// so a note minted by an incremental fill is uniquely spendable.
 
-// Production tree depth. M0's verify cost (79.9M CPU) was measured at depth 5;
-// this MUST be re-measured on testnet at this depth before the budget is trusted.
-// depth 32 ~= 4.3B notes. Tune deliberately against the measured cost.
-global TREE_DEPTH: u32 = 32;
+use mosaic::{
+    asset_note_leaf, fold_root, hash8, imt_insert, ImtLeaf, note_nullifier, note_owner_tag,
+    output_owner_tag, pk_from_sk, TREE_DEPTH,
+};
 
-// Domain separator for lift proofs. Distinct constants for unshield/cancel keep
-// same-shape proofs from being replayed across operations.
 global LIFT_DOMAIN: Field = 1;
 
-// 2-to-1 Poseidon2 compression (width-4 permutation, take the first lane).
-fn compress(a: Field, b: Field) -> Field {
-    std::hash::poseidon2_permutation([a, b, 0, 0], 4)[0]
-}
-
-// Left-to-right fold of n>=2 inputs: H(a,b,c,...) = compress(...compress(compress(a,b),c)...).
-fn hash3(a: Field, b: Field, c: Field) -> Field {
-    compress(compress(a, b), c)
-}
-
-fn hash8(
-    a: Field,
-    b: Field,
-    c: Field,
-    d: Field,
-    e: Field,
-    f: Field,
-    g: Field,
-    h: Field,
-) -> Field {
-    let mut acc = compress(a, b);
-    acc = compress(acc, c);
-    acc = compress(acc, d);
-    acc = compress(acc, e);
-    acc = compress(acc, f);
-    acc = compress(acc, g);
-    compress(acc, h)
-}
-
 fn main(
-    // --- private witness ---
-    rho_in: Field,                  // consumed note randomness
-    sk_o: Field,                    // owner secret
-    path: [Field; TREE_DEPTH],      // Merkle sibling path
-    index_bits: [Field; TREE_DEPTH],// path direction bits (boolean-constrained)
-    // --- public inputs (positional; see docs/lift-circuit-spec.md) ---
-    domain: pub Field,              // [0] must equal LIFT_DOMAIN
-    root: pub Field,                // [1] membership root (contract: root-history ring)
-    nullifier_in: pub Field,        // [2] consumed-note nullifier (contract: unused -> record)
-    asset_in: pub Field,            // [3] offered asset == consumed note asset
-    amount_in: pub Field,           // [4] offered amount == consumed note amount (full consumption)
-    asset_out: pub Field,           // [5] wanted asset
-    min_out: pub Field,             // [6] limit terms, scaled integer
-    output_owner_tag: pub Field,    // [7] proceeds destination tag
-    cancel_owner_tag: pub Field,    // [8] cancel-authority tag
-    expiry: pub Field,              // [9] order validity deadline (unix seconds; book rejects when past)
-    partial_allowed: pub Field,     // [10] 0/1: may this order be partially filled in the book
-    order_leaf: pub Field,          // [11] leaf binding every order field the book/cancel trust
+    // --- private witness: consumed note ---
+    rho_in: Field, // consumed note randomness (its order's rho_out, or the shield rho)
+    sk_o: Field, // owner secret
+    nonce_in: Field, // consumed note's mint nonce (0 for a plain shield; match nonce for a fill)
+    path: [Field; TREE_DEPTH], // note-tree sibling path
+    index_bits: [Field; TREE_DEPTH], // note-tree path direction bits
+    // --- private witness: nullifier IMT transition (insert nullifier_in) ---
+    low_value: Field,
+    low_next_value: Field,
+    low_next_index: Field,
+    low_path: [Field; TREE_DEPTH],
+    low_index_bits: [Field; TREE_DEPTH],
+    new_path: [Field; TREE_DEPTH],
+    new_index_bits: [Field; TREE_DEPTH],
+    // --- public inputs (positional; byte offsets must match the contract's `place_order`) ---
+    domain: pub Field, // [0]  must equal LIFT_DOMAIN
+    note_root: pub Field, // [1]  consumed-note membership root (contract: root history)
+    nullifier_root_in: pub Field, // [2]  nullifier IMT root before this spend (contract: == current)
+    nullifier_root_out: pub Field, // [3]  nullifier IMT root after (contract: advance to this)
+    nullifier_in: pub Field, // [4]  consumed-note nullifier (the value inserted into the IMT)
+    asset_in: pub Field, // [5]  offered asset == consumed note asset
+    amount_in: pub Field, // [6]  offered amount == consumed note amount (full consumption)
+    asset_out: pub Field, // [7]  wanted asset
+    min_out: pub Field, // [8]  limit terms, scaled integer
+    output_owner_tag_pub: pub Field, // [9]  proceeds destination base tag (match folds the note nonce)
+    cancel_owner_tag: pub Field, // [10] cancel-authority tag
+    expiry: pub Field, // [11] order validity deadline (unix seconds)
+    partial_allowed: pub Field, // [12] 0/1: may this order be partially filled
+    order_leaf: pub Field, // [13] H8 binding every order field the book/match/cancel trust
 ) {
-    // (5) domain separation: this proof is only valid as a lift.
+    // (5) domain separation.
     assert(domain == LIFT_DOMAIN);
 
-    // (1) ownership: reconstruct the consumed note's owner_tag from secrets.
-    let pk_o = compress(sk_o, 0);
-    let owner_tag_in = compress(pk_o, rho_in);
+    // (1) ownership + (2) membership of the consumed note, with the per-note nonce folded in.
+    let pk_o = pk_from_sk(sk_o);
+    let base_tag = output_owner_tag(pk_o, rho_in);
+    let tag_in = note_owner_tag(base_tag, nonce_in);
+    let input_leaf = asset_note_leaf(asset_in, amount_in, tag_in);
+    assert(fold_root(input_leaf, path, index_bits) == note_root);
 
-    // consumed asset note leaf = H(asset, amount, owner_tag). amount_in is the
-    // full note amount (v1: no change at lift), so the offered amount IS this leaf's.
-    let input_leaf = hash3(asset_in, amount_in, owner_tag_in);
+    // (3) nullifier correctness, then prove the IMT transition that consumes it.
+    let nf = note_nullifier(sk_o, rho_in, nonce_in);
+    assert(nf == nullifier_in);
+    let low = ImtLeaf { value: low_value, next_value: low_next_value, next_index: low_next_index };
+    let root_out = imt_insert(
+        nullifier_root_in,
+        nf,
+        low,
+        low_path,
+        low_index_bits,
+        new_path,
+        new_index_bits,
+    );
+    assert(root_out == nullifier_root_out);
 
-    // (2) membership: fold the input leaf up the path to a root, assert it matches.
-    let mut node = input_leaf;
-    for i in 0..TREE_DEPTH {
-        let bit = index_bits[i];
-        assert(bit * (bit - 1) == 0); // each index bit must be boolean
-        let sib = path[i];
-        let left = (1 - bit) * node + bit * sib;
-        let right = (1 - bit) * sib + bit * node;
-        node = compress(left, right);
-    }
-    assert(node == root);
-
-    // (3) nullifier correctness for the consumed note.
-    assert(compress(sk_o, rho_in) == nullifier_in);
-
-    // partial_allowed is a boolean flag the book trusts; constrain it so a proof cannot bind a
-    // non-{0,1} value that the contract would misread.
+    // partial_allowed is a boolean the book trusts.
     assert(partial_allowed * (partial_allowed - 1) == 0);
 
-    // (4) order leaf binds every field the book/cancel will trust, now including the validity
-    // deadline and the partial-execution flag.
+    // (4) order leaf binds every field the book/match/cancel will trust.
     let computed_order_leaf = hash8(
         asset_in,
         amount_in,
         asset_out,
         min_out,
-        output_owner_tag,
+        output_owner_tag_pub,
         cancel_owner_tag,
         expiry,
         partial_allowed,
