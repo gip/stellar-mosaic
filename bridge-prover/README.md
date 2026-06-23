@@ -83,6 +83,11 @@ exits without requiring `RPC_URL`, a bridge address, or a deposit ID.
 The seal format is identical to what the Boundless marketplace returns and what the Nethermind
 verifier router accepts.
 
+Before execution or proving starts, the host builds the complete Steel input from the RPC. If a
+load-balanced RPC temporarily reports the selected block as not found, the host retries that input
+acquisition up to five times at five-second intervals. Other RPC errors fail immediately, and the
+Groth16 prover itself is never retried.
+
 Local Groth16 proving needs the RISC Zero prover stack (`r0vm` / Docker on Apple Silicon, or
 `RISC0_PROVER=bonsai`). The executor-only mode and the live preflight (RPC → block → event query)
 run without it.

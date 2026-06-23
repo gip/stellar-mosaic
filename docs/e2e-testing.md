@@ -200,8 +200,11 @@ See `docs/base-bridge.md` for the full trust model and the journal contract.
   now pre-checks this (`status` shows "Docker daemon responding"); if it's stuck, `killall Docker &&
   open -a Docker`, wait until `docker info` returns, and re-run. Or offload proving with
   `RISC0_PROVER=bonsai` (no local Docker).
-- **`eth_getProof` errors / empty proof** — your `BASE_RPC` doesn't serve state proofs; switch to
-  Alchemy/Infura.
+- **`block … not found` immediately after the Base deposit** — the bridge host retries this RPC
+  visibility lag automatically up to five times at five-second intervals, before proving starts.
+  A persistent failure means the RPC still cannot serve the selected block.
+- **Other `eth_getProof` errors / empty proof** — your `BASE_RPC` doesn't serve state proofs; switch
+  to Alchemy/Infura.
 - **`BaseBlockNotAttested` from `shield_from_base`** — the proven block reorged out before finalizing.
   Just re-run `./scripts/e2e.sh base`.
 - **Transient `502`/timeout from the Stellar public RPC** — the Base leg retries invokes 5×; for the
