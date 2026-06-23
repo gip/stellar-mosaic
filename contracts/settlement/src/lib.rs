@@ -56,15 +56,19 @@ pub struct NoteInserted {
     pub owner_tag: BytesN<32>,
 }
 
-/// An atomic two-order settlement: the two proceeds notes (A's, then B's), in tree-insert order.
-#[contractevent(topics = ["settled"], data_format = "vec")]
-pub struct Settled {
-    pub a_asset_out: u32,
-    pub b_amount_in: i128,
-    pub a_output_owner_tag: BytesN<32>,
-    pub b_asset_out: u32,
-    pub a_amount_in: i128,
-    pub b_output_owner_tag: BytesN<32>,
+/// One leaf appended to the ORDER-commitment tree (a placement or a re-rested match remainder), in
+/// tree-insert order. Lets the indexer rebuild order-tree membership paths.
+#[contractevent(topics = ["orderins"], data_format = "vec")]
+pub struct OrderInserted {
+    pub order_leaf: BytesN<32>,
+}
+
+/// One nullifier consumed into the indexed-merkle-tree accumulator, in insert order. Covers both the
+/// secret-derived note-spend nullifiers and the public order-consumption nullifiers; the indexer
+/// replays these to maintain the IMT and produce low-leaf witnesses for the next spender.
+#[contractevent(topics = ["nfspent"], data_format = "vec")]
+pub struct NullifierSpent {
+    pub nullifier: BytesN<32>,
 }
 
 /// An asset note spent out of custody to a real recipient.
@@ -83,14 +87,11 @@ pub struct Joined {
     pub nf2: BytesN<32>,
 }
 
-/// Informational taker-fill summary from the on-chain book (indexers may ignore it).
-#[contractevent(topics = ["filled"], data_format = "vec")]
-pub struct Filled {
-    pub asset_in: u32,
-    pub amount_in: i128,
-    pub asset_out: u32,
-    pub amount_out: i128,
-    pub output_owner_tag: BytesN<32>,
+/// Informational summary of a `settle_match`: the resulting nullifier accumulator root (clients can
+/// confirm their order was consumed by scanning the `nfspent`/`noteins`/`orderins` events of the tx).
+#[contractevent(topics = ["matched"], data_format = "vec")]
+pub struct Matched {
+    pub nullifier_root_out: BytesN<32>,
 }
 
 /// Poseidon2 S-box degree (BN254). The crate's SBOX_D is pub(crate); the value is fixed at 5.
@@ -104,42 +105,43 @@ const LIFT_OP: u32 = 1;
 const UNSHIELD_OP: u32 = 2;
 const CANCEL_OP: u32 = 3;
 const JOIN_OP: u32 = 4;
+const MATCH_OP: u32 = 5;
 
-/// Order-book limits. A pair has at most this many resting orders per side (buy / sell).
-const BOOK_CAPACITY: u32 = 64;
-/// Max fills a single `submit_order` performs before resting/IOC-returning the remainder. The cost
-/// driver is proceeds inserts: each fill mints 2 asset notes (~2 depth-32 Poseidon chains), and on
-/// testnet each insert is ~40M instructions (derived from `settle` = 230M and a 2-fill `submit_order`
-/// = 220M). With the fixed verify (~80M), worst case ≈ 80M + (2*MAX_FILLS + 1 IOC)*40M + book
-/// load/store. Book DEPTH is cheap (~58M local to load a full 64-deep side). The absolute worst case
-/// (full 64-deep book + this many fills) is measured on testnet by
-/// scripts/07_book_worstcase_testnet.sh. See docs/simple-order-book.md.
-const MAX_FILLS_PER_SUBMIT: u32 = 4;
-/// Side encoding for `DataKey::Book(pair, side)`. Matches `Side`.
-const SIDE_BUY: u32 = 0;
-const SIDE_SELL: u32 = 1;
-
-/// Public-input lengths for the order (lift) circuit and the unshield circuit.
-const LIFT_PUBLIC_INPUTS_BYTES: u32 = 12 * 32;
-const UNSHIELD_PUBLIC_INPUTS_BYTES: u32 = 6 * 32;
-/// Domain separators as 32-byte big-endian field words: order/lift = 1, unshield = 2.
+/// WS4 public-input lengths (positional, 32-byte big-endian field words). Every spend now also binds
+/// the nullifier-IMT transition (`nullifier_root_in`/`out`); see docs/noir-matching.md and circuits/.
+//   lift/place_order: [0]domain [1]note_root [2]nf_root_in [3]nf_root_out [4]nullifier_in
+//                     [5]asset_in [6]amount_in [7]asset_out [8]min_out [9]output_owner_tag
+//                     [10]cancel_owner_tag [11]expiry [12]partial_allowed [13]order_leaf
+const LIFT_PUBLIC_INPUTS_BYTES: u32 = 14 * 32;
+//   unshield: [0]domain [1]note_root [2]nf_root_in [3]nf_root_out [4]nullifier [5]asset [6]amount
+//             [7]recipient
+const UNSHIELD_PUBLIC_INPUTS_BYTES: u32 = 8 * 32;
+//   cancel: [0]domain [1]order_root [2]nf_root_in [3]nf_root_out [4]order_nullifier [5]asset_in
+//           [6]amount_in [7]return_owner_tag
+const CANCEL_PUBLIC_INPUTS_BYTES: u32 = 8 * 32;
+//   join: [0]domain [1]note_root [2]nf_root_in [3]nf_root_out [4]nullifier_1 [5]nullifier_2
+//         [6]asset [7]out_tag_1 [8]out_amount_1 [9]out_tag_2 [10]out_amount_2
+const JOIN_PUBLIC_INPUTS_BYTES: u32 = 11 * 32;
+//   match (settle_match): [0]domain [1]order_root [2]nf_root_in [3]nf_root_out [4]now
+//         [5..9] four consumed order nullifiers (taker + up to 3 makers; 0 = unused)
+//         [9..25] four proceeds slots {live, asset, amount, note_owner_tag}
+//         [25]remainder_live [26]remainder_order_leaf
+const MATCH_PUBLIC_INPUTS_BYTES: u32 = 27 * 32;
+/// Domain separators as 32-byte big-endian field words.
 const LIFT_DOMAIN: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
 ];
 const UNSHIELD_DOMAIN: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
 ];
-/// Public-input length for the cancel circuit ([0]domain [1]order_leaf [2]cancel_owner_tag
-/// [3]return_owner_tag) and its domain separator (=3).
-const CANCEL_PUBLIC_INPUTS_BYTES: u32 = 4 * 32;
 const CANCEL_DOMAIN: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3,
 ];
-/// Public-input length for the join circuit ([0]domain [1]root [2]nullifier_1 [3]nullifier_2
-/// [4]asset [5]out_tag_1 [6]out_amount_1 [7]out_tag_2 [8]out_amount_2) and its domain separator (=4).
-const JOIN_PUBLIC_INPUTS_BYTES: u32 = 9 * 32;
 const JOIN_DOMAIN: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4,
+];
+const MATCH_DOMAIN: [u8; 32] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5,
 ];
 
 #[contracterror]
@@ -219,17 +221,25 @@ const TREE_ZEROS: [[u8; 32]; 32] = [
 
 #[contracttype]
 pub enum DataKey {
-    Vk(u32), // verification key per operation (LIFT_OP / UNSHIELD_OP)
+    Vk(u32), // verification key per operation (LIFT_OP / UNSHIELD_OP / ... / MATCH_OP)
     Admin,
-    Root(BytesN<32>), // set membership: this root was produced by the on-chain tree (accepted)
-    Nullifier(BytesN<32>),
+    Root(BytesN<32>), // set membership: this NOTE-tree root was produced on-chain (accepted)
     Asset(u32), // asset id -> token contract Address
+    // --- Note-commitment tree (asset notes) ---
     TreeFilled, // Vec<U256> of length TREE_DEPTH: rightmost filled node per level
     TreeNext,   // u32: number of leaves inserted so far
-    TreeRoot,   // U256: current tree root
+    TreeRoot,   // U256: current note-tree root
+    // --- Order-commitment tree (resting orders) ---
+    OrderTreeFilled,
+    OrderTreeNext,
+    OrderTreeRoot,
+    OrderRoot(BytesN<32>), // set membership: this ORDER-tree root was produced on-chain (accepted)
+    // --- Nullifier accumulator (indexed merkle tree) ---
+    // Only the CURRENT root is valid: every spend proves its non-membership+insert in-circuit and
+    // the contract CAS-advances this single root (no on-chain Poseidon, no per-nullifier rent).
+    NullifierRoot, // U256
     Pair(u32),  // pair id -> PairDef { base_asset, quote_asset } (canonical orientation)
     PairCount,  // u32: number of registered pairs (pair ids are 0..PairCount)
-    Book(u32, u32), // (pair_id, side) -> Vec<OrderEntry>, kept sorted best-price-first (<=64)
     // --- Base-shield bridge (one-way deposit from Base; see docs/base-bridge.md) ---
     BaseRouter,         // Address: deployed RISC Zero verifier router (cross-called to verify)
     BaseImageId,        // BytesN<32>: pinned guest image id (bridge-prover BRIDGE_GUEST_ID)
@@ -237,25 +247,6 @@ pub enum DataKey {
     BaseBridgeAddr,     // BytesN<20>: expected Base MosaicBridge address bound in the journal
     BaseBlock(u64),     // block number -> attested Base block hash (relayer-attested registry)
     BaseDeposit(u64),   // Base depositId -> true (single-use; prevents double-mint)
-}
-
-/// A resting order in the on-chain book. Order *terms* are public (the privacy model only hides
-/// owner identity), so the book stores them in plaintext. `asset_in`/`asset_out` are NOT stored —
-/// they are derived from the order's `(pair_id, side)`. The conserved quantity is `remaining_in`:
-/// units of the locked `asset_in` still held by the contract for this order. Every code path that
-/// ends an order (fill-to-zero, cancel, prune, IOC) mints exactly the consumed/leftover `asset_in`
-/// back out, so total minted + returned always equals the `amount_in` locked at submit.
-#[contracttype]
-#[derive(Clone)]
-pub struct OrderEntry {
-    pub amount_in: i128,   // original offered amount (fixes the limit price ratio with min_out)
-    pub min_out: i128,     // original wanted amount (limit terms)
-    pub remaining_in: i128, // locked asset_in still held (decreases as the order fills)
-    pub output_owner_tag: BytesN<32>, // proceeds + IOC/prune return destination
-    pub cancel_owner_tag: BytesN<32>, // cancel authority (cancel proof must know its secret)
-    pub order_leaf: BytesN<32>,       // identity; the cancel proof references this
-    pub expiry: u64,                  // validity deadline (unix seconds)
-    pub partial_allowed: bool,        // may this order be partially filled
 }
 
 /// A canonical trading pair. Orders are always specified base/quote in this orientation
@@ -305,7 +296,12 @@ impl Settlement {
         let _ = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
         env.storage().persistent().set(&DataKey::Vk(LIFT_OP), &vk_bytes);
         env.storage().instance().set(&DataKey::Admin, &admin);
-        tree_init(&env, &Hasher::new(&env));
+        let h = Hasher::new(&env);
+        tree_init(&env, &h, TreeId::Note);
+        tree_init(&env, &h, TreeId::Order);
+        // Nullifier accumulator starts at the empty-IMT genesis root (single {0,0,0} leaf).
+        let nf_genesis = imt_genesis_root(&env, &h);
+        env.storage().persistent().set(&DataKey::NullifierRoot, &nf_genesis);
         bump(&env, &DataKey::Vk(LIFT_OP));
         bump_core(&env); // instance + tree singletons to max from the start
         Ok(())
@@ -321,13 +317,7 @@ impl Settlement {
         Ok(())
     }
 
-    /// Read a book side (price-sorted, best first). Read-only view for clients/matchers; `side` is
-    /// 0 = BUY, 1 = SELL.
-    pub fn book(env: Env, pair_id: u32, side: u32) -> Vec<OrderEntry> {
-        book_load(&env, pair_id, side)
-    }
-
-    /// Current on-chain Merkle tree root (the latest; any past root stays accepted too).
+    /// Current note-commitment tree root (the latest; any past root stays accepted too).
     pub fn root(env: Env) -> BytesN<32> {
         let r: U256 = env
             .storage()
@@ -335,6 +325,22 @@ impl Settlement {
             .get(&DataKey::TreeRoot)
             .expect("tree initialized at construction");
         u256_to_bytesn(&env, &r)
+    }
+
+    /// Current order-commitment tree root (the latest; any past root stays accepted too).
+    pub fn order_root(env: Env) -> BytesN<32> {
+        let r: U256 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::OrderTreeRoot)
+            .expect("order tree initialized at construction");
+        u256_to_bytesn(&env, &r)
+    }
+
+    /// Current nullifier accumulator (IMT) root. Only this exact root is valid as a spend's
+    /// `nullifier_root_in`; each spend CAS-advances it.
+    pub fn nullifier_root(env: Env) -> BytesN<32> {
+        u256_to_bytesn(&env, &nullifier_root(&env))
     }
 
     /// Map a supported asset id to its real Soroban token contract. Admin-gated; assets are not
@@ -419,7 +425,7 @@ impl Settlement {
         // membership paths (the tree stores only filled subtrees, not all leaves).
         let h = Hasher::new(&env);
         let leaf = asset_note_leaf(&env, &h, asset_id, amount, &owner_tag);
-        tree_insert(&env, &h, &leaf);
+        tree_insert(&env, &h, TreeId::Note, &leaf);
         Shielded { asset_id, amount, owner_tag }.publish(&env);
         bump_core(&env);
         Ok(())
@@ -567,151 +573,115 @@ impl Settlement {
         // Mint the AssetNote into the on-chain tree, byte-identical to a native shield's leaf.
         let h = Hasher::new(&env);
         let leaf = asset_note_leaf(&env, &h, asset_id, amount, &owner_tag);
-        tree_insert(&env, &h, &leaf);
+        tree_insert(&env, &h, TreeId::Note, &leaf);
         Shielded { asset_id, amount, owner_tag }.publish(&env);
         bump_core(&env);
         Ok(())
     }
 
-    /// Settle: an atomic two-sided trade in one transaction. The caller (an off-chain matcher)
-    /// supplies both parties' order proofs. The contract verifies both, derives each order entirely
-    /// from its verified public inputs (nothing the caller passes is trusted), checks they cross,
-    /// records both nullifiers, and emits the proceeds descriptors stamped with each order's bound
-    /// `output_owner_tag`. No on-chain order entries; no caller-supplied output commitments.
-    pub fn settle(
-        env: Env,
-        proof_a: Bytes,
-        public_inputs_a: Bytes,
-        proof_b: Bytes,
-        public_inputs_b: Bytes,
-    ) -> Result<(), Error> {
-        // Verify BOTH order proofs (~80M each; ~160M total fits the 400M per-tx budget).
-        Self::verify_proof(&env, LIFT_OP, &proof_a, &public_inputs_a, LIFT_PUBLIC_INPUTS_BYTES)?;
-        Self::verify_proof(&env, LIFT_OP, &proof_b, &public_inputs_b, LIFT_PUBLIC_INPUTS_BYTES)?;
-
-        // Derive each side from its verified public inputs (domain + published-root checked here).
-        let a = parse_order(&env, &public_inputs_a)?;
-        let b = parse_order(&env, &public_inputs_b)?;
-
-        // Assets must cross: A offers what B wants and vice versa.
-        if a.asset_in != b.asset_out || a.asset_out != b.asset_in {
-            return Err(Error::NotCompatible);
-        }
-        // Full-fill v1: each side receives the other's offered amount; both limits must be met.
-        // A receives b.amount_in of a.asset_out; B receives a.amount_in of b.asset_out.
-        if a.amount_in < b.min_out || b.amount_in < a.min_out {
-            return Err(Error::NotCompatible);
-        }
-        // The two sides must be distinct notes (cannot cross a note against itself).
-        if a.nullifier == b.nullifier {
-            return Err(Error::NotCompatible);
-        }
-
-        // Both consumed notes must be unspent; record both nullifiers atomically before outputs.
-        let ka = DataKey::Nullifier(a.nullifier.clone());
-        let kb = DataKey::Nullifier(b.nullifier.clone());
-        if env.storage().persistent().has(&ka) || env.storage().persistent().has(&kb) {
-            return Err(Error::NullifierUsed);
-        }
-        env.storage().persistent().set(&ka, &true);
-        env.storage().persistent().set(&kb, &true);
-        bump(&env, &ka);
-        bump(&env, &kb);
-
-        // Proceeds: mint each side's asset note (asset_out, fill_amount, output_owner_tag) into the
-        // on-chain tree, stamped from the bound tags. A receives b.amount_in of a.asset_out; B
-        // receives a.amount_in of b.asset_out. The leaves are computed on-chain so the tree stays
-        // canonical; the event lets the off-chain client rebuild paths.
+    /// Place an order into the off-chain-matched book. Verifies the lift proof (which also proves
+    /// the note-spend nullifier's IMT non-membership + insert), CAS-advances the nullifier
+    /// accumulator, and appends the bound `order_leaf` to the order-commitment tree. Relayer-
+    /// submittable (the proof is the spend authority). There is NO on-chain matching here - a
+    /// separate permissionless `settle_match` crosses resting orders. Order terms/tags come only
+    /// from the verified public inputs; nothing the caller passes is trusted.
+    pub fn place_order(env: Env, proof: Bytes, public_inputs: Bytes) -> Result<(), Error> {
+        Self::verify_proof(&env, LIFT_OP, &proof, &public_inputs, LIFT_PUBLIC_INPUTS_BYTES)?;
+        // Checks lift domain + published note_root, parses the bound order terms.
+        let order = parse_order(&env, &public_inputs)?;
+        // The order must name a registered canonical pair (reject unknown pairs early).
+        let _ = pair_and_side(&env, order.asset_in, order.asset_out)?;
+        // Advance the nullifier accumulator: [2] root_in must be current, [3] root_out becomes current.
+        let nf_in = BytesN::from_array(&env, &read_word(&public_inputs, 64));
+        let nf_out = BytesN::from_array(&env, &read_word(&public_inputs, 96));
+        advance_nullifier_root(&env, &nf_in, &nf_out)?;
+        NullifierSpent { nullifier: order.nullifier.clone() }.publish(&env);
+        // Rest the order: append its leaf to the order tree.
         let h = Hasher::new(&env);
-        let leaf_a = asset_note_leaf(&env, &h, a.asset_out, b.amount_in, &a.output_owner_tag);
-        let leaf_b = asset_note_leaf(&env, &h, b.asset_out, a.amount_in, &b.output_owner_tag);
-        tree_insert(&env, &h, &leaf_a);
-        tree_insert(&env, &h, &leaf_b);
-
-        Settled {
-            a_asset_out: a.asset_out,
-            b_amount_in: b.amount_in,
-            a_output_owner_tag: a.output_owner_tag.clone(),
-            b_asset_out: b.asset_out,
-            a_amount_in: a.amount_in,
-            b_output_owner_tag: b.output_owner_tag.clone(),
-        }
-        .publish(&env);
+        order_insert(&env, &h, &order.order_leaf);
         bump_core(&env);
         Ok(())
     }
 
-    /// Settle two orders that are EXACT reverses of each other, in one atomic transaction. This is
-    /// the strict-equality sibling of `settle`: where `settle` accepts any crossing pair (limits met
-    /// with `>=`), `settle_exact` requires each side to receive precisely what the other offered —
-    /// `a.amount_in == b.min_out && b.amount_in == a.min_out` — so there is no surplus and no partial
-    /// execution. Both assets must form a registered canonical pair, and the two sides must sit on
-    /// opposite sides of it. Like `settle`, both proofs are verified, both orders are derived purely
-    /// from their verified public inputs, both nullifiers are recorded, and the proceeds are minted
-    /// into the tree from the bound `output_owner_tag`s.
-    pub fn settle_exact(
-        env: Env,
-        proof_a: Bytes,
-        public_inputs_a: Bytes,
-        proof_b: Bytes,
-        public_inputs_b: Bytes,
-    ) -> Result<(), Error> {
-        Self::verify_proof(&env, LIFT_OP, &proof_a, &public_inputs_a, LIFT_PUBLIC_INPUTS_BYTES)?;
-        Self::verify_proof(&env, LIFT_OP, &proof_b, &public_inputs_b, LIFT_PUBLIC_INPUTS_BYTES)?;
-
-        let a = parse_order(&env, &public_inputs_a)?;
-        let b = parse_order(&env, &public_inputs_b)?;
-
-        // Assets must cross AND form a registered canonical pair on opposite sides.
-        let (pair_a, side_a) = pair_and_side(&env, a.asset_in, a.asset_out)?;
-        let (pair_b, side_b) = pair_and_side(&env, b.asset_in, b.asset_out)?;
-        if pair_a != pair_b || side_a == side_b {
-            return Err(Error::NotCompatible);
+    /// Settle a match produced off-chain (permissionless). One match proof crosses 1 taker against up
+    /// to 3 makers on one registered pair, minting up to 4 proceeds asset-notes (one per filled
+    /// owner) and re-resting up to 1 remainder order. The proof binds the order-tree root the matched
+    /// orders are members of, the nullifier-accumulator transition that consumes them, and every
+    /// output leaf - so the contract only checks roots/time and inserts the bound leaves (matching
+    /// trust lives in the verified circuit, not here). First valid match for the current accumulator
+    /// root wins; a stale `nullifier_root_in` reverts cheaply. Outputs come only from verified PI.
+    pub fn settle_match(env: Env, proof: Bytes, public_inputs: Bytes) -> Result<(), Error> {
+        Self::verify_proof(&env, MATCH_OP, &proof, &public_inputs, MATCH_PUBLIC_INPUTS_BYTES)?;
+        // [0] domain separator.
+        if read_word(&public_inputs, 0) != MATCH_DOMAIN {
+            return Err(Error::BadPublicInputs);
         }
-        // Exact reverse: each side receives precisely what the other offered (no surplus, no partial).
-        if a.amount_in != b.min_out || b.amount_in != a.min_out {
-            return Err(Error::NotCompatible);
+        // [1] order_root must be an accepted order-tree root.
+        let order_root = BytesN::from_array(&env, &read_word(&public_inputs, 32));
+        if !tree_root_accepted(&env, TreeId::Order, &order_root) {
+            return Err(Error::UnknownRoot);
         }
-        // The two sides must be distinct notes (cannot cross a note against itself).
-        if a.nullifier == b.nullifier {
-            return Err(Error::NotCompatible);
+        // [4] now: the circuit asserts every matched order's expiry >= now; the contract binds now to
+        // recent ledger time (allowing a small skew for proof-build/inclusion drift) so a matcher
+        // cannot revive an expired order with a stale timestamp.
+        let now = word_to_u64(&read_word(&public_inputs, 128))?;
+        let current = env.ledger().timestamp();
+        let max_skew: u64 = 300;
+        if now > current || now + max_skew < current {
+            return Err(Error::OrderExpired);
         }
-
-        let ka = DataKey::Nullifier(a.nullifier.clone());
-        let kb = DataKey::Nullifier(b.nullifier.clone());
-        if env.storage().persistent().has(&ka) || env.storage().persistent().has(&kb) {
-            return Err(Error::NullifierUsed);
+        // [2],[3] CAS-advance the nullifier accumulator (consumption nullifiers proven in-circuit).
+        let nf_in = BytesN::from_array(&env, &read_word(&public_inputs, 64));
+        let nf_out = BytesN::from_array(&env, &read_word(&public_inputs, 96));
+        advance_nullifier_root(&env, &nf_in, &nf_out)?;
+        // [5..9] announce each consumed order nullifier for the indexer (0 = unused slot).
+        let zero32 = BytesN::from_array(&env, &[0u8; 32]);
+        let mut s = 5u32;
+        while s < 9 {
+            let nf = BytesN::from_array(&env, &read_word(&public_inputs, s * 32));
+            if nf != zero32 {
+                NullifierSpent { nullifier: nf }.publish(&env);
+            }
+            s += 1;
         }
-        env.storage().persistent().set(&ka, &true);
-        env.storage().persistent().set(&kb, &true);
-        bump(&env, &ka);
-        bump(&env, &kb);
-
+        // [9..25] four proceeds slots {live, asset, amount, note_owner_tag}; mint the live ones.
         let h = Hasher::new(&env);
-        let leaf_a = asset_note_leaf(&env, &h, a.asset_out, b.amount_in, &a.output_owner_tag);
-        let leaf_b = asset_note_leaf(&env, &h, b.asset_out, a.amount_in, &b.output_owner_tag);
-        tree_insert(&env, &h, &leaf_a);
-        tree_insert(&env, &h, &leaf_b);
-
-        Settled {
-            a_asset_out: a.asset_out,
-            b_amount_in: b.amount_in,
-            a_output_owner_tag: a.output_owner_tag.clone(),
-            b_asset_out: b.asset_out,
-            a_amount_in: a.amount_in,
-            b_output_owner_tag: b.output_owner_tag.clone(),
+        let mut p = 0u32;
+        while p < 4 {
+            let base = (9 + p * 4) * 32;
+            match word_to_u32(&read_word(&public_inputs, base))? {
+                0 => {}
+                1 => {
+                    let asset = word_to_u32(&read_word(&public_inputs, base + 32))?;
+                    let amount = word_to_i128(&read_word(&public_inputs, base + 64))?;
+                    let tag = BytesN::from_array(&env, &read_word(&public_inputs, base + 96));
+                    mint_note(&env, &h, asset, amount, &tag);
+                }
+                _ => return Err(Error::BadPublicInputs),
+            }
+            p += 1;
         }
-        .publish(&env);
+        // [25],[26] remainder order: re-rest if live.
+        match word_to_u32(&read_word(&public_inputs, 25 * 32))? {
+            0 => {}
+            1 => {
+                let rem_leaf = BytesN::from_array(&env, &read_word(&public_inputs, 26 * 32));
+                order_insert(&env, &h, &rem_leaf);
+            }
+            _ => return Err(Error::BadPublicInputs),
+        }
+        Matched { nullifier_root_out: nf_out }.publish(&env);
         bump_core(&env);
         Ok(())
     }
 
     /// Unshield: spend an asset note with a proof and transfer the real token out to `to`.
-    /// The proof binds the withdrawal recipient (public input [5] == sha256-derived field of `to`),
+    /// The proof binds the withdrawal recipient (public input [7] == sha256-derived field of `to`),
     /// so a relayer can submit this without being able to redirect the funds. No caller auth is
     /// needed: the proof is the spend authority and the recipient is fixed by the proof.
     ///
-    /// Public inputs: [0] domain [1] root [2] nullifier [3] asset [4] amount [5] recipient.
+    /// Public inputs: [0] domain [1] note_root [2] nf_root_in [3] nf_root_out [4] nullifier
+    /// [5] asset [6] amount [7] recipient.
     pub fn unshield(
         env: Env,
         to: Address,
@@ -730,25 +700,21 @@ impl Settlement {
         if read_word(&public_inputs, 0) != UNSHIELD_DOMAIN {
             return Err(Error::BadPublicInputs);
         }
-        // [1] root must be a published root.
+        // [1] note_root must be a published note-tree root.
         let root = BytesN::from_array(&env, &read_word(&public_inputs, 32));
-        if !env.storage().persistent().has(&DataKey::Root(root)) {
+        if !tree_root_accepted(&env, TreeId::Note, &root) {
             return Err(Error::UnknownRoot);
         }
-        // [2] nullifier of the spent asset note: must be unused.
-        let nullifier = BytesN::from_array(&env, &read_word(&public_inputs, 64));
-        let nf_key = DataKey::Nullifier(nullifier.clone());
-        if env.storage().persistent().has(&nf_key) {
-            return Err(Error::NullifierUsed);
-        }
-        // [3..5] withdrawal terms.
-        let asset = word_to_u32(&read_word(&public_inputs, 96))?;
-        let amount = word_to_i128(&read_word(&public_inputs, 128))?;
+        // [4] nullifier of the spent note (announced for the indexer; consumed via the IMT below).
+        let nullifier = BytesN::from_array(&env, &read_word(&public_inputs, 128));
+        // [5,6] withdrawal terms.
+        let asset = word_to_u32(&read_word(&public_inputs, 160))?;
+        let amount = word_to_i128(&read_word(&public_inputs, 192))?;
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        // [5] recipient binding: the proof must commit to exactly this payout address.
-        if read_word(&public_inputs, 160) != recipient_field(&env, &to) {
+        // [7] recipient binding: the proof must commit to exactly this payout address.
+        if read_word(&public_inputs, 224) != recipient_field(&env, &to) {
             return Err(Error::RecipientMismatch);
         }
 
@@ -758,10 +724,12 @@ impl Settlement {
             .get(&DataKey::Asset(asset))
             .ok_or(Error::AssetNotRegistered)?;
 
-        // Record the nullifier BEFORE paying out (single-use; spend cannot be replayed), then
-        // transfer the public amount of the real token to the proof-bound recipient.
-        env.storage().persistent().set(&nf_key, &true);
-        bump(&env, &nf_key);
+        // [2],[3] CAS-advance the nullifier accumulator BEFORE paying out (the non-membership +
+        // insert was proven in-circuit; this single-use guard cannot be replayed). Then transfer.
+        let nf_in = BytesN::from_array(&env, &read_word(&public_inputs, 64));
+        let nf_out = BytesN::from_array(&env, &read_word(&public_inputs, 96));
+        advance_nullifier_root(&env, &nf_in, &nf_out)?;
+        NullifierSpent { nullifier: nullifier.clone() }.publish(&env);
         TokenClient::new(&env, &token).transfer(&env.current_contract_address(), &to, &amount);
 
         Unshielded { asset, amount, nullifier }.publish(&env);
@@ -776,11 +744,15 @@ impl Settlement {
     /// proof is the spend authority, exactly like `unshield`/`submit_order`).
     ///
     /// The proof (circuits/join) guarantees: both consumed notes are owned by one secret, are in the
-    /// tree at the published `root`, expose the two nullifiers, every amount is bounded, and value is
-    /// conserved (`amount_1 + amount_2 == out_amount_1 + out_amount_2`, one asset). The contract
-    /// therefore never sees the input amounts: it records both nullifiers (single-use, must be
-    /// distinct + unused) and mints exactly the two bound output leaves. A zero-amount output mints
-    /// nothing (so this also serves as a plain 2->1 merge).
+    /// note tree at the published `note_root`, expose the two nullifiers, every amount is bounded, and
+    /// value is conserved (`amount_1 + amount_2 == out_amount_1 + out_amount_2`, one asset). It also
+    /// proves the IMT transition that consumes the nullifier(s) - the second insert is gated on the
+    /// second input being real, and a null second input pins `nullifier_2 == 0`. The contract never
+    /// sees the input amounts: it CAS-advances the accumulator and mints the two bound output leaves
+    /// (a zero-amount output mints nothing, so this also serves as a plain 2->1 merge).
+    ///
+    /// Public inputs: [0] domain [1] note_root [2] nf_root_in [3] nf_root_out [4] nullifier_1
+    /// [5] nullifier_2 [6] asset [7] out_tag_1 [8] out_amount_1 [9] out_tag_2 [10] out_amount_2.
     pub fn join(env: Env, proof: Bytes, public_inputs: Bytes) -> Result<(), Error> {
         Self::verify_proof(&env, JOIN_OP, &proof, &public_inputs, JOIN_PUBLIC_INPUTS_BYTES)?;
 
@@ -788,36 +760,31 @@ impl Settlement {
         if read_word(&public_inputs, 0) != JOIN_DOMAIN {
             return Err(Error::BadPublicInputs);
         }
-        // [1] root must be a published root.
+        // [1] note_root must be a published note-tree root.
         let root = BytesN::from_array(&env, &read_word(&public_inputs, 32));
-        if !env.storage().persistent().has(&DataKey::Root(root)) {
+        if !tree_root_accepted(&env, TreeId::Note, &root) {
             return Err(Error::UnknownRoot);
         }
-        // [2],[3] the two consumed-note nullifiers: must be distinct and both unused. Distinctness
-        // matters because the has/set below is idempotent on equal keys — without this check a
-        // single note could be passed twice and counted as two inputs (cf. `settle`).
-        let nf1 = BytesN::from_array(&env, &read_word(&public_inputs, 64));
-        let nf2 = BytesN::from_array(&env, &read_word(&public_inputs, 96));
-        if nf1 == nf2 {
-            return Err(Error::NotCompatible);
-        }
-        let k1 = DataKey::Nullifier(nf1.clone());
-        let k2 = DataKey::Nullifier(nf2.clone());
-        if env.storage().persistent().has(&k1) || env.storage().persistent().has(&k2) {
-            return Err(Error::NullifierUsed);
-        }
-        // [4] asset (shared by inputs + outputs), [5..9] the two output notes the proof bound.
-        let asset = word_to_u32(&read_word(&public_inputs, 128))?;
-        let out_tag_1 = BytesN::from_array(&env, &read_word(&public_inputs, 160));
-        let out_amount_1 = word_to_i128(&read_word(&public_inputs, 192))?;
-        let out_tag_2 = BytesN::from_array(&env, &read_word(&public_inputs, 224));
-        let out_amount_2 = word_to_i128(&read_word(&public_inputs, 256))?;
+        // [4],[5] the consumed-note nullifiers (announced for the indexer; nf2 == 0 means the second
+        // input was a null padding note). Double-spend is prevented by the in-circuit IMT insert.
+        let nf1 = BytesN::from_array(&env, &read_word(&public_inputs, 128));
+        let nf2 = BytesN::from_array(&env, &read_word(&public_inputs, 160));
+        // [6] asset (shared by inputs + outputs), [7..11] the two output notes the proof bound.
+        let asset = word_to_u32(&read_word(&public_inputs, 192))?;
+        let out_tag_1 = BytesN::from_array(&env, &read_word(&public_inputs, 224));
+        let out_amount_1 = word_to_i128(&read_word(&public_inputs, 256))?;
+        let out_tag_2 = BytesN::from_array(&env, &read_word(&public_inputs, 288));
+        let out_amount_2 = word_to_i128(&read_word(&public_inputs, 320))?;
 
-        // Record both nullifiers BEFORE minting (single-use spend authority; cannot be replayed).
-        env.storage().persistent().set(&k1, &true);
-        env.storage().persistent().set(&k2, &true);
-        bump(&env, &k1);
-        bump(&env, &k2);
+        // [2],[3] CAS-advance the nullifier accumulator BEFORE minting (single-use; proven in-circuit).
+        let nf_in = BytesN::from_array(&env, &read_word(&public_inputs, 64));
+        let nf_out = BytesN::from_array(&env, &read_word(&public_inputs, 96));
+        advance_nullifier_root(&env, &nf_in, &nf_out)?;
+        NullifierSpent { nullifier: nf1.clone() }.publish(&env);
+        let zero32 = BytesN::from_array(&env, &[0u8; 32]);
+        if nf2 != zero32 {
+            NullifierSpent { nullifier: nf2.clone() }.publish(&env);
+        }
 
         // Mint the two fresh asset notes into the tree. Value conservation is guaranteed by the
         // proof, so the contract simply mints the bound amounts; `mint_note` no-ops a zero output.
@@ -830,210 +797,53 @@ impl Settlement {
         Ok(())
     }
 
-    /// Submit an order to the on-chain book. Relayer-submittable (no caller auth: the lift proof is
-    /// the spend authority, exactly like `unshield`). The proof locks the order's input note
-    /// (records its nullifier). The incoming order is the *taker*: it is matched against the best
-    /// opposing resting orders (price-time priority), executing at each maker's limit price in exact
-    /// integer "lots" (the maker's reduced price ratio), honoring both orders' `partial_allowed`
-    /// flags, minting proceeds notes per fill. Capped at `MAX_FILLS_PER_SUBMIT`. The unfilled
-    /// remainder then rests (if `partial_allowed` and a slot is free) or is returned as a note (IOC).
-    /// A taker that forbids partial execution and cannot fully fill reverts the whole transaction.
-    pub fn submit_order(env: Env, proof: Bytes, public_inputs: Bytes) -> Result<(), Error> {
-        Self::verify_proof(&env, LIFT_OP, &proof, &public_inputs, LIFT_PUBLIC_INPUTS_BYTES)?;
-        let taker = parse_order(&env, &public_inputs)?; // checks lift domain + published root
-        if taker.amount_in <= 0 || taker.min_out <= 0 {
-            return Err(Error::InvalidAmount);
+    /// Cancel a resting order and return its locked funds (permissionless / relayer-submittable). The
+    /// cancel proof proves (a) the order is a member of an accepted order-tree root, (b) knowledge of
+    /// the secret behind its `cancel_owner_tag`, and (c) the order-consumption nullifier's IMT
+    /// non-membership + insert - so cancelling and matching race for the same order and whichever
+    /// lands first blocks the other. The contract checks the order root, CAS-advances the nullifier
+    /// accumulator, and mints the bound return note. Nothing the caller passes is trusted.
+    ///
+    /// Public inputs: [0] domain [1] order_root [2] nf_root_in [3] nf_root_out [4] order_nullifier
+    /// [5] asset_in [6] amount_in [7] return_owner_tag.
+    pub fn cancel_order(env: Env, proof: Bytes, public_inputs: Bytes) -> Result<(), Error> {
+        Self::verify_proof(&env, CANCEL_OP, &proof, &public_inputs, CANCEL_PUBLIC_INPUTS_BYTES)?;
+        // [0] domain.
+        if read_word(&public_inputs, 0) != CANCEL_DOMAIN {
+            return Err(Error::BadPublicInputs);
         }
-        let now = env.ledger().timestamp();
-        if taker.expiry < now {
-            return Err(Error::OrderExpired);
+        // [1] order_root must be an accepted order-tree root.
+        let order_root = BytesN::from_array(&env, &read_word(&public_inputs, 32));
+        if !tree_root_accepted(&env, TreeId::Order, &order_root) {
+            return Err(Error::UnknownRoot);
         }
-        // Lock the taker's input note before any output (single-use spend authority).
-        let nf = DataKey::Nullifier(taker.nullifier.clone());
-        if env.storage().persistent().has(&nf) {
-            return Err(Error::NullifierUsed);
-        }
-        env.storage().persistent().set(&nf, &true);
-        bump(&env, &nf);
+        // [4] order-consumption nullifier (announced for the indexer; consumed via the IMT below).
+        let order_nullifier = BytesN::from_array(&env, &read_word(&public_inputs, 128));
+        // [5,6] the order's locked asset + amount, [7] return destination.
+        let asset_in = word_to_u32(&read_word(&public_inputs, 160))?;
+        let amount_in = word_to_i128(&read_word(&public_inputs, 192))?;
+        let return_owner_tag = BytesN::from_array(&env, &read_word(&public_inputs, 224));
 
-        let (pair_id, taker_side) = pair_and_side(&env, taker.asset_in, taker.asset_out)?;
-        let pair: PairDef = env.storage().persistent().get(&DataKey::Pair(pair_id)).unwrap();
+        // [2],[3] CAS-advance the accumulator: an order can be matched OR cancelled exactly once.
+        let nf_in = BytesN::from_array(&env, &read_word(&public_inputs, 64));
+        let nf_out = BytesN::from_array(&env, &read_word(&public_inputs, 96));
+        advance_nullifier_root(&env, &nf_in, &nf_out)?;
+        NullifierSpent { nullifier: order_nullifier }.publish(&env);
+
+        // Return the order's locked funds to the bound destination.
         let h = Hasher::new(&env);
-
-        let maker_is_sell = matches!(taker_side, Side::Buy); // maker sits on the opposite side
-        let opp_u = if maker_is_sell { SIDE_SELL } else { SIDE_BUY };
-        let mut book = book_load(&env, pair_id, opp_u);
-
-        let mut remaining_in = taker.amount_in;
-        let mut filled_out = 0i128; // total asset_out the taker receives across all fills
-        let mut fills = 0u32;
-        let mut i = 0u32;
-        while i < book.len() && fills < MAX_FILLS_PER_SUBMIT && remaining_in > 0 {
-            let mut maker = book.get(i).unwrap();
-            if maker.expiry < now {
-                i += 1; // expired: skip (prune_expired returns its funds); leave it resting
-                continue;
-            }
-            // Price cross: once the best opposing maker doesn't cross, none further will (sorted).
-            if !cross_amounts(&env, maker.amount_in, maker.min_out, taker.amount_in, taker.min_out) {
-                break;
-            }
-            let (k_maker, k_taker, base_lot, quote_lot) =
-                compute_lots(maker_is_sell, maker.amount_in, maker.min_out, maker.remaining_in, remaining_in);
-            if k_taker == 0 {
-                break; // taker cannot afford even one lot of the best remaining maker
-            }
-            if k_maker == 0 {
-                i += 1; // maker has sub-lot dust remaining; skip it
-                continue;
-            }
-            if !maker.partial_allowed && k_taker < k_maker {
-                i += 1; // maker forbids partial fills and the taker cannot consume it whole; skip
-                continue;
-            }
-            let k = if k_maker < k_taker { k_maker } else { k_taker };
-            let f_base = k * base_lot;
-            let q_quote = k * quote_lot;
-            if maker_is_sell {
-                // maker gives base -> taker; taker gives quote -> maker
-                mint_note(&env, &h, pair.base_asset, f_base, &taker.output_owner_tag);
-                mint_note(&env, &h, pair.quote_asset, q_quote, &maker.output_owner_tag);
-                maker.remaining_in -= f_base;
-                remaining_in -= q_quote;
-                filled_out += f_base; // taker (BUY) receives base
-            } else {
-                // maker gives quote -> taker; taker gives base -> maker
-                mint_note(&env, &h, pair.quote_asset, q_quote, &taker.output_owner_tag);
-                mint_note(&env, &h, pair.base_asset, f_base, &maker.output_owner_tag);
-                maker.remaining_in -= q_quote;
-                remaining_in -= f_base;
-                filled_out += q_quote; // taker (SELL) receives quote
-            }
-            fills += 1;
-            if maker.remaining_in == 0 {
-                book.remove(i); // consumed; next maker shifts into i (do not advance)
-            } else {
-                book.set(i, maker); // partially filled => taker is now exhausted; loop will end
-            }
-        }
-        book_store(&env, pair_id, opp_u, &book);
-
-        // If the order crossed, summarize the taker's trade in a single event so clients can show
-        // "your order matched" with concrete amounts/currencies: `in` = asset_in spent on fills,
-        // `out` = asset_out received. The per-note `noteins` mints still drive tree reconstruction;
-        // this event is purely informational (indexers ignore unknown topics).
-        let filled_in = taker.amount_in - remaining_in;
-        if filled_in > 0 {
-            Filled {
-                asset_in: taker.asset_in,
-                amount_in: filled_in,
-                asset_out: taker.asset_out,
-                amount_out: filled_out,
-                output_owner_tag: taker.output_owner_tag.clone(),
-            }
-            .publish(&env);
-        }
-
-        // Rest or IOC-return the taker's remainder.
-        if remaining_in > 0 {
-            if !taker.partial_allowed {
-                return Err(Error::NotPartialAllowed); // fill-or-kill: revert the whole tx
-            }
-            let taker_u = side_to_u32(taker_side);
-            let mut myside = book_load(&env, pair_id, taker_u);
-            if myside.len() < BOOK_CAPACITY {
-                let entry = OrderEntry {
-                    amount_in: taker.amount_in,
-                    min_out: taker.min_out,
-                    remaining_in,
-                    output_owner_tag: taker.output_owner_tag.clone(),
-                    cancel_owner_tag: taker.cancel_owner_tag.clone(),
-                    order_leaf: taker.order_leaf.clone(),
-                    expiry: taker.expiry,
-                    partial_allowed: taker.partial_allowed,
-                };
-                book_insert_sorted(&env, &mut myside, entry, taker_u);
-                book_store(&env, pair_id, taker_u, &myside);
-            } else {
-                // Book full: immediate-or-cancel the remainder back to the order's destination.
-                mint_note(&env, &h, taker.asset_in, remaining_in, &taker.output_owner_tag);
-            }
-        }
+        mint_note(&env, &h, asset_in, amount_in, &return_owner_tag);
         bump_core(&env);
         Ok(())
     }
 
-    /// Cancel a resting order and return its remaining locked funds. Relayer-submittable: the cancel
-    /// proof proves knowledge of the order's `cancel_owner_tag` secret and binds both the order being
-    /// cancelled (`order_leaf`) and the return destination (`return_owner_tag`), so no caller auth is
-    /// needed and a relayer cannot retarget the funds. `pair_id`/`side` locate the book (a wrong hint
-    /// simply fails to find the entry). Removing the entry is the single-use guard against replay.
-    pub fn cancel_order(
-        env: Env,
-        pair_id: u32,
-        side: u32,
-        proof: Bytes,
-        public_inputs: Bytes,
-    ) -> Result<(), Error> {
-        Self::verify_proof(&env, CANCEL_OP, &proof, &public_inputs, CANCEL_PUBLIC_INPUTS_BYTES)?;
-        if read_word(&public_inputs, 0) != CANCEL_DOMAIN {
-            return Err(Error::BadPublicInputs);
-        }
-        let order_leaf = BytesN::from_array(&env, &read_word(&public_inputs, 32));
-        let cancel_owner_tag = BytesN::from_array(&env, &read_word(&public_inputs, 64));
-        let return_owner_tag = BytesN::from_array(&env, &read_word(&public_inputs, 96));
-
-        let (asset_in, _asset_out) = side_assets(&env, pair_id, side)?;
-        let mut book = book_load(&env, pair_id, side);
-        let mut i = 0u32;
-        while i < book.len() {
-            let e = book.get(i).unwrap();
-            if e.order_leaf == order_leaf && e.cancel_owner_tag == cancel_owner_tag {
-                let h = Hasher::new(&env);
-                mint_note(&env, &h, asset_in, e.remaining_in, &return_owner_tag);
-                book.remove(i);
-                book_store(&env, pair_id, side, &book);
-                bump_core(&env);
-                return Ok(());
-            }
-            i += 1;
-        }
-        Err(Error::OrderNotFound)
-    }
-
-    /// Permissionlessly remove expired resting orders from a book side, returning each one's locked
-    /// funds to its own bound `output_owner_tag`. Safe to be open to anyone: the destination is fixed
-    /// by the order (set by its maker), not by the caller. `max` bounds the work per call.
-    pub fn prune_expired(env: Env, pair_id: u32, side: u32, max: u32) -> Result<u32, Error> {
-        let (asset_in, _asset_out) = side_assets(&env, pair_id, side)?;
-        let now = env.ledger().timestamp();
-        let h = Hasher::new(&env);
-        let mut book = book_load(&env, pair_id, side);
-        let mut removed = 0u32;
-        let mut i = 0u32;
-        while i < book.len() && removed < max {
-            let e = book.get(i).unwrap();
-            if e.expiry < now {
-                mint_note(&env, &h, asset_in, e.remaining_in, &e.output_owner_tag);
-                book.remove(i); // next shifts into i
-                removed += 1;
-            } else {
-                i += 1;
-            }
-        }
-        if removed > 0 {
-            book_store(&env, pair_id, side, &book);
-        }
-        bump_core(&env);
-        Ok(removed)
-    }
 
     /// Permissionless storage heartbeat. Extends the TTL of all the BOUNDED structural state to the
-    /// network maximum: the contract instance, the incremental-tree singletons + current root, the
-    /// pair registry, and every pair's book sides. A keeper calls this periodically so nothing ever
-    /// archives in practice. (Unbounded sets — historical roots and nullifiers — are bumped on write
-    /// and can be refreshed individually via `keep_alive_keys`; archived entries remain restorable by
-    /// anyone, so funds can never be lost regardless.)
+    /// network maximum: the contract instance, both incremental-tree singletons + their current
+    /// roots, the nullifier accumulator root, and the pair registry. A keeper calls this periodically
+    /// so nothing ever archives in practice. (Unbounded sets - historical note/order roots - are
+    /// bumped on write and can be refreshed individually via `keep_alive_keys`; archived entries
+    /// remain restorable by anyone, so funds can never be lost regardless.)
     pub fn keep_alive(env: Env) {
         bump_core(&env);
         if let Some(pc) = env.storage().persistent().get::<DataKey, u32>(&DataKey::PairCount) {
@@ -1041,31 +851,24 @@ impl Settlement {
             let mut i = 0u32;
             while i < pc {
                 bump(&env, &DataKey::Pair(i));
-                let bk = DataKey::Book(i, SIDE_BUY);
-                if env.storage().persistent().has(&bk) {
-                    bump(&env, &bk);
-                }
-                let sk = DataKey::Book(i, SIDE_SELL);
-                if env.storage().persistent().has(&sk) {
-                    bump(&env, &sk);
-                }
                 i += 1;
             }
         }
     }
 
-    /// Permissionless targeted heartbeat for the UNBOUNDED sets: extend specific nullifier and root
-    /// entries to the maximum TTL. Lets a keeper (or a user about to spend an old note / prove against
-    /// an old root) refresh exactly the entries they care about. Missing entries are skipped.
-    pub fn keep_alive_keys(env: Env, nullifiers: Vec<BytesN<32>>, roots: Vec<BytesN<32>>) {
-        for nf in nullifiers.iter() {
-            let k = DataKey::Nullifier(nf);
+    /// Permissionless targeted heartbeat for the UNBOUNDED root histories: extend specific note-tree
+    /// and order-tree root markers to the maximum TTL. Lets a keeper (or a user about to prove against
+    /// an old root) refresh exactly the entries they care about. The nullifier accumulator is a single
+    /// always-bumped root (covered by `bump_core`), so it needs no per-key refresh. Missing skipped.
+    pub fn keep_alive_keys(env: Env, note_roots: Vec<BytesN<32>>, order_roots: Vec<BytesN<32>>) {
+        for r in note_roots.iter() {
+            let k = DataKey::Root(r);
             if env.storage().persistent().has(&k) {
                 bump(&env, &k);
             }
         }
-        for r in roots.iter() {
-            let k = DataKey::Root(r);
+        for r in order_roots.iter() {
+            let k = DataKey::OrderRoot(r);
             if env.storage().persistent().has(&k) {
                 bump(&env, &k);
             }
@@ -1128,18 +931,28 @@ fn bump_instance(env: &Env) {
     env.storage().instance().extend_ttl(max, max);
 }
 
-/// Refresh the always-present hot state every state-changing call touches: the instance and the
-/// incremental Merkle tree singletons, plus the current root's membership marker. Cheap and bounded
-/// (≤5 TTL bumps) so it is safe even on `submit_order`'s worst-case path. Unbounded sets (historical
-/// roots, nullifiers, per-pair books) are bumped on write and by `keep_alive`, and stay restorable.
+/// Refresh the always-present hot state every state-changing call touches: the instance, both
+/// incremental-tree singletons + their current-root markers, and the nullifier accumulator root.
+/// Cheap and bounded so it is safe even on the worst-case path. Unbounded sets (historical note/order
+/// roots) are bumped on write and by `keep_alive`, and stay restorable.
 fn bump_core(env: &Env) {
     bump_instance(env);
     bump(env, &DataKey::TreeFilled);
     bump(env, &DataKey::TreeNext);
     bump(env, &DataKey::TreeRoot);
-    // Keep the latest root's set-membership marker live (proofs bind a published root).
+    bump(env, &DataKey::OrderTreeFilled);
+    bump(env, &DataKey::OrderTreeNext);
+    bump(env, &DataKey::OrderTreeRoot);
+    bump(env, &DataKey::NullifierRoot);
+    // Keep each tree's latest root marker live (proofs bind a published root).
     if let Some(r) = env.storage().persistent().get::<DataKey, U256>(&DataKey::TreeRoot) {
         let rk = DataKey::Root(u256_to_bytesn(env, &r));
+        if env.storage().persistent().has(&rk) {
+            bump(env, &rk);
+        }
+    }
+    if let Some(r) = env.storage().persistent().get::<DataKey, U256>(&DataKey::OrderTreeRoot) {
+        let rk = DataKey::OrderRoot(u256_to_bytesn(env, &r));
         if env.storage().persistent().has(&rk) {
             bump(env, &rk);
         }
@@ -1167,185 +980,49 @@ fn pair_and_side(env: &Env, asset_in: u32, asset_out: u32) -> Result<(u32, Side)
     Err(Error::PairNotRegistered)
 }
 
-/// Whether two opposite-side orders on the same pair cross (their limit prices overlap). With A the
-/// SELL side (offers `a.amount_in` base, wants at least `a.min_out` quote) and B the BUY side (offers
-/// `b.amount_in` quote, wants at least `b.min_out` base), A's floor price is `a.min_out / a.amount_in`
-/// (quote per base) and B's ceiling is `b.amount_in / b.min_out`. They cross iff
-/// `a.min_out/a.amount_in <= b.amount_in/b.min_out`, i.e. (cross-multiplied, all non-negative)
-/// `a.min_out * b.min_out <= a.amount_in * b.amount_in`. Each factor is `< 2^127`, so the products
-/// reach `~2^254` and must be computed in `U256` to avoid `i128` overflow. Caller must ensure the
-/// assets actually cross and the SELL/BUY orientation matches A/B.
-// Used by the Phase 2 matching engine; Phase 1 (`settle_exact`) uses strict equality directly.
-#[allow(dead_code)]
-fn orders_cross(env: &Env, a: &Order, b: &Order) -> bool {
-    cross_amounts(env, a.amount_in, a.min_out, b.amount_in, b.min_out)
-}
-
-/// Core crossing predicate on raw amounts: two opposite-side orders cross iff their limit prices
-/// overlap, i.e. `a.min_out * b.min_out <= a.amount_in * b.amount_in` (see `orders_cross`). Computed
-/// in `U256` because each factor is `< 2^127` and the products reach `~2^254`.
-fn cross_amounts(env: &Env, a_amount_in: i128, a_min_out: i128, b_amount_in: i128, b_min_out: i128) -> bool {
-    let lhs = U256::from_u128(env, a_min_out as u128).mul(&U256::from_u128(env, b_min_out as u128));
-    let rhs =
-        U256::from_u128(env, a_amount_in as u128).mul(&U256::from_u128(env, b_amount_in as u128));
-    lhs <= rhs
-}
-
-/// Greatest common divisor of two positive i128s (Euclid). Used to reduce a maker's price ratio
-/// `amount_in : min_out` to its lowest terms, which defines the integer "lot" a match trades in.
-fn gcd_i128(mut a: i128, mut b: i128) -> i128 {
-    while b != 0 {
-        let t = a % b;
-        a = b;
-        b = t;
-    }
-    a
-}
-
-/// Decompose a match against `maker` into whole lots of the maker's reduced price ratio, so the trade
-/// executes at EXACTLY the maker's limit price with no integer rounding (hence exact conservation).
-/// A "lot" is `base_lot` base for `quote_lot` quote, where `base_lot:quote_lot = amount_in:min_out`
-/// (maker SELL) or `min_out:amount_in` (maker BUY), reduced by their gcd. Returns how many lots the
-/// maker's remaining locked balance allows (`k_maker`) and how many the taker's allows (`k_taker`);
-/// the caller fills `min` of them (subject to the partial-execution flags). Requires positive amounts.
-fn compute_lots(
-    maker_is_sell: bool,
-    m_amount_in: i128,
-    m_min_out: i128,
-    m_remaining_in: i128,
-    taker_remaining_in: i128,
-) -> (i128, i128, i128, i128) {
-    let g = gcd_i128(m_amount_in, m_min_out);
-    let (base_lot, quote_lot) = if maker_is_sell {
-        (m_amount_in / g, m_min_out / g) // maker offers base, wants quote
-    } else {
-        (m_min_out / g, m_amount_in / g) // maker offers quote, wants base
-    };
-    // The maker's locked side is base (sell) or quote (buy); the taker's is the opposite.
-    let (maker_lot, taker_lot) = if maker_is_sell {
-        (base_lot, quote_lot)
-    } else {
-        (quote_lot, base_lot)
-    };
-    let k_maker = m_remaining_in / maker_lot;
-    let k_taker = taker_remaining_in / taker_lot;
-    (k_maker, k_taker, base_lot, quote_lot)
-}
-
-/// `Side` to its `DataKey::Book` discriminant.
-fn side_to_u32(side: Side) -> u32 {
-    match side {
-        Side::Buy => SIDE_BUY,
-        Side::Sell => SIDE_SELL,
-    }
-}
-
-/// The `(asset_in, asset_out)` an order on `(pair_id, side)` locks / receives. SELL gives base for
-/// quote; BUY gives quote for base. Errors if the pair is unregistered or `side` is not 0/1.
-fn side_assets(env: &Env, pair_id: u32, side: u32) -> Result<(u32, u32), Error> {
-    let pair: PairDef = env
-        .storage()
-        .persistent()
-        .get(&DataKey::Pair(pair_id))
-        .ok_or(Error::PairNotRegistered)?;
-    match side {
-        SIDE_SELL => Ok((pair.base_asset, pair.quote_asset)),
-        SIDE_BUY => Ok((pair.quote_asset, pair.base_asset)),
-        _ => Err(Error::PairNotRegistered),
-    }
-}
-
-/// Mint an asset note `(asset, amount, owner_tag)` into the on-chain tree and announce it so the
-/// off-chain indexer can rebuild its membership path. No-op for a zero amount. Single choke point for
-/// every payout the book makes (fill proceeds, cancel/prune/IOC returns) — see the conservation note
-/// on `OrderEntry`.
+/// Mint an asset note `(asset, amount, owner_tag)` into the note tree and announce it so the off-chain
+/// indexer can rebuild its membership path. No-op for a zero amount. Single choke point for every
+/// note payout (match proceeds, cancel returns). The `owner_tag` is the FINAL note tag (the per-note
+/// nonce is already folded in by the circuit/wallet), so the contract never handles nonces.
 fn mint_note(env: &Env, h: &Hasher, asset: u32, amount: i128, owner_tag: &BytesN<32>) {
     if amount <= 0 {
         return;
     }
     let leaf = asset_note_leaf(env, h, asset, amount, owner_tag);
-    tree_insert(env, h, &leaf);
+    tree_insert(env, h, TreeId::Note, &leaf);
     NoteInserted { asset, amount, owner_tag: owner_tag.clone() }.publish(env);
 }
 
-/// Load a book side (price-sorted, best first), or an empty vector if none yet.
-fn book_load(env: &Env, pair_id: u32, side: u32) -> Vec<OrderEntry> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::Book(pair_id, side))
-        .unwrap_or_else(|| Vec::new(env))
-}
-
-/// Persist a book side and keep it live.
-fn book_store(env: &Env, pair_id: u32, side: u32, book: &Vec<OrderEntry>) {
-    let key = DataKey::Book(pair_id, side);
-    env.storage().persistent().set(&key, book);
-    bump(env, &key);
-}
-
-/// Is order `a` strictly ahead of `b` in priority for `side`? Asks (SELL) rank by ascending price
-/// (lower `min_out/amount_in` first); bids (BUY) by descending price (higher `amount_in/min_out`
-/// first). Ratios compared by `U256` cross-multiplication. Equal prices are NOT "better", so a new
-/// order inserts after existing equal-price orders → price-then-time (FIFO) priority.
-fn entry_better(env: &Env, a: &OrderEntry, b: &OrderEntry, side: u32) -> bool {
-    if side == SIDE_SELL {
-        // a.min_out/a.amount_in < b.min_out/b.amount_in
-        let lhs = U256::from_u128(env, a.min_out as u128).mul(&U256::from_u128(env, b.amount_in as u128));
-        let rhs = U256::from_u128(env, b.min_out as u128).mul(&U256::from_u128(env, a.amount_in as u128));
-        lhs < rhs
-    } else {
-        // a.amount_in/a.min_out > b.amount_in/b.min_out
-        let lhs = U256::from_u128(env, a.amount_in as u128).mul(&U256::from_u128(env, b.min_out as u128));
-        let rhs = U256::from_u128(env, b.amount_in as u128).mul(&U256::from_u128(env, a.min_out as u128));
-        lhs > rhs
-    }
-}
-
-/// Insert `entry` into a price-sorted book side, preserving best-first + FIFO-on-tie ordering.
-fn book_insert_sorted(env: &Env, book: &mut Vec<OrderEntry>, entry: OrderEntry, side: u32) {
-    let mut pos = book.len();
-    let mut j = 0u32;
-    while j < book.len() {
-        if entry_better(env, &entry, &book.get(j).unwrap(), side) {
-            pos = j;
-            break;
-        }
-        j += 1;
-    }
-    book.insert(pos, entry);
-}
-
-/// Derive one order side from a VERIFIED order-proof public-input blob. Checks the lift domain
-/// separator and that the membership root is published; parses the order terms the proof bound.
-/// Caller must have verified the proof first.
+/// Derive an order from a VERIFIED `lift` public-input blob (the WS4 14-field layout). Checks the lift
+/// domain separator and that the membership `note_root` is published; parses the order terms the proof
+/// bound. Caller must have verified the proof first (and reads the nullifier roots separately).
 fn parse_order(env: &Env, pi: &Bytes) -> Result<Order, Error> {
     // [0] domain separator must be the order/lift constant.
     if read_word(pi, 0) != LIFT_DOMAIN {
         return Err(Error::BadPublicInputs);
     }
-    // [1] root must be a published root.
+    // [1] note_root must be a published note-tree root.
     let root = BytesN::from_array(env, &read_word(pi, 32));
-    if !env.storage().persistent().has(&DataKey::Root(root)) {
+    if !tree_root_accepted(env, TreeId::Note, &root) {
         return Err(Error::UnknownRoot);
     }
-    // [10] partial_allowed must be the boolean 0 or 1 (the circuit constrains it, but re-check).
-    let partial_word = read_word(pi, 320);
-    let partial_allowed = match word_to_u32(&partial_word)? {
+    // [12] partial_allowed must be the boolean 0 or 1 (the circuit constrains it, but re-check).
+    let partial_allowed = match word_to_u32(&read_word(pi, 384))? {
         0 => false,
         1 => true,
         _ => return Err(Error::BadPublicInputs),
     };
     Ok(Order {
-        nullifier: BytesN::from_array(env, &read_word(pi, 64)),
-        asset_in: word_to_u32(&read_word(pi, 96))?,
-        amount_in: word_to_i128(&read_word(pi, 128))?,
-        asset_out: word_to_u32(&read_word(pi, 160))?,
-        min_out: word_to_i128(&read_word(pi, 192))?,
-        output_owner_tag: BytesN::from_array(env, &read_word(pi, 224)),
-        cancel_owner_tag: BytesN::from_array(env, &read_word(pi, 256)), // [8]
-        expiry: word_to_u64(&read_word(pi, 288))?,                      // [9]
-        partial_allowed,                                                // [10]
-        order_leaf: BytesN::from_array(env, &read_word(pi, 352)),       // [11]
+        nullifier: BytesN::from_array(env, &read_word(pi, 128)), // [4]
+        asset_in: word_to_u32(&read_word(pi, 160))?,             // [5]
+        amount_in: word_to_i128(&read_word(pi, 192))?,           // [6]
+        asset_out: word_to_u32(&read_word(pi, 224))?,            // [7]
+        min_out: word_to_i128(&read_word(pi, 256))?,                    // [8]
+        output_owner_tag: BytesN::from_array(env, &read_word(pi, 288)), // [9]
+        cancel_owner_tag: BytesN::from_array(env, &read_word(pi, 320)), // [10]
+        expiry: word_to_u64(&read_word(pi, 352))?,                      // [11]
+        partial_allowed,                                                // [12]
+        order_leaf: BytesN::from_array(env, &read_word(pi, 416)),       // [13]
     })
 }
 
@@ -1432,9 +1109,47 @@ fn zero_at(env: &Env, i: u32) -> U256 {
     U256::from_be_bytes(env, &Bytes::from_array(env, &TREE_ZEROS[i as usize]))
 }
 
-/// Initialize the append-only Merkle tree: filled subtrees start at the zeros (hardcoded), next
+/// Which append-only tree a `tree_init`/`tree_insert` operates on. Both are depth-32 with the same
+/// `TREE_ZEROS` ladder and `Hasher`; they differ only in their storage keys and accepted-root set.
+#[derive(Copy, Clone)]
+enum TreeId {
+    Note,
+    Order,
+}
+
+fn tk_filled(t: TreeId) -> DataKey {
+    match t {
+        TreeId::Note => DataKey::TreeFilled,
+        TreeId::Order => DataKey::OrderTreeFilled,
+    }
+}
+fn tk_next(t: TreeId) -> DataKey {
+    match t {
+        TreeId::Note => DataKey::TreeNext,
+        TreeId::Order => DataKey::OrderTreeNext,
+    }
+}
+fn tk_root(t: TreeId) -> DataKey {
+    match t {
+        TreeId::Note => DataKey::TreeRoot,
+        TreeId::Order => DataKey::OrderTreeRoot,
+    }
+}
+fn tk_accepted(t: TreeId, root: BytesN<32>) -> DataKey {
+    match t {
+        TreeId::Note => DataKey::Root(root),
+        TreeId::Order => DataKey::OrderRoot(root),
+    }
+}
+
+/// Is `root` an accepted (currently-or-formerly-current) root of tree `t`?
+fn tree_root_accepted(env: &Env, t: TreeId, root: &BytesN<32>) -> bool {
+    env.storage().persistent().has(&tk_accepted(t, root.clone()))
+}
+
+/// Initialize an append-only Merkle tree: filled subtrees start at the zeros (hardcoded), next
 /// index 0, root = empty-tree root = compress(zeros[DEPTH-1], zeros[DEPTH-1]).
-fn tree_init(env: &Env, h: &Hasher) {
+fn tree_init(env: &Env, h: &Hasher, t: TreeId) {
     let mut filled: Vec<U256> = vec![env];
     let mut i = 0u32;
     while i < TREE_DEPTH {
@@ -1445,18 +1160,18 @@ fn tree_init(env: &Env, h: &Hasher) {
         let z = zero_at(env, TREE_DEPTH - 1);
         h.compress(env, &z, &z)
     };
-    env.storage().persistent().set(&DataKey::TreeFilled, &filled);
-    env.storage().persistent().set(&DataKey::TreeNext, &0u32);
+    env.storage().persistent().set(&tk_filled(t), &filled);
+    env.storage().persistent().set(&tk_next(t), &0u32);
     // empty-tree root (not marked accepted: no leaf to prove).
-    env.storage().persistent().set(&DataKey::TreeRoot, &empty_root);
+    env.storage().persistent().set(&tk_root(t), &empty_root);
 }
 
 /// Insert a leaf (Tornado-style incremental update: TREE_DEPTH compressions up the rightmost path).
 /// Advances the root and marks the new root accepted. Index bits are LSB-first; bit 0 => the
 /// running node is the LEFT child (sibling = zeros[level]), matching the circuit's membership fold.
-fn tree_insert(env: &Env, h: &Hasher, leaf: &U256) -> U256 {
-    let mut filled: Vec<U256> = env.storage().persistent().get(&DataKey::TreeFilled).unwrap();
-    let idx: u32 = env.storage().persistent().get(&DataKey::TreeNext).unwrap();
+fn tree_insert(env: &Env, h: &Hasher, t: TreeId, leaf: &U256) -> U256 {
+    let mut filled: Vec<U256> = env.storage().persistent().get(&tk_filled(t)).unwrap();
+    let idx: u32 = env.storage().persistent().get(&tk_next(t)).unwrap();
 
     let mut cur = leaf.clone();
     let mut i = 0u32;
@@ -1471,15 +1186,55 @@ fn tree_insert(env: &Env, h: &Hasher, leaf: &U256) -> U256 {
         i += 1;
     }
 
-    env.storage().persistent().set(&DataKey::TreeFilled, &filled);
-    env.storage().persistent().set(&DataKey::TreeNext, &(idx + 1));
-    env.storage().persistent().set(&DataKey::TreeRoot, &cur);
-    // Accept this root for membership proofs. Any past root stays accepted (nullifiers prevent
-    // double-spend regardless of root recency); bounded-ring eviction is a later refinement.
+    env.storage().persistent().set(&tk_filled(t), &filled);
+    env.storage().persistent().set(&tk_next(t), &(idx + 1));
+    env.storage().persistent().set(&tk_root(t), &cur);
+    // Accept this root for membership proofs. Any past root stays accepted (the nullifier IMT
+    // prevents double-spend regardless of root recency); bounded-ring eviction is a later refinement.
     env.storage()
         .persistent()
-        .set(&DataKey::Root(u256_to_bytesn(env, &cur)), &true);
+        .set(&tk_accepted(t, u256_to_bytesn(env, &cur)), &true);
     cur
+}
+
+/// The genesis root of the nullifier IMT: a single occupied leaf {0,0,0} at index 0, everything else
+/// empty. fold(H3(0,0,0)) up the all-left path (sibling = zeros[i] at each level).
+fn imt_genesis_root(env: &Env, h: &Hasher) -> U256 {
+    let zero = U256::from_u32(env, 0);
+    // H3(0,0,0) = compress(compress(0,0),0), matching the circuit's ImtLeaf::hash on {0,0,0}.
+    let mut cur = h.compress(env, &h.compress(env, &zero, &zero), &zero);
+    let mut i = 0u32;
+    while i < TREE_DEPTH {
+        cur = h.compress(env, &cur, &zero_at(env, i));
+        i += 1;
+    }
+    cur
+}
+
+/// Read the current nullifier IMT root.
+fn nullifier_root(env: &Env) -> U256 {
+    env.storage().persistent().get(&DataKey::NullifierRoot).unwrap()
+}
+
+/// Verify a spend's nullifier-IMT transition and CAS-advance the accumulator: `root_in` must equal
+/// the current root; on success the current root becomes `root_out`. The non-membership + insert was
+/// already proven in-circuit, so the contract does no Poseidon here.
+fn advance_nullifier_root(env: &Env, root_in: &BytesN<32>, root_out: &BytesN<32>) -> Result<(), Error> {
+    let cur = nullifier_root(env);
+    if u256_to_bytesn(env, &cur) != *root_in {
+        return Err(Error::NullifierUsed);
+    }
+    env.storage()
+        .persistent()
+        .set(&DataKey::NullifierRoot, &bytesn_to_u256(env, root_out));
+    bump(env, &DataKey::NullifierRoot);
+    Ok(())
+}
+
+/// Append a leaf to the order-commitment tree and announce it for the indexer.
+fn order_insert(env: &Env, h: &Hasher, order_leaf: &BytesN<32>) {
+    tree_insert(env, h, TreeId::Order, &bytesn_to_u256(env, order_leaf));
+    OrderInserted { order_leaf: order_leaf.clone() }.publish(env);
 }
 
 /// Copy the 32-byte big-endian word at byte `off` out of the public-input blob.
