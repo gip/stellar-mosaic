@@ -121,14 +121,20 @@ async function executeOrder(
   const expiry = nowSeconds() + 7 * 86400
   const rho_out = randomField(); const rho_ord = randomField()
   const terms = await orderTerms({
-    sk: offer.sk, rho_in: offer.rho, rho_out, rho_ord, asset_in: assetIn,
-    amount_in: offer.amount, asset_out: assetOut, min_out: request.min_out, expiry,
-    partial_allowed: request.partial_allowed ? 1 : 0,
+    sk: offer.sk, rho_in: offer.rho, nonce_in: offer.nonce ?? '0', rho_out, rho_ord,
+    asset_in: assetIn, amount_in: offer.amount, asset_out: assetOut, min_out: request.min_out,
+    expiry, partial_allowed: request.partial_allowed ? 1 : 0,
   })
   const membership = await api.getNoteProof(desk.id, offer.owner_tag)
+  // The note-spend nullifier's IMT insert witness against the current accumulator.
+  const imt = await api.getImtWitness(desk.id, terms.nullifier_in)
   const bundle = await proveLift({
-    rho_in: offer.rho, sk_o: offer.sk, path: membership.siblings,
-    index_bits: membership.index_bits, root: membership.root,
+    rho_in: offer.rho, sk_o: offer.sk, nonce_in: offer.nonce ?? '0', path: membership.siblings,
+    index_bits: membership.index_bits, note_root: membership.root,
+    nullifier_root_in: imt.nullifier_root_in, nullifier_root_out: imt.nullifier_root_out,
+    low_value: imt.low_value, low_next_value: imt.low_next_value, low_next_index: imt.low_next_index,
+    low_path: imt.low_path, low_index_bits: imt.low_index_bits,
+    new_path: imt.new_path, new_index_bits: imt.new_index_bits,
     nullifier_in: terms.nullifier_in, asset_in: assetIn, amount_in: offer.amount,
     asset_out: assetOut, min_out: request.min_out, output_owner_tag: terms.output_owner_tag,
     cancel_owner_tag: terms.cancel_owner_tag, expiry,

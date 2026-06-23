@@ -29,6 +29,11 @@ export interface Note {
   amount: string // i128 as decimal string
   sk: string // owner secret (0x field)
   rho: string // per-note randomness (0x field)
+  /** Per-note mint nonce (0x field). owner_tag = compress(compress(compress(sk,0),rho),nonce) and
+   * nullifier = compress(sk, compress(rho, nonce)). Wallet-minted notes (shield, cancel return, join
+   * outputs) use '0'; a proceeds note minted by a match carries nonce = compress(match_id, slot).
+   * Absent on pre-WS4 records (treated as '0'). */
+  nonce?: string
   owner_tag: string // 0x field, public
   status: NoteStatus
   indexed: boolean // whether the note has appeared in the indexer and can be spent

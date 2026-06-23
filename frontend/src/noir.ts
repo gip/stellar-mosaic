@@ -25,10 +25,12 @@ function asField(v: unknown): string {
   return '0x' + n.toString(16).padStart(64, '0')
 }
 
-/** owner_tag = compress(compress(sk,0), rho). Returns 0x + 64 hex. */
-export async function noteTag(sk: string, rho: string): Promise<string> {
+/** Minted note owner tag = compress(compress(compress(sk,0),rho), nonce). Returns 0x + 64 hex.
+ * Wallet-minted notes (shield, cancel return, join outputs) use nonce = 0; proceeds notes minted by
+ * a match carry nonce = compress(match_id, slot). */
+export async function noteTag(sk: string, rho: string, nonce: string = '0'): Promise<string> {
   const noir = await load('note_tag')
-  const { returnValue } = await noir.execute({ sk, rho })
+  const { returnValue } = await noir.execute({ sk, rho, nonce })
   return asField(returnValue)
 }
 
@@ -43,6 +45,7 @@ export interface OrderTerms {
 export async function orderTerms(input: {
   sk: string
   rho_in: string
+  nonce_in: string
   rho_out: string
   rho_ord: string
   asset_in: number
@@ -56,6 +59,7 @@ export async function orderTerms(input: {
   const { returnValue } = await noir.execute({
     sk: input.sk,
     rho_in: input.rho_in,
+    nonce_in: input.nonce_in,
     rho_out: input.rho_out,
     rho_ord: input.rho_ord,
     asset_in: String(input.asset_in),
@@ -71,12 +75,13 @@ export async function orderTerms(input: {
   return { nullifier_in, output_owner_tag, cancel_owner_tag, order_leaf }
 }
 
-/** Derive a note nullifier with the existing order_terms wallet helper. The other inputs only
- * affect unused return values, so deterministic zero placeholders avoid a separate ACIR helper. */
-export async function noteNullifier(sk: string, rho: string): Promise<string> {
+/** Derive a note-spend nullifier = compress(sk, compress(rho, nonce)) via the order_terms helper
+ * (the other inputs only affect unused return values). Pass the note's mint nonce (0 for shields). */
+export async function noteNullifier(sk: string, rho: string, nonce: string = '0'): Promise<string> {
   const { nullifier_in } = await orderTerms({
     sk,
     rho_in: rho,
+    nonce_in: nonce,
     rho_out: '0',
     rho_ord: '0',
     asset_in: 0,
@@ -101,23 +106,31 @@ export interface JoinTerms {
 export async function joinTerms(input: {
   sk_1: string
   rho_1: string
+  nonce_1: string
   sk_2: string
   rho_2: string
+  nonce_2: string
   sk_out1: string
   rho_out1: string
+  nonce_out1: string
   sk_out2: string
   rho_out2: string
+  nonce_out2: string
 }): Promise<JoinTerms> {
   const noir = await load('join_terms')
   const { returnValue } = await noir.execute({
     sk_1: input.sk_1,
     rho_1: input.rho_1,
+    nonce_1: input.nonce_1,
     sk_2: input.sk_2,
     rho_2: input.rho_2,
+    nonce_2: input.nonce_2,
     sk_out1: input.sk_out1,
     rho_out1: input.rho_out1,
+    nonce_out1: input.nonce_out1,
     sk_out2: input.sk_out2,
     rho_out2: input.rho_out2,
+    nonce_out2: input.nonce_out2,
   })
   const [nullifier_1, nullifier_2, out_tag_1, out_tag_2] = (returnValue as string[]).map(asField)
   return { nullifier_1, nullifier_2, out_tag_1, out_tag_2 }

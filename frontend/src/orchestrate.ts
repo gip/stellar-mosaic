@@ -88,17 +88,24 @@ export async function executeJoin(
   // (fresh => a unique nullifier_2 that is distinct from nullifier_1 and never collides on-chain).
   const sk_2 = b ? b.sk : randomField()
   const rho_2 = b ? b.rho : randomField()
+  // Input notes carry their own mint nonce; fresh wallet outputs use nonce 0.
+  const nonce_1 = a.nonce ?? '0'
+  const nonce_2 = b ? b.nonce ?? '0' : '0'
 
   onStatus?.('Deriving join terms…')
   const terms = await joinTerms({
     sk_1: a.sk,
     rho_1: a.rho,
+    nonce_1,
     sk_2,
     rho_2,
+    nonce_2,
     sk_out1,
     rho_out1,
+    nonce_out1: '0',
     sk_out2,
     rho_out2,
+    nonce_out2: '0',
   })
 
   onStatus?.(b ? 'Fetching membership paths…' : 'Fetching membership path…')

@@ -29,14 +29,28 @@ function packPublicInputs(publicInputs: string[]): Uint8Array {
   return pi
 }
 
-export interface LiftInputs {
-  // private witness
+/** The nullifier-IMT insert witness a WS4 spend needs (mirrors api.ImtWitnessResp). */
+export interface ImtWitnessFields {
+  nullifier_root_in: string
+  nullifier_root_out: string
+  low_value: string
+  low_next_value: string
+  low_next_index: number
+  low_path: string[]
+  low_index_bits: number[]
+  new_path: string[]
+  new_index_bits: number[]
+}
+
+export interface LiftInputs extends ImtWitnessFields {
+  // private witness: consumed note
   rho_in: string
   sk_o: string
-  path: string[] // 32 siblings (0x hex)
+  nonce_in: string
+  path: string[] // 32 note-tree siblings (0x hex)
   index_bits: number[] // 32 bits
   // public inputs
-  root: string
+  note_root: string
   nullifier_in: string
   asset_in: number
   amount_in: string
@@ -54,23 +68,41 @@ export interface ProofBundle {
   publicInputs: Uint8Array // circuit-dependent field count, 32B BE each
 }
 
-/** Execute the lift witness and produce a contract-ready proof + public-inputs blob. */
+/** Spread an IMT witness into the noir_js inputs (low_* / new_* / root transition). */
+function imtFields(w: ImtWitnessFields): Record<string, unknown> {
+  return {
+    nullifier_root_in: w.nullifier_root_in,
+    nullifier_root_out: w.nullifier_root_out,
+    low_value: w.low_value,
+    low_next_value: w.low_next_value,
+    low_next_index: String(w.low_next_index),
+    low_path: w.low_path,
+    low_index_bits: w.low_index_bits.map(String),
+    new_path: w.new_path,
+    new_index_bits: w.new_index_bits.map(String),
+  }
+}
+
+/** Execute the lift (order-placement) witness and produce a contract-ready proof + public-inputs
+ * blob. WS4 14-field PI; folds the per-note nonce and proves the note-spend nullifier IMT insert. */
 export async function proveLift(input: LiftInputs): Promise<ProofBundle> {
   const compiled = await circuit('lift')
   const noir = new Noir(compiled)
   const { witness } = await noir.execute({
     rho_in: input.rho_in,
     sk_o: input.sk_o,
+    nonce_in: input.nonce_in,
     path: input.path,
     index_bits: input.index_bits.map(String),
+    ...imtFields(input),
     domain: '1',
-    root: input.root,
+    note_root: input.note_root,
     nullifier_in: input.nullifier_in,
     asset_in: String(input.asset_in),
     amount_in: input.amount_in,
     asset_out: String(input.asset_out),
     min_out: input.min_out,
-    output_owner_tag: input.output_owner_tag,
+    output_owner_tag_pub: input.output_owner_tag,
     cancel_owner_tag: input.cancel_owner_tag,
     expiry: String(input.expiry),
     partial_allowed: String(input.partial_allowed),
