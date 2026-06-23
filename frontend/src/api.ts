@@ -97,14 +97,28 @@ export async function withClientAction<T>(action: ClientAction, run: () => Promi
   }
 }
 
+/** One resting order from the event-derived book (`GET /desks/:id/book`). */
+export interface BookOrder {
+  leaf_index: number
+  order_leaf: string
+  asset_in: number
+  amount_in: string
+  asset_out: number
+  min_out: string
+  output_owner_tag: string
+  cancel_owner_tag: string
+  expiry: number
+  partial_allowed: boolean
+  active: boolean
+}
+
 export const api = {
   listDesks: () => req<Desk[]>('/desks'),
   getDesk: (id: string) => req<Desk>(`/desks/${id}`),
   getRoot: (id: string) => req<{ root: string }>(`/desks/${id}/root`),
-  getBook: (id: string, pair: number, side: number) =>
-    req<{ pair: number; side: number; orders: unknown }>(
-      `/desks/${id}/book?pair=${pair}&side=${side}`,
-    ),
+  // WS4: the event-derived active book (all resting orders, each with its full public terms +
+  // active flag). The client filters by asset locally; no pair/side query needed.
+  getBook: (id: string) => req<{ orders: BookOrder[] }>(`/desks/${id}/book`),
   importDesk: (body: {
     name: string
     contract_id: string
