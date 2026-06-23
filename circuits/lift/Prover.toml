@@ -1,4 +1,3 @@
-# auto-generated WS4 lift witness (via tools/indexer witness bin)
 rho_in = "0x22"
 sk_o = "0x11"
 nonce_in = "0x33"
@@ -22,6 +21,6 @@ asset_out = "2"
 min_out = "1500"
 output_owner_tag_pub = "0x0e7f69d8eda26a34998ecb25449ad2104a9d96f1f3c657b756749e7c601c76d7"
 cancel_owner_tag = "0x1df13c96b0d05130327f51b5e145d1884abdb4aeff8d1af276b95fe46b95082b"
-expiry = "9999999999"
+expiry = "1000"
 partial_allowed = "1"
-order_leaf = "0x1c1deaa500231f69bd4085fd2e9bdcebfb30a5934439afd0e7d7b120608457d3"
+order_leaf = "0x21998016843cad0bc75c955997fb050fd1b181cae36c5381c1a94cf186e31a0e"
