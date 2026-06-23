@@ -59,11 +59,9 @@ const DEPOSIT_ID: u64 = 7;
 const ASSET_ID: u32 = 1;
 const AMOUNT: i128 = 100_000_000;
 const OWNER_TAG: [u8; 32] = [0x33; 32];
-// Real bridge-prover guest image id (bridge_methods::BRIDGE_GUEST_ID); the mock ignores it.
-const IMAGE_ID: [u8; 32] = [
-    0x70, 0x3c, 0x61, 0x8f, 0xf0, 0x49, 0x97, 0xc2, 0x93, 0x75, 0x52, 0xd4, 0x01, 0x03, 0x47, 0x20,
-    0x81, 0xaa, 0x87, 0xc1, 0x6c, 0x71, 0x1d, 0xe5, 0xc6, 0xec, 0xe5, 0x60, 0x7f, 0x0e, 0xe2, 0x81,
-];
+// Routing fixture only: MockRouter deliberately ignores the image ID. The reviewed real guest ID
+// lives in bridge-prover/image-id.hex and is checked against the built guest by the prover tests.
+const IMAGE_ID: [u8; 32] = [0x44; 32];
 
 // ---- helpers ----
 

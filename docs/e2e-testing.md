@@ -156,6 +156,19 @@ the cached binary while its content fingerprint remains current. Avoid replacing
 invocation, which forces an otherwise unnecessary fat-LTO host relink. Use
 `bridge-prover/run-host --force-rebuild -- <arguments>` to rebuild explicitly.
 
+Before deploying, the script compares the cached host's embedded guest image ID with the reviewed
+pin in `bridge-prover/image-id.hex`. This catches guest source, dependency, or toolchain drift before
+the Groth16 proof. Inspect the built ID with:
+
+```bash
+bridge-prover/run-host -- --print-image-id
+```
+
+If they differ, use the printed `--force-rebuild` command once to rule out stale build artifacts.
+If the rebuilt ID still differs, review the guest change and use the exact rotation command printed
+by the preflight; do not update the pin merely to make the check pass. The same reviewed value is
+supplied to `configure_base_bridge` on Stellar.
+
 ### Finality toggle
 
 By **default the Base leg runs in fast mode**: it mints as soon as the proof is ready, against the

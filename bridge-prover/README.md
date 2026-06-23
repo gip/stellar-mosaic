@@ -31,11 +31,19 @@ WS4 verifies the receipt against the pinned **image id**, then checks: `commitme
 the expected Base Sepolia config digest, `bridgeAddress` == the pinned bridge, `commitment.digest`
 ∈ the relayer-attested Base block-hash registry, and `depositId` unused — then inserts the leaf.
 
-Current image id (`bridge_methods::BRIDGE_GUEST_ID`, changes if the guest or its deps change):
+The reviewed image ID is committed in [`image-id.hex`](image-id.hex). It must equal
+`bridge_methods::BRIDGE_GUEST_ID`, which changes whenever the compiled guest changes. Inspect the
+currently embedded ID without RPC access:
 
+```bash
+./run-host -- --print-image-id
 ```
-[2405514352, 3264694768, 3562173843, 541524737, 3246893697, 3843912044, 1625681094, 2179075711]
-```
+
+The Base e2e checks this value against `image-id.hex` before deploying or proving. On a mismatch,
+first use the preflight's `--force-rebuild` command to rule out stale build artifacts. If an
+intentional guest source, dependency, or toolchain change still produces a new ID, review that
+change, then rotate the pin with the exact command printed by the preflight. Configure the Stellar
+contract with the reviewed pin; never accept a newly built ID automatically.
 
 ## Prerequisites
 
@@ -65,6 +73,9 @@ untracked build-environment change. `CARGO_TARGET_DIR` is respected.
 
 The launcher does not change the proof or guest image. An actual guest/dependency change still
 changes the image ID and requires regenerating the committed ID and on-chain configuration together.
+
+`./run-host -- --print-image-id` is a local inspection mode: it prints one lowercase hex digest and
+exits without requiring `RPC_URL`, a bridge address, or a deposit ID.
 
 `--prove` produces a Groth16 `Receipt`, verifies it locally against the pinned image id, and
 `encode_seal`s it. The emitted `seal` + `journal` are exactly the two arguments Stellar

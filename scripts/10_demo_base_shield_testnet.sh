@@ -34,6 +34,7 @@ export PATH="$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH"
 # Persist key outputs (Base contracts, settlement id, router, roots) to <repo>/.e2e/state.env so the
 # e2e driver (scripts/e2e.sh) can report what was generated. Harmless on a direct run.
 source "$ROOT/scripts/lib/e2e_state.sh"
+source "$ROOT/scripts/lib/bridge_image_id.sh"
 
 # --- config (override via env) ---
 # BASE_RPC has no default ON PURPOSE: it must be an eth_getProof-capable endpoint (Alchemy/Infura).
@@ -47,8 +48,11 @@ DEPOSIT_ID="${DEPOSIT_ID:-0}"                # fresh bridge -> first deposit is 
 # owner_tag: an opaque BN254 Fr element (< the scalar field modulus r). Any small constant works for
 # the demo; a real wallet uses Poseidon(pk_o, rho). NOTE: must be < r (0x11.. ok; 0x33.. is NOT).
 OWNER_TAG="${OWNER_TAG:-0x1111111111111111111111111111111111111111111111111111111111111111}"
-# Pinned guest image id + Base Sepolia config digest (regenerate via bridge-prover print_journal_fixture).
-IMAGE_ID="${IMAGE_ID:-69c430391c303a1db21811ee9cc29a9e6997ce2d0dbcd62cdd0539ca5732ca03}"
+# The reviewed guest image-ID pin is committed separately so builds, scripts, and docs share one
+# source of truth. IMAGE_ID remains overridable for an intentional rotation, but it must still match
+# the host binary that will produce the proof.
+IMAGE_ID_PIN="$PROVER/image-id.hex"
+IMAGE_ID="${IMAGE_ID:-$(bridge_image_id_read_pin "$IMAGE_ID_PIN")}"
 CONFIG_ID="${CONFIG_ID:-3519660d6ecbd34367740f5ca18449cba8b389594f69f177bbf21c46e505c61e}"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found on PATH"; exit 1; }; }
@@ -56,6 +60,11 @@ need forge; need cast; need stellar; need jq; need xxd
 : "${PRIVATE_KEY:?set PRIVATE_KEY to a funded Base Sepolia key}"
 : "${BASE_RPC:?set BASE_RPC to a Base Sepolia RPC that serves eth_getProof (Alchemy/Infura), e.g. https://base-sepolia.g.alchemy.com/v2/<key> — the public sepolia.base.org will NOT work}"
 : "${ROUTER_ID:?set ROUTER_ID to the deployed Stellar RISC Zero verifier router (see header)}"
+
+echo ">>> checking reviewed bridge guest image ID"
+BUILT_IMAGE_ID=$(cd "$PROVER" && ./run-host -- --print-image-id)
+bridge_image_id_check "$IMAGE_ID" "$BUILT_IMAGE_ID" "$IMAGE_ID_PIN"
+echo "    guest image id = $IMAGE_ID"
 
 casts() { cast send --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" "$@"; }
 

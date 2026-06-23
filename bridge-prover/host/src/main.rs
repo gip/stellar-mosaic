@@ -29,7 +29,7 @@ use risc0_op_steel::{
     optimism::{OpEvmEnv, BASE_SEPOLIA_CHAIN_SPEC},
     Commitment, Contract,
 };
-use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
+use risc0_zkvm::{default_executor, default_prover, sha::Digest, ExecutorEnv, ProverOpts};
 use tokio::task;
 use tracing_subscriber::EnvFilter;
 use url::Url;
@@ -59,17 +59,31 @@ sol! {
 #[derive(Parser, Debug)]
 #[command(about, long_about = None)]
 struct Args {
+    /// Print the embedded guest image ID and exit without contacting an RPC endpoint.
+    #[arg(long)]
+    print_image_id: bool,
+
     /// URL of the Base Sepolia RPC endpoint.
-    #[arg(short, long, env = "RPC_URL")]
-    rpc_url: Url,
+    #[arg(
+        short,
+        long,
+        env = "RPC_URL",
+        required_unless_present = "print_image_id"
+    )]
+    rpc_url: Option<Url>,
 
     /// Deployed MosaicBridge contract address.
-    #[arg(short, long, env = "BRIDGE_ADDRESS")]
-    bridge: Address,
+    #[arg(
+        short,
+        long,
+        env = "BRIDGE_ADDRESS",
+        required_unless_present = "print_image_id"
+    )]
+    bridge: Option<Address>,
 
     /// The deposit id to prove.
-    #[arg(short, long)]
-    deposit_id: u64,
+    #[arg(short, long, required_unless_present = "print_image_id")]
+    deposit_id: Option<u64>,
 
     /// Produce a Groth16 receipt and write the router-ready seal + journal (otherwise execute only).
     #[arg(long)]
@@ -85,6 +99,10 @@ struct Args {
     block: Option<u64>,
 }
 
+fn guest_image_id_hex() -> String {
+    hex::encode(Digest::from(BRIDGE_GUEST_ID).as_bytes())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -92,8 +110,22 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
 
+    if args.print_image_id {
+        println!("{}", guest_image_id_hex());
+        return Ok(());
+    }
+
+    // Clap requires these unless --print-image-id was selected. Keep the checks explicit so this
+    // invariant remains clear if the CLI shape changes later.
+    let rpc_url = args.rpc_url.context("--rpc-url is required")?;
+    let bridge = args.bridge.context("--bridge is required")?;
+    let deposit_id = args.deposit_id.context("--deposit-id is required")?;
+    log::info!("Guest image ID: {}", guest_image_id_hex());
+
     // OP EVM environment from the RPC, optionally pinned to a block.
-    let builder = OpEvmEnv::builder().rpc(args.rpc_url).chain_spec(&BASE_SEPOLIA_CHAIN_SPEC);
+    let builder = OpEvmEnv::builder()
+        .rpc(rpc_url)
+        .chain_spec(&BASE_SEPOLIA_CHAIN_SPEC);
     let builder = match args.block {
         Some(b) => builder.block_number(b),
         // Default to the latest finalized block so the minted note can't be undone by a reorg.
@@ -102,24 +134,28 @@ async fn main() -> Result<()> {
     let mut env = builder.build().await?;
 
     // Read the deposit record from contract state (proven against the block's state root).
-    let call = IMosaicBridge::depositsCall { depositId: args.deposit_id };
-    let returns = Contract::preflight(args.bridge, &mut env)
+    let call = IMosaicBridge::depositsCall {
+        depositId: deposit_id,
+    };
+    let returns = Contract::preflight(bridge, &mut env)
         .call_builder(&call)
         .call()
         .await?;
     log::info!(
         "Deposit {} on bridge {}: assetId={} amount={} ownerTag={}",
-        args.deposit_id,
-        args.bridge,
+        deposit_id,
+        bridge,
         returns.assetId,
         returns.amount,
         returns.ownerTag,
     );
-    anyhow::ensure!(returns.assetId != 0, "no deposit recorded for id {}", args.deposit_id);
+    anyhow::ensure!(
+        returns.assetId != 0,
+        "no deposit recorded for id {deposit_id}"
+    );
 
     let evm_input = env.into_input().await?;
-    let bridge_bytes: [u8; 20] = args.bridge.into();
-    let deposit_id = args.deposit_id;
+    let bridge_bytes: [u8; 20] = bridge.into();
     let do_prove = args.prove;
 
     // Execute (journal only) or prove (Groth16 receipt -> router-ready seal).
@@ -142,8 +178,8 @@ async fn main() -> Result<()> {
             receipt
                 .verify(BRIDGE_GUEST_ID)
                 .context("receipt failed local verification")?;
-            let seal = risc0_ethereum_contracts::encode_seal(&receipt)
-                .context("failed to encode seal")?;
+            let seal =
+                risc0_ethereum_contracts::encode_seal(&receipt).context("failed to encode seal")?;
             Ok::<_, anyhow::Error>((receipt.journal.bytes, Some(seal)))
         } else {
             let info = default_executor()
@@ -176,7 +212,10 @@ async fn main() -> Result<()> {
         fs::create_dir_all(&args.out_dir).context("failed to create out dir")?;
         fs::write(args.out_dir.join("journal.bin"), &journal_bytes)?;
         fs::write(args.out_dir.join("seal.bin"), &seal)?;
-        fs::write(args.out_dir.join("journal.hex"), hex::encode(&journal_bytes))?;
+        fs::write(
+            args.out_dir.join("journal.hex"),
+            hex::encode(&journal_bytes),
+        )?;
         fs::write(args.out_dir.join("seal.hex"), hex::encode(&seal))?;
         log::info!(
             "Wrote {}/{{seal,journal}}.{{bin,hex}} ({} journal bytes, {} seal bytes)",
@@ -193,12 +232,18 @@ async fn main() -> Result<()> {
 mod fixture {
     //! Emits ground-truth values for the Stellar WS4 config: the guest image id and the Base Sepolia
     //! config digest. Run: `cargo test -p host --release -- --nocapture print_journal_fixture`
-    use super::{Journal, BASE_SEPOLIA_CHAIN_SPEC};
+    use super::{guest_image_id_hex, Journal, BASE_SEPOLIA_CHAIN_SPEC};
     use alloy_primitives::{hex, Address, B256, U256};
     use alloy_sol_types::SolValue;
-    use bridge_methods::BRIDGE_GUEST_ID;
     use risc0_op_steel::Commitment;
-    use risc0_zkvm::sha::Digest;
+
+    #[test]
+    fn committed_image_id_matches_embedded_guest() {
+        assert_eq!(
+            include_str!("../../image-id.hex").trim(),
+            guest_image_id_hex()
+        );
+    }
 
     #[test]
     fn print_journal_fixture() {
@@ -218,7 +263,10 @@ mod fixture {
         let enc = journal.abi_encode();
         println!("JOURNAL_LEN={}", enc.len());
         println!("JOURNAL_HEX={}", hex::encode(&enc));
-        println!("IMAGE_ID_HEX={}", hex::encode(Digest::from(BRIDGE_GUEST_ID).as_bytes()));
-        println!("CONFIG_DIGEST_HEX={}", hex::encode(BASE_SEPOLIA_CHAIN_SPEC.digest()));
+        println!("IMAGE_ID_HEX={}", guest_image_id_hex());
+        println!(
+            "CONFIG_DIGEST_HEX={}",
+            hex::encode(BASE_SEPOLIA_CHAIN_SPEC.digest())
+        );
     }
 }
