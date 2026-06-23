@@ -9,7 +9,9 @@
 use crate::error::{AppError, AppResult};
 use crate::stellar::Stellar;
 use base64::Engine;
-use mosaic_indexer::{order_consumption_nullifier, u256_to_word, word_to_u256, Hasher, NoteTree};
+use mosaic_indexer::{
+    order_consumption_nullifier, u256_to_word, word_to_u256, Hasher, NoteTree, NullifierImt,
+};
 use serde::Serialize;
 use soroban_sdk::{Env, U256};
 use std::collections::HashSet;
@@ -385,6 +387,108 @@ fn parse_nfspent(v: &serde_json::Value) -> Option<[u8; 32]> {
         return None;
     }
     r.scbytes32()
+}
+
+/// Order-tree membership path for an `order_leaf` (0x hex), against the current order root. Lets a
+/// matcher/canceller prove the order is a member of an accepted order root.
+#[derive(Serialize)]
+pub struct OrderProof {
+    pub leaf_index: usize,
+    pub order_root: String,
+    pub siblings: Vec<String>,
+    pub index_bits: Vec<u8>,
+}
+
+fn order_proof_inner(orders: &[OrderRaw], order_leaf: &str) -> AppResult<OrderProof> {
+    let want = parse_hex32(order_leaf)?;
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let mut tree = NoteTree::new(&env);
+    let mut found = None;
+    for o in orders {
+        let i = tree.insert_leaf(word_to_u256(&env, &o.order_leaf));
+        if o.order_leaf == want {
+            found = Some(i);
+        }
+    }
+    let idx =
+        found.ok_or_else(|| AppError::NotFound(format!("no order with leaf {order_leaf}")))?;
+    let p = tree.path(idx);
+    Ok(OrderProof {
+        leaf_index: idx,
+        order_root: u256_hex(&tree.root()),
+        siblings: p.siblings.iter().map(u256_hex).collect(),
+        index_bits: p.index_bits.to_vec(),
+    })
+}
+
+pub fn order_proof_from_raw(raw: &[serde_json::Value], order_leaf: &str) -> AppResult<OrderProof> {
+    let orders: Vec<OrderRaw> = raw.iter().filter_map(parse_orderins).collect();
+    order_proof_inner(&orders, order_leaf)
+}
+
+pub fn order_proof(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+    order_leaf: &str,
+) -> AppResult<OrderProof> {
+    let orders = scan_events(stellar, contract_id, from_ledger, parse_orderins)?;
+    order_proof_inner(&orders, order_leaf)
+}
+
+/// The nullifier-IMT insert witness for `value` (0x hex), against the CURRENT accumulator (all
+/// `nfspent` replayed). This is exactly the imt_insert witness a spend circuit needs; the actual
+/// insert lands when the spend's own `nfspent` is later observed.
+#[derive(Serialize)]
+pub struct ImtWitnessOut {
+    pub nullifier_root_in: String,
+    pub nullifier_root_out: String,
+    pub low_value: String,
+    pub low_next_value: String,
+    pub low_next_index: u64,
+    pub low_path: Vec<String>,
+    pub low_index_bits: Vec<u8>,
+    pub new_path: Vec<String>,
+    pub new_index_bits: Vec<u8>,
+}
+
+fn imt_witness_inner(spent: &[[u8; 32]], value: &str) -> AppResult<ImtWitnessOut> {
+    let v = parse_hex32(value)?;
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let mut imt = NullifierImt::new(&env);
+    for nf in spent {
+        imt.insert(word_to_u256(&env, nf));
+    }
+    let root_in = imt.root();
+    let w = imt.witness(word_to_u256(&env, &v));
+    Ok(ImtWitnessOut {
+        nullifier_root_in: u256_hex(&root_in),
+        nullifier_root_out: u256_hex(&w.root_out),
+        low_value: u256_hex(&w.low_value),
+        low_next_value: u256_hex(&w.low_next_value),
+        low_next_index: w.low_next_index,
+        low_path: w.low_path.siblings.iter().map(u256_hex).collect(),
+        low_index_bits: w.low_path.index_bits.to_vec(),
+        new_path: w.new_path.siblings.iter().map(u256_hex).collect(),
+        new_index_bits: w.new_path.index_bits.to_vec(),
+    })
+}
+
+pub fn imt_witness_from_raw(raw: &[serde_json::Value], value: &str) -> AppResult<ImtWitnessOut> {
+    let spent: Vec<[u8; 32]> = raw.iter().filter_map(parse_nfspent).collect();
+    imt_witness_inner(&spent, value)
+}
+
+pub fn imt_witness(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+    value: &str,
+) -> AppResult<ImtWitnessOut> {
+    let spent = scan_events(stellar, contract_id, from_ledger, parse_nfspent)?;
+    imt_witness_inner(&spent, value)
 }
 
 /// Decode a base64 ScVal::Symbol into its string.

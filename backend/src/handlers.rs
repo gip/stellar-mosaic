@@ -281,6 +281,66 @@ pub async fn get_note_proof(
     Ok(Json(serde_json::to_value(proof).unwrap()))
 }
 
+#[derive(Deserialize)]
+pub struct OrderProofQuery {
+    pub order_leaf: String,
+}
+
+/// Order-tree membership path for an `order_leaf` (for building a `match`/`cancel` proof).
+pub async fn get_order_proof(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<OrderProofQuery>,
+) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, order_leaf = %q.order_leaf, "get_order_proof");
+    let desk = st.db.get_desk(&id).await?;
+    let leaf = q.order_leaf;
+    let raw = st.db.chain_events(&desk.contract_id).await?;
+    if !raw.is_empty() {
+        return Ok(Json(
+            serde_json::to_value(crate::indexer::order_proof_from_raw(&raw, &leaf)?).unwrap(),
+        ));
+    }
+    let from = st.db.desk_from_ledger(&id).await?;
+    let proof = tokio::task::spawn_blocking(move || {
+        crate::indexer::order_proof(&st.stellar, &desk.contract_id, from, &leaf)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(serde_json::to_value(proof).unwrap()))
+}
+
+#[derive(Deserialize)]
+pub struct ImtWitnessQuery {
+    /// The nullifier value (0x hex) the spender wants to insert.
+    pub value: String,
+}
+
+/// Nullifier-IMT insert witness for a value (the imt_insert witness a spend circuit needs), against
+/// the current accumulator. The frontend computes its nullifier value, fetches this, and proves.
+pub async fn get_imt_witness(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<ImtWitnessQuery>,
+) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, "get_imt_witness");
+    let desk = st.db.get_desk(&id).await?;
+    let value = q.value;
+    let raw = st.db.chain_events(&desk.contract_id).await?;
+    if !raw.is_empty() {
+        return Ok(Json(
+            serde_json::to_value(crate::indexer::imt_witness_from_raw(&raw, &value)?).unwrap(),
+        ));
+    }
+    let from = st.db.desk_from_ledger(&id).await?;
+    let w = tokio::task::spawn_blocking(move || {
+        crate::indexer::imt_witness(&st.stellar, &desk.contract_id, from, &value)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(serde_json::to_value(w).unwrap()))
+}
+
 // ---- sponsored shield: frontend builds + user-signs the auth entry; sponsor signs envelope ----
 
 #[derive(Deserialize)]
