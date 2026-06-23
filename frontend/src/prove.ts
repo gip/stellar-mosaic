@@ -154,21 +154,40 @@ export async function proveUnshield(input: UnshieldInputs): Promise<ProofBundle>
   return { proof, publicInputs: packPublicInputs(publicInputs) }
 }
 
+/** One input note's IMT-insert witness, with the low_/new_ keys suffixed for the join circuit. */
+function imtFieldsSuffixed(w: ImtWitnessFields, n: 1 | 2): Record<string, unknown> {
+  return {
+    [`low${n}_value`]: w.low_value,
+    [`low${n}_next_value`]: w.low_next_value,
+    [`low${n}_next_index`]: String(w.low_next_index),
+    [`low${n}_path`]: w.low_path,
+    [`low${n}_index_bits`]: w.low_index_bits.map(String),
+    [`new${n}_path`]: w.new_path,
+    [`new${n}_index_bits`]: w.new_index_bits.map(String),
+  }
+}
+
 export interface JoinInputs {
-  // private witness — note 1
+  // private witness — note 1 + its nullifier-IMT insert witness
   sk_1: string
   rho_1: string
+  nonce_1: string
   amount_1: string
   path_1: string[] // 32 siblings (0x hex)
   index_bits_1: number[] // 32 bits
-  // private witness — note 2
+  imt_1: ImtWitnessFields
+  // private witness — note 2 (null padding => amount_2 == 0; imt_2 gated off with zero dummies)
   sk_2: string
   rho_2: string
+  nonce_2: string
   amount_2: string
   path_2: string[]
   index_bits_2: number[]
-  // public inputs (domain is fixed to JOIN_DOMAIN=4 inside)
-  root: string
+  imt_2: ImtWitnessFields
+  // public inputs (domain fixed to JOIN_DOMAIN=4 inside)
+  note_root: string
+  nullifier_root_in: string
+  nullifier_root_out: string
   nullifier_1: string
   nullifier_2: string
   asset: number
@@ -178,25 +197,30 @@ export interface JoinInputs {
   out_amount_2: string
 }
 
-/** Prove the join circuit in-browser: consolidate two same-asset notes into two fresh notes
- * (target + change). Public inputs (9 fields): domain, root, nullifier_1, nullifier_2, asset,
- * out_tag_1, out_amount_1, out_tag_2, out_amount_2 — order matches the contract's `join`. */
+/** Prove the WS4 join circuit in-browser (11-field PI): consolidate two same-asset notes into two
+ * fresh notes, folding each input's nonce and proving the (gated) nullifier-IMT inserts. */
 export async function proveJoin(input: JoinInputs): Promise<ProofBundle> {
   const compiled = await circuit('join')
   const noir = new Noir(compiled)
   const { witness } = await noir.execute({
     sk_1: input.sk_1,
     rho_1: input.rho_1,
+    nonce_1: input.nonce_1,
     amount_1: input.amount_1,
     path_1: input.path_1,
     index_bits_1: input.index_bits_1.map(String),
+    ...imtFieldsSuffixed(input.imt_1, 1),
     sk_2: input.sk_2,
     rho_2: input.rho_2,
+    nonce_2: input.nonce_2,
     amount_2: input.amount_2,
     path_2: input.path_2,
     index_bits_2: input.index_bits_2.map(String),
+    ...imtFieldsSuffixed(input.imt_2, 2),
     domain: '4',
-    root: input.root,
+    note_root: input.note_root,
+    nullifier_root_in: input.nullifier_root_in,
+    nullifier_root_out: input.nullifier_root_out,
     nullifier_1: input.nullifier_1,
     nullifier_2: input.nullifier_2,
     asset: String(input.asset),

@@ -181,6 +181,10 @@ export const api = {
     req<OrderProof>(`/desks/${id}/order-proof?order_leaf=${orderLeaf}`),
   getImtWitness: (id: string, value: string) =>
     req<ImtWitnessResp>(`/desks/${id}/imt-witness?value=${value}`),
+  // Sequential witnesses for a multi-insert spend (join: 2, match: <=4); each is against the root
+  // after the previous value was inserted.
+  getImtWitnesses: (id: string, values: string[]) =>
+    req<ImtWitnessResp[]>(`/desks/${id}/imt-witnesses?values=${values.join(',')}`),
   relayMatch: (id: string, proof_b64: string, public_inputs_b64: string) =>
     req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/match`, {
       method: 'POST',

@@ -341,6 +341,36 @@ pub async fn get_imt_witness(
     Ok(Json(serde_json::to_value(w).unwrap()))
 }
 
+#[derive(Deserialize)]
+pub struct ImtWitnessesQuery {
+    /// Comma-separated nullifier values (0x hex), inserted in order — each witness is against the
+    /// root after the previous insert (for multi-insert spends: join 2, match up to 4).
+    pub values: String,
+}
+
+pub async fn get_imt_witnesses(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<ImtWitnessesQuery>,
+) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, "get_imt_witnesses");
+    let desk = st.db.get_desk(&id).await?;
+    let values: Vec<String> = q.values.split(',').map(|s| s.trim().to_string()).collect();
+    let raw = st.db.chain_events(&desk.contract_id).await?;
+    if !raw.is_empty() {
+        return Ok(Json(
+            serde_json::to_value(crate::indexer::imt_witnesses_from_raw(&raw, &values)?).unwrap(),
+        ));
+    }
+    let from = st.db.desk_from_ledger(&id).await?;
+    let w = tokio::task::spawn_blocking(move || {
+        crate::indexer::imt_witnesses(&st.stellar, &desk.contract_id, from, &values)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(serde_json::to_value(w).unwrap()))
+}
+
 // ---- sponsored shield: frontend builds + user-signs the auth entry; sponsor signs envelope ----
 
 #[derive(Deserialize)]

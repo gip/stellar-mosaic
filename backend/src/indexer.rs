@@ -487,6 +487,57 @@ pub fn imt_witness_from_raw(raw: &[serde_json::Value], value: &str) -> AppResult
     imt_witness_inner(&spent, value)
 }
 
+/// Witnesses for inserting SEVERAL values in sequence, each against the root after the previous one
+/// was inserted. This is what a multi-insert spend (join: 2; match: <=4) needs - the later inserts
+/// fold against intermediate roots, not the current one.
+fn imt_witnesses_inner(spent: &[[u8; 32]], values: &[String]) -> AppResult<Vec<ImtWitnessOut>> {
+    let parsed: Result<Vec<[u8; 32]>, _> = values.iter().map(|v| parse_hex32(v)).collect();
+    let parsed = parsed?;
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let mut imt = NullifierImt::new(&env);
+    for nf in spent {
+        imt.insert(word_to_u256(&env, nf));
+    }
+    let mut out = Vec::with_capacity(parsed.len());
+    for v in &parsed {
+        let vu = word_to_u256(&env, v);
+        let root_in = imt.root();
+        let w = imt.witness(vu.clone());
+        out.push(ImtWitnessOut {
+            nullifier_root_in: u256_hex(&root_in),
+            nullifier_root_out: u256_hex(&w.root_out),
+            low_value: u256_hex(&w.low_value),
+            low_next_value: u256_hex(&w.low_next_value),
+            low_next_index: w.low_next_index,
+            low_path: w.low_path.siblings.iter().map(u256_hex).collect(),
+            low_index_bits: w.low_path.index_bits.to_vec(),
+            new_path: w.new_path.siblings.iter().map(u256_hex).collect(),
+            new_index_bits: w.new_path.index_bits.to_vec(),
+        });
+        imt.insert(vu); // advance so the next value witnesses against the new root
+    }
+    Ok(out)
+}
+
+pub fn imt_witnesses_from_raw(
+    raw: &[serde_json::Value],
+    values: &[String],
+) -> AppResult<Vec<ImtWitnessOut>> {
+    let spent: Vec<[u8; 32]> = raw.iter().filter_map(parse_nfspent).collect();
+    imt_witnesses_inner(&spent, values)
+}
+
+pub fn imt_witnesses(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+    values: &[String],
+) -> AppResult<Vec<ImtWitnessOut>> {
+    let spent = scan_events(stellar, contract_id, from_ledger, parse_nfspent)?;
+    imt_witnesses_inner(&spent, values)
+}
+
 pub fn imt_witness(
     stellar: &Stellar,
     contract_id: &str,

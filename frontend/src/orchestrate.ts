@@ -78,6 +78,12 @@ export async function executeUnshield(
 const ZERO_FIELD = '0x' + '0'.repeat(64)
 const ZERO_PATH = Array<string>(32).fill(ZERO_FIELD)
 const ZERO_BITS = Array<number>(32).fill(0)
+// All-zero IMT witness for a gated (disabled) insert — e.g. a split's null second note.
+const ZERO_IMT = {
+  nullifier_root_in: '0', nullifier_root_out: '0', low_value: '0', low_next_value: '0',
+  low_next_index: 0, low_path: ZERO_PATH, low_index_bits: ZERO_BITS,
+  new_path: ZERO_PATH, new_index_bits: ZERO_BITS,
+}
 
 /**
  * Prove + relay one `join`: consume note `a` and an optional same-asset note `b` into a `target` of
@@ -137,21 +143,37 @@ export async function executeJoin(
     index_bits_2 = pb.index_bits
   }
 
+  // Sequential IMT-insert witnesses: nf1 (always), then nf2 (only for a real second input). The
+  // circuit pins nullifier_2 == 0 when the second note is null.
+  const real2 = !!b
+  const nf2 = real2 ? terms.nullifier_2 : '0'
+  onStatus?.('Fetching accumulator witnesses…')
+  const wits = await api.getImtWitnesses(
+    desk.id,
+    real2 ? [terms.nullifier_1, terms.nullifier_2] : [terms.nullifier_1],
+  )
+
   onStatus?.('Proving (UltraHonk, in-browser)…')
   const bundle = await proveJoin({
     sk_1: a.sk,
     rho_1: a.rho,
+    nonce_1,
     amount_1: a.amount,
     path_1: pa.siblings,
     index_bits_1: pa.index_bits,
+    imt_1: wits[0],
     sk_2,
     rho_2,
+    nonce_2,
     amount_2,
     path_2,
     index_bits_2,
-    root: pa.root,
+    imt_2: real2 ? wits[1] : ZERO_IMT,
+    note_root: pa.root,
+    nullifier_root_in: wits[0].nullifier_root_in,
+    nullifier_root_out: real2 ? wits[1].nullifier_root_out : wits[0].nullifier_root_out,
     nullifier_1: terms.nullifier_1,
-    nullifier_2: terms.nullifier_2,
+    nullifier_2: nf2,
     asset: a.asset_id,
     out_tag_1: terms.out_tag_1,
     out_amount_1: targetRaw.toString(),
