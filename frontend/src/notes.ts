@@ -18,6 +18,13 @@ export interface OrderCancelInfo {
   asset_in: number // locked/offered asset — the refund is minted in this asset
   symbol_in: string
   amount_in: string // principal offered; the refund note's initial amount
+  // WS4: the rest of the order's terms, so the cancel circuit can recompute order_leaf to prove
+  // membership in the order tree (the leaf binds all of these).
+  asset_out: number
+  min_out: string
+  output_owner_tag: string
+  expiry: number
+  partial_allowed: boolean
 }
 
 export interface Note {

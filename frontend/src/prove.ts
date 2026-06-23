@@ -211,28 +211,47 @@ export async function proveJoin(input: JoinInputs): Promise<ProofBundle> {
   return { proof, publicInputs: packPublicInputs(publicInputs) }
 }
 
-export interface CancelInputs {
-  // private witness
+export interface CancelInputs extends ImtWitnessFields {
+  // private witness: authority + the order's hidden terms + its order-tree path
   sk_o: string
   rho_ord: string
-  // public inputs (domain is fixed to CANCEL_DOMAIN=3 inside)
-  order_leaf: string
-  cancel_owner_tag: string
+  asset_out: number
+  min_out: string
+  out_owner_tag: string
+  expiry: number
+  partial_allowed: number
+  order_path: string[] // 32 order-tree siblings
+  order_index_bits: number[]
+  // public inputs (domain fixed to CANCEL_DOMAIN=3 inside)
+  order_root: string
+  order_nullifier: string
+  asset_in: number
+  amount_in: string
   return_owner_tag: string
 }
 
-/** Prove the cancel circuit in-browser: proves authority over a resting order's cancel tag and
- * binds the order + return destination. Public inputs (4 fields): domain, order_leaf,
- * cancel_owner_tag, return_owner_tag — order matches the contract's cancel_order. */
+/** Prove the WS4 cancel circuit in-browser: order-tree membership + cancel authority + the
+ * order_leaf consumption-nullifier IMT insert. Public inputs (8 fields): domain, order_root,
+ * nf_root_in, nf_root_out, order_nullifier, asset_in, amount_in, return_owner_tag. */
 export async function proveCancel(input: CancelInputs): Promise<ProofBundle> {
   const compiled = await circuit('cancel')
   const noir = new Noir(compiled)
   const { witness } = await noir.execute({
     sk_o: input.sk_o,
     rho_ord: input.rho_ord,
+    asset_out: String(input.asset_out),
+    min_out: input.min_out,
+    out_owner_tag: input.out_owner_tag,
+    expiry: String(input.expiry),
+    partial_allowed: String(input.partial_allowed),
+    order_path: input.order_path,
+    order_index_bits: input.order_index_bits.map(String),
+    ...imtFields(input),
     domain: '3',
-    order_leaf: input.order_leaf,
-    cancel_owner_tag: input.cancel_owner_tag,
+    order_root: input.order_root,
+    order_nullifier: input.order_nullifier,
+    asset_in: String(input.asset_in),
+    amount_in: input.amount_in,
     return_owner_tag: input.return_owner_tag,
   })
 

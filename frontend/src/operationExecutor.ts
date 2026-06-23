@@ -151,6 +151,8 @@ async function executeOrder(
       asset_in: assetIn,
       symbol_in: desk.assets.find((a) => a.asset_id === assetIn)?.symbol ?? `#${assetIn}`,
       amount_in: offer.amount,
+      asset_out: assetOut, min_out: request.min_out, output_owner_tag: terms.output_owner_tag,
+      expiry, partial_allowed: !!request.partial_allowed,
     },
   }
   await stageRecoverableNote(output)
@@ -185,7 +187,21 @@ async function executeCancel(
   if (!note || !c || note.status !== 'active') throw new Error('The order is no longer cancellable.')
   await updateNote(note.id, { operation_id: operationId, operation_state: 'reserved' })
   const rho_return = randomField(); const return_owner_tag = await noteTag(note.sk, rho_return)
-  const bundle = await proveCancel({ sk_o: note.sk, rho_ord: c.rho_ord, order_leaf: c.order_leaf, cancel_owner_tag: c.cancel_owner_tag, return_owner_tag })
+  // The order's membership path + its consumption nullifier, then that nullifier's IMT insert witness.
+  const op = await api.getOrderProof(desk.id, c.order_leaf)
+  const imt = await api.getImtWitness(desk.id, op.consumption_nullifier)
+  const bundle = await proveCancel({
+    sk_o: note.sk, rho_ord: c.rho_ord,
+    asset_out: c.asset_out, min_out: c.min_out, out_owner_tag: c.output_owner_tag,
+    expiry: c.expiry, partial_allowed: c.partial_allowed ? 1 : 0,
+    order_path: op.siblings, order_index_bits: op.index_bits,
+    nullifier_root_in: imt.nullifier_root_in, nullifier_root_out: imt.nullifier_root_out,
+    low_value: imt.low_value, low_next_value: imt.low_next_value, low_next_index: imt.low_next_index,
+    low_path: imt.low_path, low_index_bits: imt.low_index_bits,
+    new_path: imt.new_path, new_index_bits: imt.new_index_bits,
+    order_root: op.order_root, order_nullifier: op.consumption_nullifier,
+    asset_in: c.asset_in, amount_in: c.amount_in, return_owner_tag,
+  })
   const refund: Note = {
     id: crypto.randomUUID(), deskId: desk.id, role: 'asset', asset_id: c.asset_in,
     symbol: c.symbol_in, amount: c.amount_in, sk: note.sk, rho: rho_return, owner_tag: return_owner_tag,

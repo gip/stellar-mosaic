@@ -397,12 +397,16 @@ pub struct OrderProof {
     pub order_root: String,
     pub siblings: Vec<String>,
     pub index_bits: Vec<u8>,
+    /// compress(ORDER_NULLIFIER_DOMAIN, order_leaf) - the value a match/cancel consumes (so the
+    /// client need not compute Poseidon to drive the imt-witness fetch + the proof's public input).
+    pub consumption_nullifier: String,
 }
 
 fn order_proof_inner(orders: &[OrderRaw], order_leaf: &str) -> AppResult<OrderProof> {
     let want = parse_hex32(order_leaf)?;
     let env = Env::default();
     env.cost_estimate().budget().reset_unlimited();
+    let h = Hasher::new(&env);
     let mut tree = NoteTree::new(&env);
     let mut found = None;
     for o in orders {
@@ -414,11 +418,13 @@ fn order_proof_inner(orders: &[OrderRaw], order_leaf: &str) -> AppResult<OrderPr
     let idx =
         found.ok_or_else(|| AppError::NotFound(format!("no order with leaf {order_leaf}")))?;
     let p = tree.path(idx);
+    let nf = order_consumption_nullifier(&env, &h, &word_to_u256(&env, &want));
     Ok(OrderProof {
         leaf_index: idx,
         order_root: u256_hex(&tree.root()),
         siblings: p.siblings.iter().map(u256_hex).collect(),
         index_bits: p.index_bits.to_vec(),
+        consumption_nullifier: u256_hex(&nf),
     })
 }
 

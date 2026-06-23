@@ -118,6 +118,7 @@ export interface OrderProof {
   order_root: string
   siblings: string[]
   index_bits: number[]
+  consumption_nullifier: string
 }
 
 /** The nullifier-IMT insert witness for a value (`GET /desks/:id/imt-witness`). The exact private
