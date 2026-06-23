@@ -13,11 +13,12 @@
 //!   active | failed   -> terminal.
 //!
 //! Disabled unless `MOSAIC_BASE_RPC` is set. Proving runs server-side (Steel/Groth16 cannot run in a
-//! browser) and shells out to `cargo run -p host -- --prove`; finality uses `cast`.
+//! browser) and shells out to `bridge-prover/run-host -- --prove`; finality uses `cast`.
 
 use crate::db::BaseShieldJob;
 use crate::error::{AppError, AppResult};
 use crate::AppState;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,6 +73,35 @@ fn cast_number(cast: &str, rpc: &str, args: &[&str]) -> anyhow::Result<u64> {
         .map_err(|_| anyhow::anyhow!("cast returned non-numeric: {s}"))
 }
 
+fn prover_command(
+    prover_dir: &Path,
+    rpc: &str,
+    bridge: &str,
+    deposit_id: i64,
+    block: u64,
+    out_dir: &str,
+) -> Command {
+    let mut command = Command::new(prover_dir.join("run-host"));
+    command
+        .current_dir(prover_dir)
+        .args([
+            "--",
+            "--rpc-url",
+            rpc,
+            "--bridge",
+            bridge,
+            "--deposit-id",
+            &deposit_id.to_string(),
+            "--block",
+            &block.to_string(),
+            "--prove",
+            "--out-dir",
+            out_dir,
+        ])
+        .env("RUST_LOG", "info");
+    command
+}
+
 async fn prove(state: &Arc<AppState>, job: &BaseShieldJob) -> AppResult<()> {
     let rpc = state
         .config
@@ -86,30 +116,21 @@ async fn prove(state: &Arc<AppState>, job: &BaseShieldJob) -> AppResult<()> {
     let job_id = job.id.clone();
 
     // Prove against a recent (in-window) block; the seal commits that block and never expires.
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(i64, String, String, String)> {
-        let head = cast_number(&cast, &rpc, &["block-number"])?;
-        let out = out_dir.to_string_lossy().to_string();
-        let status = Command::new("cargo")
-            .current_dir(&prover_dir)
-            .args([
-                "run", "--release", "-p", "host", "--",
-                "--rpc-url", &rpc,
-                "--bridge", &bridge,
-                "--deposit-id", &deposit_id.to_string(),
-                "--block", &head.to_string(),
-                "--prove", "--out-dir", &out,
-            ])
-            .env("RUST_LOG", "info")
-            .status()?;
-        anyhow::ensure!(status.success(), "prover exited with {status}");
-        let seal = std::fs::read(out_dir.join("seal.bin"))?;
-        let journal = std::fs::read(out_dir.join("journal.bin"))?;
-        let (bn, bh) =
-            parse_journal_block(&journal).ok_or_else(|| anyhow::anyhow!("journal not 256 bytes"))?;
-        Ok((bn as i64, bh, hex::encode(&seal), hex::encode(&journal)))
-    })
-    .await
-    .map_err(|e| AppError::Other(e.into()))?;
+    let result =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<(i64, String, String, String)> {
+            let head = cast_number(&cast, &rpc, &["block-number"])?;
+            let out = out_dir.to_string_lossy().to_string();
+            let status =
+                prover_command(&prover_dir, &rpc, &bridge, deposit_id, head, &out).status()?;
+            anyhow::ensure!(status.success(), "prover exited with {status}");
+            let seal = std::fs::read(out_dir.join("seal.bin"))?;
+            let journal = std::fs::read(out_dir.join("journal.bin"))?;
+            let (bn, bh) = parse_journal_block(&journal)
+                .ok_or_else(|| anyhow::anyhow!("journal not 256 bytes"))?;
+            Ok((bn as i64, bh, hex::encode(&seal), hex::encode(&journal)))
+        })
+        .await
+        .map_err(|e| AppError::Other(e.into()))?;
 
     match result {
         Ok((bn, bh, seal_hex, journal_hex)) => {
@@ -121,7 +142,10 @@ async fn prove(state: &Arc<AppState>, job: &BaseShieldJob) -> AppResult<()> {
         }
         Err(e) => {
             tracing::warn!(job = %job_id, error = %e, "base-shield: prove failed");
-            state.db.base_shield_failed(&job_id, &format!("prove: {e}")).await?;
+            state
+                .db
+                .base_shield_failed(&job_id, &format!("prove: {e}"))
+                .await?;
         }
     }
     Ok(())
@@ -190,7 +214,10 @@ async fn mint(state: &Arc<AppState>, job: &BaseShieldJob) -> AppResult<()> {
         }
         Err(e) => {
             tracing::warn!(job = %job_id, error = %e, "base-shield: mint failed");
-            state.db.base_shield_failed(&job_id, &format!("mint: {e}")).await?;
+            state
+                .db
+                .base_shield_failed(&job_id, &format!("mint: {e}"))
+                .await?;
         }
     }
     Ok(())
@@ -198,7 +225,9 @@ async fn mint(state: &Arc<AppState>, job: &BaseShieldJob) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_journal_block;
+    use super::{parse_journal_block, prover_command};
+    use std::ffi::OsStr;
+    use std::path::Path;
 
     #[test]
     fn parse_journal_block_reads_word0_and_word1() {
@@ -213,5 +242,46 @@ mod tests {
     #[test]
     fn parse_journal_block_rejects_wrong_length() {
         assert!(parse_journal_block(&[0u8; 100]).is_none());
+    }
+
+    #[test]
+    fn prover_command_uses_launcher_and_preserves_host_arguments() {
+        let command = prover_command(
+            Path::new("/tmp/bridge-prover"),
+            "https://rpc.example",
+            "0x1234",
+            7,
+            99,
+            "/tmp/proof output",
+        );
+
+        assert_eq!(
+            command.get_program(),
+            OsStr::new("/tmp/bridge-prover/run-host")
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--",
+                "--rpc-url",
+                "https://rpc.example",
+                "--bridge",
+                "0x1234",
+                "--deposit-id",
+                "7",
+                "--block",
+                "99",
+                "--prove",
+                "--out-dir",
+                "/tmp/proof output",
+            ]
+        );
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "RUST_LOG" && value == Some(OsStr::new("info"))));
     }
 }

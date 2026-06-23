@@ -8,10 +8,10 @@
 //!
 //! Execute only:
 //!   RPC_URL=<base sepolia rpc> RUST_LOG=info \
-//!     cargo run --release -- --bridge 0x<MosaicBridge> --deposit-id 1 --block <N>
+//!     ./run-host -- --bridge 0x<MosaicBridge> --deposit-id 1 --block <N>
 //!
 //! Prove (Groth16) and write out/{seal.hex,journal.hex,seal.bin,journal.bin}:
-//!   RPC_URL=... RUST_LOG=info cargo run --release -- --bridge 0x.. --deposit-id 1 --block <N> --prove
+//!   RPC_URL=... RUST_LOG=info ./run-host -- --bridge 0x.. --deposit-id 1 --block <N> --prove
 //!
 //! Local Groth16 proving needs the RISC Zero prover stack (`r0vm`/Docker, or `RISC0_PROVER=bonsai`).
 //! The emitted `seal` is what the Boundless marketplace returns and what the Nethermind verifier

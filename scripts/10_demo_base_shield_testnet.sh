@@ -118,7 +118,7 @@ echo "==> 3. prove the deposit NOW, while its block is in the eth_getProof windo
 # (blockNumber, blockHash) and never expire, so we HOLD them and only mint after that block finalizes
 # (next step). This gives true finality safety WITHOUT an archive getProof RPC: the proof's getProof
 # happens now while in-window, and the finality wait is a pure block-number check (no getProof).
-( cd "$PROVER" && RUST_LOG=info cargo run --release -p host -- \
+( cd "$PROVER" && RUST_LOG=info ./run-host -- \
     --rpc-url "$BASE_RPC" --bridge "$BRIDGE" --deposit-id "$DEPOSIT_ID" --block "$DEPOSIT_BLOCK" \
     --prove --out-dir "$PROVER/out" )
 SEAL="$PROVER/out/seal.bin"; JOURNAL="$PROVER/out/journal.bin"

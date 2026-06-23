@@ -40,24 +40,31 @@ Current image id (`bridge_methods::BRIDGE_GUEST_ID`, changes if the guest or its
 ## Prerequisites
 
 - Rust 1.96 (pinned in `rust-toolchain.toml`) + the RISC Zero toolchain (`cargo-risczero`, `r0vm`).
-- The PICO/bless **steel** checkout at `../../PICO/bless/steel` relative to this repo — the path deps
-  in `Cargo.toml` and `methods/guest/Cargo.toml` point at `crates/steel` there (external, like
-  `vendor/`). Adjust the two `risc0-steel = { path = ... }` lines if your checkout differs.
+- Network access for the crates.io dependencies and the pinned `boundless-xyz/steel` git dependency
+  on the first build. No external Steel checkout is required.
 
 ## Build & run
 
 ```bash
-cargo build                       # builds host + cross-compiles the guest, fixes the image id
-
 # Execute only (fast journal-only check). Needs a real Shielded event on-chain:
 # deploy via ../evm and shield first.
 RPC_URL=https://sepolia.base.org RUST_LOG=info \
-  cargo run --release -- --bridge 0x<MosaicBridge> --deposit-id 0
+  ./run-host -- --bridge 0x<MosaicBridge> --deposit-id 0
 
 # Prove (Groth16) and write the router-ready artifacts to out/{seal.hex,journal.hex}.
 RPC_URL=https://sepolia.base.org RUST_LOG=info \
-  cargo run --release -- --bridge 0x<MosaicBridge> --deposit-id 0 --prove
+  ./run-host -- --bridge 0x<MosaicBridge> --deposit-id 0 --prove
 ```
+
+`run-host` builds the fat-LTO release binary on the first invocation, then executes it directly
+while its content fingerprint is unchanged. This avoids `risc0_build::embed_methods()` rewriting
+`methods.rs` and making Cargo relink the full prover stack on every `cargo run`. Host, methods, or
+guest source changes; manifests and lockfiles; toolchain/configuration changes; and build-affecting
+environment changes invalidate the cache. Use `./run-host --force-rebuild -- <arguments>` after an
+untracked build-environment change. `CARGO_TARGET_DIR` is respected.
+
+The launcher does not change the proof or guest image. An actual guest/dependency change still
+changes the image ID and requires regenerating the committed ID and on-chain configuration together.
 
 `--prove` produces a Groth16 `Receipt`, verifies it locally against the pinned image id, and
 `encode_seal`s it. The emitted `seal` + `journal` are exactly the two arguments Stellar

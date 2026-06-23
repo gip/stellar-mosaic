@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${HOST_LOG:?}"
+
+{
+  printf 'env:%s\n' "${FORWARDED_ENV:-}"
+  for arg in "$@"; do
+    printf 'arg:%s\n' "$arg"
+  done
+} >> "$HOST_LOG"
+
+exit "${HOST_EXIT:-0}"

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${1:-}" = "-V" ]; then
+  echo "cargo ${FAKE_CARGO_VERSION:-test-1}"
+  exit 0
+fi
+
+[ "${1:-}" = "build" ] || { echo "unexpected fake Cargo arguments: $*" >&2; exit 2; }
+: "${BUILD_LOG:?}"
+: "${CARGO_TARGET_DIR:?}"
+: "${FAKE_HOST_TEMPLATE:?}"
+
+printf 'build\n' >> "$BUILD_LOG"
+sleep "${FAKE_BUILD_DELAY:-0}"
+[ "${FAIL_BUILD:-0}" != "1" ] || exit 42
+
+mkdir -p "$CARGO_TARGET_DIR/release"
+cp "$FAKE_HOST_TEMPLATE" "$CARGO_TARGET_DIR/release/host"
+chmod +x "$CARGO_TARGET_DIR/release/host"

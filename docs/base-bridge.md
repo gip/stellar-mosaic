@@ -69,10 +69,12 @@ settlement contract with `configure_base_bridge(router, image_id, config_id, bri
 script server-side (proving can't run in a browser). Enqueue a job with
 `POST /desks/:id/base-shields {bridge, deposit_id}`; the worker advances a `base_shields` row through
 `proving → awaiting_finality → minting → active|failed`, persisting the proof in SQL so a restart
-resumes. It shells `cargo run -p host -- --prove` (proving at a recent in-window block), polls Base
-`finalized` via `cast` (prove-then-finalize), then attests + `shield_from_base` via the desk sponsor.
-Disabled unless `MOSAIC_BASE_RPC` is set. Proving is local Groth16; swapping that step for the
-Boundless marketplace (same router-compatible seal) is a drop-in future change.
+resumes. It invokes `MOSAIC_PROVER_DIR/run-host -- --prove` (proving at a recent in-window block),
+polls Base `finalized` via `cast` (prove-then-finalize), then attests + `shield_from_base` via the
+desk sponsor. The launcher fingerprints the embedded guest and host build inputs, so unchanged jobs
+reuse the release binary without asking Cargo to relink the prover stack. Disabled unless
+`MOSAIC_BASE_RPC` is set. Proving is local Groth16; swapping that step for the Boundless marketplace
+(same router-compatible seal) is a drop-in future change.
 
 ## The journal — the WS2 ↔ WS4 contract
 

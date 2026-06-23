@@ -150,6 +150,12 @@ Base block, then mints the note. The script:
 The Groth16 wrap runs locally via Docker (~4.5 min) — that's why `docker` is a prerequisite (or set
 `RISC0_PROVER=bonsai`).
 
+The Base script invokes `bridge-prover/run-host`, which builds the release host once and then runs
+the cached binary while its content fingerprint remains current. Avoid replacing it with
+`cargo run`: RISC Zero intentionally regenerates the embedded-methods output on every Cargo
+invocation, which forces an otherwise unnecessary fat-LTO host relink. Use
+`bridge-prover/run-host --force-rebuild -- <arguments>` to rebuild explicitly.
+
 ### Finality toggle
 
 By **default the Base leg runs in fast mode**: it mints as soon as the proof is ready, against the
