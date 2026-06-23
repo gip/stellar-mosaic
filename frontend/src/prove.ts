@@ -114,14 +114,15 @@ export async function proveLift(input: LiftInputs): Promise<ProofBundle> {
   return { proof, publicInputs: packPublicInputs(publicInputs) }
 }
 
-export interface UnshieldInputs {
+export interface UnshieldInputs extends ImtWitnessFields {
   // private witness
   rho_in: string
   sk_o: string
+  nonce_in: string
   path: string[] // 32 siblings (0x hex)
   index_bits: number[] // 32 bits
   // public inputs (domain is fixed to UNSHIELD_DOMAIN=2 inside)
-  root: string
+  note_root: string
   nullifier: string
   asset: number
   amount: string
@@ -129,17 +130,19 @@ export interface UnshieldInputs {
 }
 
 /** Prove ownership and full consumption of one asset note, binding the public payout recipient.
- * Public inputs (6 fields): domain, root, nullifier, asset, amount, recipient. */
+ * WS4 8-field PI: domain, note_root, nf_root_in, nf_root_out, nullifier, asset, amount, recipient. */
 export async function proveUnshield(input: UnshieldInputs): Promise<ProofBundle> {
   const compiled = await circuit('unshield')
   const noir = new Noir(compiled)
   const { witness } = await noir.execute({
     rho_in: input.rho_in,
     sk_o: input.sk_o,
+    nonce_in: input.nonce_in,
     path: input.path,
     index_bits: input.index_bits.map(String),
+    ...imtFields(input),
     domain: '2',
-    root: input.root,
+    note_root: input.note_root,
     nullifier: input.nullifier,
     asset: String(input.asset),
     amount: input.amount,

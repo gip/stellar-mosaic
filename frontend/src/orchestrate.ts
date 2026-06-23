@@ -32,20 +32,33 @@ export async function executeUnshield(
 ): Promise<void> {
   onStatus?.('Deriving unshield terms…')
   const [nullifier, recipient] = await Promise.all([
-    noteNullifier(note.sk, note.rho),
+    noteNullifier(note.sk, note.rho, note.nonce ?? '0'),
     recipientField(to),
   ])
 
-  onStatus?.('Fetching membership path…')
-  const membership = await api.getNoteProof(desk.id, note.owner_tag)
+  onStatus?.('Fetching membership path + accumulator witness…')
+  const [membership, imt] = await Promise.all([
+    api.getNoteProof(desk.id, note.owner_tag),
+    api.getImtWitness(desk.id, nullifier),
+  ])
 
   onStatus?.('Proving (UltraHonk, in-browser)…')
   const bundle = await proveUnshield({
     rho_in: note.rho,
     sk_o: note.sk,
+    nonce_in: note.nonce ?? '0',
     path: membership.siblings,
     index_bits: membership.index_bits,
-    root: membership.root,
+    note_root: membership.root,
+    nullifier_root_in: imt.nullifier_root_in,
+    nullifier_root_out: imt.nullifier_root_out,
+    low_value: imt.low_value,
+    low_next_value: imt.low_next_value,
+    low_next_index: imt.low_next_index,
+    low_path: imt.low_path,
+    low_index_bits: imt.low_index_bits,
+    new_path: imt.new_path,
+    new_index_bits: imt.new_index_bits,
     nullifier,
     asset: note.asset_id,
     amount: note.amount,
