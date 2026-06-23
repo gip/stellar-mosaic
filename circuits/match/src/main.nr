@@ -71,9 +71,6 @@ fn main(
     m_low_index_bits: [[Field; TREE_DEPTH]; N_MAKERS],
     m_new_path: [[Field; TREE_DEPTH]; N_MAKERS],
     m_new_index_bits: [[Field; TREE_DEPTH]; N_MAKERS],
-    // --- taker remainder (re-rested order), if any ---
-    rem_amount_in: Field,
-    rem_min_out: Field,
     // --- public inputs ---
     domain: pub Field,
     order_root: pub Field,
@@ -101,6 +98,14 @@ fn main(
     p3_amount: pub Field,
     p3_tag: pub Field,
     remainder_live: pub Field,
+    rem_asset_in: pub Field,
+    rem_amount_in: pub Field,
+    rem_asset_out: pub Field,
+    rem_min_out: pub Field,
+    rem_output_owner_tag: pub Field,
+    rem_cancel_owner_tag: pub Field,
+    rem_expiry: pub Field,
+    rem_partial_allowed: pub Field,
     remainder_order_leaf: pub Field,
 ) {
     assert(domain == MATCH_DOMAIN);
@@ -229,25 +234,34 @@ fn main(
         assert(p_tag[i] == m_proc_tag[i]);
     }
 
-    // --- taker remainder ---
+    // --- taker remainder (re-rested order; ALL terms are public so the contract can emit them and
+    // a fully-direct client reconstructs the order from events alone) ---
     // taker cannot pay more than it holds; leftover re-rests at the taker's exact limit ratio.
     assert(lte(total_in_paid, t_amount_in));
     let remainder = t_amount_in - total_in_paid;
     let rem_real = remainder != 0;
     let rem_real_f = rem_real as Field;
     assert(remainder_live == rem_real_f);
-    // bind the witnessed remainder amount/price (gated): amount == leftover, same price ratio.
-    assert(rem_real_f * (rem_amount_in - remainder) == 0);
+    // when live, the remainder inherits the taker's asset/tags/expiry/flag and carries the leftover
+    // amount at the taker's exact limit ratio; when not live every public field is forced to 0.
+    assert(rem_asset_in == rem_real_f * t_asset_in);
+    assert(rem_asset_out == rem_real_f * t_asset_out);
+    assert(rem_output_owner_tag == rem_real_f * t_out_tag);
+    assert(rem_cancel_owner_tag == rem_real_f * t_cancel_tag);
+    assert(rem_expiry == rem_real_f * t_expiry);
+    assert(rem_partial_allowed == rem_real_f * t_partial);
+    assert(rem_amount_in == rem_real_f * remainder);
+    assert((1 - rem_real_f) * rem_min_out == 0);
     assert(rem_real_f * (rem_min_out * t_amount_in - t_min_out * rem_amount_in) == 0);
-    let rem_leaf = build_order_leaf(
-        t_asset_in,
+    let computed_rem_leaf = build_order_leaf(
+        rem_asset_in,
         rem_amount_in,
-        t_asset_out,
+        rem_asset_out,
         rem_min_out,
-        t_out_tag,
-        t_cancel_tag,
-        t_expiry,
-        t_partial,
+        rem_output_owner_tag,
+        rem_cancel_owner_tag,
+        rem_expiry,
+        rem_partial_allowed,
     );
-    assert(remainder_order_leaf == rem_real_f * rem_leaf);
+    assert(remainder_order_leaf == rem_real_f * computed_rem_leaf);
 }

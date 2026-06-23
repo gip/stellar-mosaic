@@ -56,10 +56,21 @@ pub struct NoteInserted {
     pub owner_tag: BytesN<32>,
 }
 
-/// One leaf appended to the ORDER-commitment tree (a placement or a re-rested match remainder), in
-/// tree-insert order. Lets the indexer rebuild order-tree membership paths.
+/// One order appended to the ORDER-commitment tree (a placement or a re-rested match remainder), in
+/// tree-insert order, carrying its FULL public terms. Order terms are public (amount-transparent), so
+/// emitting them lets a client reconstruct the entire active book from events alone - no per-tx
+/// calldata fetching - and rebuild order-tree membership paths. Active = this leaf is in `orderins`
+/// and its consumption nullifier `compress(ORDER_NULLIFIER_DOMAIN, order_leaf)` is NOT in `nfspent`.
 #[contractevent(topics = ["orderins"], data_format = "vec")]
 pub struct OrderInserted {
+    pub asset_in: u32,
+    pub amount_in: i128,
+    pub asset_out: u32,
+    pub min_out: i128,
+    pub output_owner_tag: BytesN<32>,
+    pub cancel_owner_tag: BytesN<32>,
+    pub expiry: u64,
+    pub partial_allowed: bool,
     pub order_leaf: BytesN<32>,
 }
 
@@ -107,6 +118,11 @@ const CANCEL_OP: u32 = 3;
 const JOIN_OP: u32 = 4;
 const MATCH_OP: u32 = 5;
 
+/// Maximum time an order may rest (seconds). Bounds the event-history window a fully-direct client
+/// must scan to see every possibly-active order: anything older is provably expired (the match
+/// circuit rejects `expiry < now`). Set at/below the RPC event-retention window.
+const MAX_ORDER_TTL: u64 = 7 * 24 * 60 * 60; // 7 days
+
 /// WS4 public-input lengths (positional, 32-byte big-endian field words). Every spend now also binds
 /// the nullifier-IMT transition (`nullifier_root_in`/`out`); see docs/noir-matching.md and circuits/.
 //   lift/place_order: [0]domain [1]note_root [2]nf_root_in [3]nf_root_out [4]nullifier_in
@@ -125,8 +141,10 @@ const JOIN_PUBLIC_INPUTS_BYTES: u32 = 11 * 32;
 //   match (settle_match): [0]domain [1]order_root [2]nf_root_in [3]nf_root_out [4]now
 //         [5..9] four consumed order nullifiers (taker + up to 3 makers; 0 = unused)
 //         [9..25] four proceeds slots {live, asset, amount, note_owner_tag}
-//         [25]remainder_live [26]remainder_order_leaf
-const MATCH_PUBLIC_INPUTS_BYTES: u32 = 27 * 32;
+//         [25]remainder_live [26]rem_asset_in [27]rem_amount_in [28]rem_asset_out [29]rem_min_out
+//         [30]rem_output_owner_tag [31]rem_cancel_owner_tag [32]rem_expiry [33]rem_partial_allowed
+//         [34]remainder_order_leaf   (full remainder terms so the re-rested order is event-derived)
+const MATCH_PUBLIC_INPUTS_BYTES: u32 = 35 * 32;
 /// Domain separators as 32-byte big-endian field words.
 const LIFT_DOMAIN: [u8; 32] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
@@ -591,14 +609,33 @@ impl Settlement {
         let order = parse_order(&env, &public_inputs)?;
         // The order must name a registered canonical pair (reject unknown pairs early).
         let _ = pair_and_side(&env, order.asset_in, order.asset_out)?;
+        // Bound order lifetime: an order must not already be expired, nor rest longer than
+        // MAX_ORDER_TTL. This caps how far back a fully-direct client must scan events to see every
+        // possibly-active order (anything older is provably expired; the match circuit rejects it).
+        let now = env.ledger().timestamp();
+        if order.expiry < now || order.expiry > now + MAX_ORDER_TTL {
+            return Err(Error::OrderExpired);
+        }
         // Advance the nullifier accumulator: [2] root_in must be current, [3] root_out becomes current.
         let nf_in = BytesN::from_array(&env, &read_word(&public_inputs, 64));
         let nf_out = BytesN::from_array(&env, &read_word(&public_inputs, 96));
         advance_nullifier_root(&env, &nf_in, &nf_out)?;
         NullifierSpent { nullifier: order.nullifier.clone() }.publish(&env);
-        // Rest the order: append its leaf to the order tree.
+        // Rest the order: append its leaf to the order tree and announce its full public terms.
         let h = Hasher::new(&env);
-        order_insert(&env, &h, &order.order_leaf);
+        order_insert(
+            &env,
+            &h,
+            order.asset_in,
+            order.amount_in,
+            order.asset_out,
+            order.min_out,
+            &order.output_owner_tag,
+            &order.cancel_owner_tag,
+            order.expiry,
+            order.partial_allowed,
+            &order.order_leaf,
+        );
         bump_core(&env);
         Ok(())
     }
@@ -661,12 +698,36 @@ impl Settlement {
             }
             p += 1;
         }
-        // [25],[26] remainder order: re-rest if live.
+        // [25] remainder live; [26..34] the remainder's full terms; [34] its leaf. Re-rest if live.
         match word_to_u32(&read_word(&public_inputs, 25 * 32))? {
             0 => {}
             1 => {
-                let rem_leaf = BytesN::from_array(&env, &read_word(&public_inputs, 26 * 32));
-                order_insert(&env, &h, &rem_leaf);
+                let rem_asset_in = word_to_u32(&read_word(&public_inputs, 26 * 32))?;
+                let rem_amount_in = word_to_i128(&read_word(&public_inputs, 27 * 32))?;
+                let rem_asset_out = word_to_u32(&read_word(&public_inputs, 28 * 32))?;
+                let rem_min_out = word_to_i128(&read_word(&public_inputs, 29 * 32))?;
+                let rem_out_tag = BytesN::from_array(&env, &read_word(&public_inputs, 30 * 32));
+                let rem_cancel_tag = BytesN::from_array(&env, &read_word(&public_inputs, 31 * 32));
+                let rem_expiry = word_to_u64(&read_word(&public_inputs, 32 * 32))?;
+                let rem_partial = match word_to_u32(&read_word(&public_inputs, 33 * 32))? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(Error::BadPublicInputs),
+                };
+                let rem_leaf = BytesN::from_array(&env, &read_word(&public_inputs, 34 * 32));
+                order_insert(
+                    &env,
+                    &h,
+                    rem_asset_in,
+                    rem_amount_in,
+                    rem_asset_out,
+                    rem_min_out,
+                    &rem_out_tag,
+                    &rem_cancel_tag,
+                    rem_expiry,
+                    rem_partial,
+                    &rem_leaf,
+                );
             }
             _ => return Err(Error::BadPublicInputs),
         }
@@ -1231,10 +1292,37 @@ fn advance_nullifier_root(env: &Env, root_in: &BytesN<32>, root_out: &BytesN<32>
     Ok(())
 }
 
-/// Append a leaf to the order-commitment tree and announce it for the indexer.
-fn order_insert(env: &Env, h: &Hasher, order_leaf: &BytesN<32>) {
+/// Append an order to the order-commitment tree and announce its full public terms (for an
+/// event-derived book) + leaf (for path reconstruction). `order_leaf` must equal H8(the terms);
+/// callers pass it pre-bound (place_order from the verified lift PI, settle_match from the verified
+/// match PI) so the contract never re-hashes.
+#[allow(clippy::too_many_arguments)]
+fn order_insert(
+    env: &Env,
+    h: &Hasher,
+    asset_in: u32,
+    amount_in: i128,
+    asset_out: u32,
+    min_out: i128,
+    output_owner_tag: &BytesN<32>,
+    cancel_owner_tag: &BytesN<32>,
+    expiry: u64,
+    partial_allowed: bool,
+    order_leaf: &BytesN<32>,
+) {
     tree_insert(env, h, TreeId::Order, &bytesn_to_u256(env, order_leaf));
-    OrderInserted { order_leaf: order_leaf.clone() }.publish(env);
+    OrderInserted {
+        asset_in,
+        amount_in,
+        asset_out,
+        min_out,
+        output_owner_tag: output_owner_tag.clone(),
+        cancel_owner_tag: cancel_owner_tag.clone(),
+        expiry,
+        partial_allowed,
+        order_leaf: order_leaf.clone(),
+    }
+    .publish(env);
 }
 
 /// Copy the 32-byte big-endian word at byte `off` out of the public-input blob.
