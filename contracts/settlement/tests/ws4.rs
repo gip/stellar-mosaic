@@ -7,9 +7,9 @@
 //!   - place_order verifies the real proof, advances the nullifier accumulator by the note-spend
 //!     nullifier, and appends the bound order leaf to the order tree.
 //!
-//! Fixtures (tests/fixtures/ws4/) are real bb 0.87.0 artifacts; regenerate with the scenario in this
-//! file's header values (sk=0x11, rho_in=0x22, nonce_in=0x33, rho_out=0x44, rho_ord=0x55; order:
-//! give 100 asset1, want >=1500 asset2; expiry 1000).
+//! Fixtures (tests/fixtures/ws4/) are real bb 0.87.0 artifacts; regenerate with
+//! `python3 tests/fixtures/ws4/regen.py` (drives tools/indexer's witness bin + nargo + bb). The
+//! scenario secrets are hard-coded here AND in regen.py so this file can recompute tags off-chain.
 
 use mosaic_indexer::{
     order_consumption_nullifier, order_leaf, u256_to_word, word_to_u256, Hasher, NoteTree,
