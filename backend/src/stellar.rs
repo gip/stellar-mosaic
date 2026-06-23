@@ -67,24 +67,8 @@ impl Stellar {
         Ok(raw.trim().trim_matches('"').to_string())
     }
 
-    /// `book(pair_id, side)` -> parsed JSON value (a list of OrderEntry).
-    pub fn book(
-        &self,
-        contract_id: &str,
-        source: &str,
-        pair_id: u32,
-        side: u32,
-    ) -> AppResult<serde_json::Value> {
-        let pair = pair_id.to_string();
-        let side_s = side.to_string();
-        let raw = self.invoke_read(
-            contract_id,
-            source,
-            &["book", "--pair_id", &pair, "--side", &side_s],
-        )?;
-        serde_json::from_str(&raw)
-            .map_err(|e| AppError::Stellar(format!("parse book json: {e}; raw={raw}")))
-    }
+    // WS4 removed the on-chain `book()` method — the order book is reconstructed off-chain from
+    // `orderins`/`nfspent` events (see indexer::order_book), so there is no `book` invocation here.
 
     // ---- write / deploy path (Phase 2+) ----
 

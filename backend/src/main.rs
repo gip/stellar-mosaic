@@ -107,6 +107,10 @@ async fn main() -> anyhow::Result<()> {
             post(handlers::relay_cancel),
         )
         .route(
+            "/client-actions/relay/desks/:id/match",
+            post(handlers::relay_match),
+        )
+        .route(
             "/wallet-backups/:backup_id",
             get(handlers::get_wallet_backup).put(handlers::put_wallet_backup),
         )

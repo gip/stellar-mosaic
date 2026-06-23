@@ -36,7 +36,10 @@ async fn create(
         .get("kind")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::BadRequest("operation kind required".into()))?;
-    if !matches!(kind, "shield" | "place_order" | "unshield" | "cancel_order") {
+    if !matches!(
+        kind,
+        "shield" | "place_order" | "unshield" | "cancel_order" | "match"
+    ) {
         return Err(AppError::BadRequest("unsupported operation kind".into()));
     }
     let desk_id = body
