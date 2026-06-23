@@ -185,25 +185,27 @@ pub async fn get_root(
 
 #[derive(Deserialize)]
 pub struct BookQuery {
-    pub pair: u32,
-    pub side: u32,
+    /// Optional client-side filters; the event-derived book carries each order's assets, so the
+    /// caller can also filter locally. `include_consumed` keeps matched/cancelled orders (history).
+    pub include_consumed: Option<bool>,
 }
 
+/// The active order book, reconstructed purely from `orderins`/`nfspent` events (WS4: no on-chain
+/// `book()` call, no per-tx calldata). Each order carries its full public terms + active flag.
 pub async fn get_book(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(q): Query<BookQuery>,
 ) -> AppResult<Json<Value>> {
-    tracing::info!(desk = %id, pair = q.pair, side = q.side, "get_book");
+    tracing::info!(desk = %id, "get_book");
     let desk = st.db.get_desk(&id).await?;
-    let book = st
-        .stellar
-        .book(&desk.contract_id, &read_source(&desk, &st), q.pair, q.side)?;
-    Ok(Json(json!({
-        "pair": q.pair,
-        "side": q.side,
-        "orders": book,
-    })))
+    let orders = crate::indexer::order_book(
+        &st.stellar,
+        &desk.contract_id,
+        None,
+        q.include_consumed.unwrap_or(false),
+    )?;
+    Ok(Json(json!({ "orders": orders })))
 }
 
 // ---- note discovery + membership paths (indexer) ----

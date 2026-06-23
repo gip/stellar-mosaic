@@ -9,18 +9,20 @@
 use crate::error::{AppError, AppResult};
 use crate::stellar::Stellar;
 use base64::Engine;
-use mosaic_indexer::NoteTree;
+use mosaic_indexer::{order_consumption_nullifier, u256_to_word, word_to_u256, Hasher, NoteTree};
 use serde::Serialize;
 use soroban_sdk::{Env, U256};
+use std::collections::HashSet;
 
-/// A leaf-producing event, in insertion order.
+/// A note-tree leaf-producing event, in insertion order (`shielded` / `noteins`). WS4 removed the
+/// monolithic `settled` event; proceeds notes from `settle_match` and cancel returns are plain
+/// `noteins`.
 enum TreeEvent {
     Insert {
         asset: u32,
         amount: i128,
         tag: [u8; 32],
     },
-    Settled([(u32, i128, [u8; 32]); 2]),
 }
 
 /// One note known to the tree.
@@ -153,11 +155,6 @@ fn build_events(events: Vec<TreeEvent>) -> AppResult<(NoteTree, Vec<NoteInfo>)> 
                 let i = tree.ingest_note(asset, amount, &tag);
                 record(i, asset, amount, &tag);
             }
-            TreeEvent::Settled([(aao, bai, at), (bao, aai, bt)]) => {
-                let (ia, ib) = tree.ingest_settled(aao, bai, &at, bao, aai, &bt);
-                record(ia, aao, bai, &at);
-                record(ib, bao, aai, &bt);
-            }
         }
     }
     Ok((tree, notes))
@@ -233,15 +230,6 @@ fn parse_event(v: &serde_json::Value) -> Option<TreeEvent> {
             let tag = r.scbytes32()?;
             Some(TreeEvent::Insert { asset, amount, tag })
         }
-        "settled" if n == 6 => {
-            let aao = r.scu32()?;
-            let bai = r.sci128()?;
-            let at = r.scbytes32()?;
-            let bao = r.scu32()?;
-            let aai = r.sci128()?;
-            let bt = r.scbytes32()?;
-            Some(TreeEvent::Settled([(aao, bai, at), (bao, aai, bt)]))
-        }
         _ => None,
     }
 }
@@ -281,6 +269,122 @@ fn parse_fill(v: &serde_json::Value) -> Option<FillInfo> {
         amount_out: amount_out.to_string(),
         owner_tag: fmt_hex32(&tag),
     })
+}
+
+/// One resting order, decoded from an `orderins` event (full public terms + leaf). `active` is false
+/// once the order's consumption nullifier `compress(ORDER_NULLIFIER_DOMAIN, order_leaf)` appears in a
+/// `nfspent` event (matched or cancelled). This is the event-derived order book: no per-tx calldata
+/// fetching, no contract `book()` call.
+#[derive(Serialize, Clone)]
+pub struct OrderInfo {
+    pub leaf_index: usize,
+    pub order_leaf: String, // 0x + 64 hex
+    pub asset_in: u32,
+    pub amount_in: String,
+    pub asset_out: u32,
+    pub min_out: String,
+    pub output_owner_tag: String,
+    pub cancel_owner_tag: String,
+    pub expiry: u64,
+    pub partial_allowed: bool,
+    pub active: bool,
+}
+
+struct OrderRaw {
+    asset_in: u32,
+    amount_in: i128,
+    asset_out: u32,
+    min_out: i128,
+    output_owner_tag: [u8; 32],
+    cancel_owner_tag: [u8; 32],
+    expiry: u64,
+    partial_allowed: bool,
+    order_leaf: [u8; 32],
+}
+
+/// Reconstruct the active order book purely from events: every `orderins` (placement or re-rested
+/// match remainder) in tree-insert order, minus those whose consumption nullifier appears in
+/// `nfspent`. `include_consumed` keeps the inactive ones (e.g. for history).
+pub fn order_book(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+    include_consumed: bool,
+) -> AppResult<Vec<OrderInfo>> {
+    let orders = scan_events(stellar, contract_id, from_ledger, parse_orderins)?;
+    let spent: Vec<[u8; 32]> = scan_events(stellar, contract_id, from_ledger, parse_nfspent)?;
+    let spent: HashSet<[u8; 32]> = spent.into_iter().collect();
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let h = Hasher::new(&env);
+    let mut out = Vec::new();
+    for (i, o) in orders.iter().enumerate() {
+        let leaf_u = word_to_u256(&env, &o.order_leaf);
+        let nf = u256_to_word(&order_consumption_nullifier(&env, &h, &leaf_u));
+        let active = !spent.contains(&nf);
+        if active || include_consumed {
+            out.push(OrderInfo {
+                leaf_index: i,
+                order_leaf: fmt_hex32(&o.order_leaf),
+                asset_in: o.asset_in,
+                amount_in: o.amount_in.to_string(),
+                asset_out: o.asset_out,
+                min_out: o.min_out.to_string(),
+                output_owner_tag: fmt_hex32(&o.output_owner_tag),
+                cancel_owner_tag: fmt_hex32(&o.cancel_owner_tag),
+                expiry: o.expiry,
+                partial_allowed: o.partial_allowed,
+                active,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Decode an `orderins` event: vec of [asset_in u32, amount_in i128, asset_out u32, min_out i128,
+/// output_owner_tag bytes32, cancel_owner_tag bytes32, expiry u64, partial_allowed bool, order_leaf
+/// bytes32]. Returns `None` for any other event.
+fn parse_orderins(v: &serde_json::Value) -> Option<OrderRaw> {
+    let topic_b64 = v.get("topic")?.as_array()?.first()?.as_str()?;
+    if decode_symbol(topic_b64)? != "orderins" {
+        return None;
+    }
+    let value_b64 = v.get("value")?.as_str()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value_b64)
+        .ok()?;
+    let mut r = Rdr::new(&bytes);
+    if r.vec_header()? != 9 {
+        return None;
+    }
+    Some(OrderRaw {
+        asset_in: r.scu32()?,
+        amount_in: r.sci128()?,
+        asset_out: r.scu32()?,
+        min_out: r.sci128()?,
+        output_owner_tag: r.scbytes32()?,
+        cancel_owner_tag: r.scbytes32()?,
+        expiry: r.scu64()?,
+        partial_allowed: r.scbool()?,
+        order_leaf: r.scbytes32()?,
+    })
+}
+
+/// Decode a `nfspent` event: vec of [nullifier bytes32]. Returns `None` for any other event.
+fn parse_nfspent(v: &serde_json::Value) -> Option<[u8; 32]> {
+    let topic_b64 = v.get("topic")?.as_array()?.first()?.as_str()?;
+    if decode_symbol(topic_b64)? != "nfspent" {
+        return None;
+    }
+    let value_b64 = v.get("value")?.as_str()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value_b64)
+        .ok()?;
+    let mut r = Rdr::new(&bytes);
+    if r.vec_header()? != 1 {
+        return None;
+    }
+    r.scbytes32()
 }
 
 /// Decode a base64 ScVal::Symbol into its string.
@@ -338,6 +442,20 @@ impl<'a> Rdr<'a> {
         }
         let s = self.take(16)?;
         Some(i128::from_be_bytes(s.try_into().ok()?))
+    }
+    fn scu64(&mut self) -> Option<u64> {
+        if self.u32()? != 5 {
+            return None; // SCV_U64
+        }
+        let s = self.b.get(self.pos..self.pos + 8)?;
+        self.pos += 8;
+        Some(u64::from_be_bytes(s.try_into().ok()?))
+    }
+    fn scbool(&mut self) -> Option<bool> {
+        if self.u32()? != 0 {
+            return None; // SCV_BOOL
+        }
+        Some(self.u32()? != 0) // XDR bool is a 4-byte int
     }
     fn scbytes32(&mut self) -> Option<[u8; 32]> {
         if self.u32()? != 13 {
