@@ -53,6 +53,11 @@ pub fn pk_from_sk(sk_o: Field) -> Field {
     compress(sk_o, 0)
 }
 
+/// Full-field BN254 comparison `a <= b` (beta.9 stdlib exposes only `lt`). `a <= b` iff `!(b < a)`.
+pub fn lte(a: Field, b: Field) -> bool {
+    !std::field::bn254::lt(b, a)
+}
+
 /// The owner-chosen destination tag bound into an order at placement.
 pub fn output_owner_tag(pk_o: Field, rho_out: Field) -> Field {
     compress(pk_o, rho_out)
@@ -71,6 +76,38 @@ pub fn note_nullifier(sk_o: Field, rho_out: Field, nonce: Field) -> Field {
 /// Asset note commitment leaf.
 pub fn asset_note_leaf(asset: Field, amount: Field, note_owner_tag: Field) -> Field {
     hash3(asset, amount, note_owner_tag)
+}
+
+/// The order leaf binds every order term the book / match / cancel trust.
+pub fn order_leaf(
+    asset_in: Field,
+    amount_in: Field,
+    asset_out: Field,
+    min_out: Field,
+    output_owner_tag: Field,
+    cancel_owner_tag: Field,
+    expiry: Field,
+    partial_allowed: Field,
+) -> Field {
+    hash8(
+        asset_in,
+        amount_in,
+        asset_out,
+        min_out,
+        output_owner_tag,
+        cancel_owner_tag,
+        expiry,
+        partial_allowed,
+    )
+}
+
+/// Domain separator distinguishing order-consumption nullifiers (derived from the PUBLIC order leaf,
+/// so a taker who lacks the maker's secret can still consume the order) from secret-derived note-spend
+/// nullifiers. An order is matched OR cancelled exactly once: both insert this same value.
+pub global ORDER_NULLIFIER_DOMAIN: Field = 7;
+
+pub fn order_consumption_nullifier(order_leaf: Field) -> Field {
+    compress(ORDER_NULLIFIER_DOMAIN, order_leaf)
 }
 
 // --- Merkle membership -------------------------------------------------------

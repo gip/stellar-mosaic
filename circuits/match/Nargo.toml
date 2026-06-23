@@ -1,5 +1,5 @@
 [package]
-name = "cancel"
+name = "matching"
 type = "bin"
 authors = ["stellar-mosaic"]
 
