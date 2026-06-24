@@ -1,10 +1,10 @@
-import type { ClientAction, Desk, Operation, OperationRequest } from './api'
-import { api, withClientAction } from './api'
+import type { ClientAction, Desk, NoteProof, Operation, OperationRequest } from './api'
+import { ApiError, api, withClientAction } from './api'
 import { fieldToBytes32, randomField } from './crypto'
 import { noteTag, orderTerms } from './noir'
 import { notesForDesk, removeNote, updateNote, type Note } from './notes'
 import { planAssembly } from './orderPlan'
-import { executeUnshield, runAssembly } from './orchestrate'
+import { executeUnshield, runAssembly, waitForConfirm } from './orchestrate'
 import { b64, proveCancel, proveLift } from './prove'
 import { stageRecoverableNote, syncRecoveryNow, updateNoteAndSync } from './recovery'
 import { buildSponsoredShield } from './soroban'
@@ -12,6 +12,31 @@ import { nowMs, nowSeconds } from './time'
 import { Address, nativeToScVal, xdr } from '@stellar/stellar-sdk'
 import { Buffer } from 'buffer'
 import { submissionMode, submitContractCall, submitDirectOrSponsored } from './directTransaction'
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** The durable event indexer trails a successful transaction by a few seconds. Treat a missing
+ * path as a readiness state, not as a failed order, and retry boundedly before proving. */
+async function waitForNoteProof(
+  deskId: string,
+  ownerTag: string,
+  timeoutMs = 30_000,
+): Promise<NoteProof> {
+  const started = Date.now()
+  for (;;) {
+    try {
+      return await api.getNoteProof(deskId, ownerTag)
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error
+      if (Date.now() - started >= timeoutMs) {
+        throw new Error('The note is confirmed but its Merkle path is still indexing. Retry shortly.', {
+          cause: error,
+        })
+      }
+      await sleep(1_500)
+    }
+  }
+}
 
 /** Execute the private portion of one leased operation. Secrets and owned-note inventory never
  * enter the returned result; only the existing proof/XDR relay calls cross the boundary. */
@@ -103,8 +128,19 @@ async function executeShield(
     )
     transaction = (await api.submitShield(desk.id, txXdr)).result
   }
-  await updateNoteAndSync(note.id, { indexed: true, txHash: transaction, operation_state: 'committed' })
-  return { transaction }
+  // Transaction success does not mean the path server has ingested the new leaf yet. Keep the note
+  // unspendable until reconciliation observes the actual event, preventing an immediate order from
+  // requesting a membership path that cannot exist locally yet.
+  await updateNoteAndSync(note.id, { txHash: transaction, operation_state: 'committed' })
+  let indexed = false
+  try {
+    await waitForConfirm(desk.id, note.id, session.address, { timeoutMs: 30_000, intervalMs: 1_500 })
+    await syncRecoveryNow()
+    indexed = true
+  } catch {
+    // The shield is already final. Leave it visibly pending; the desk poller continues reconciling.
+  }
+  return { transaction, indexed }
 }
 
 async function exactInput(desk: Desk, assetId: number, amount: bigint): Promise<Note> {
@@ -129,6 +165,7 @@ async function executeOrder(
   const assetIn = request.side === 'SELL' ? pair.base_asset : pair.quote_asset
   const assetOut = request.side === 'SELL' ? pair.quote_asset : pair.base_asset
   const offer = await exactInput(desk, assetIn, BigInt(request.amount_in))
+  const membership = await waitForNoteProof(desk.id, offer.owner_tag)
   await updateNote(offer.id, { operation_id: operationId, operation_state: 'reserved' })
 
   const expiry = nowSeconds() + 7 * 86400
@@ -138,7 +175,6 @@ async function executeOrder(
     amount_in: offer.amount, asset_out: assetOut, min_out: request.min_out, expiry,
     partial_allowed: request.partial_allowed ? 1 : 0,
   })
-  const membership = await api.getNoteProof(desk.id, offer.owner_tag)
   const bundle = await proveLift({
     rho_in: offer.rho, sk_o: offer.sk, path: membership.siblings,
     index_bits: membership.index_bits, root: membership.root,
