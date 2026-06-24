@@ -409,4 +409,34 @@ open(f"{FX}/wmatch_t_tag", "wb").write(bytes.fromhex(wt_tag[2:]))
 for i, m in enumerate(WM):
     open(f"{FX}/wmatch_m{i}_tag", "wb").write(bytes.fromhex(m["tag"][2:]))
 
+
+# --- Scenario G: full lifecycle ending in an unshield of the taker's proceeds (scripts/04 e2e) ---
+# Reuses scenario B (shield taker 100 a1 + maker 1600 a2 -> place both -> settle_match): the taker's
+# slot-0 proceeds note (1600 a2, leaf 2, tag p0_tag) is then UNSHIELDED to UNSHIELD_TO. Its spend
+# secrets are the taker's sk 0x11 / rho_out 0x44 with the match nonce compress(taker_leaf, 0); the
+# accumulator holds the 4 nullifiers from the two places + the match before this 5th insert.
+nonce0 = one(f"compress {t_leaf} 0")
+nf_proceeds = one(f"notenull 0x11 0x44 {nonce0}")
+g_rcpt = one(f"recipient {UNSHIELD_TO}")
+SG = witness("\n".join([
+    f"shield 1 100 {t_note_tag}", f"shield 2 1600 {m_note_tag}",
+    f"noteins 2 1600 {p0_tag}", f"noteins 1 100 {p1_tag}",
+    f"nfspent {nf_note_t}", f"nfspent {nf_note_m}", f"nfspent {nf_ord_t}", f"nfspent {nf_ord_m}",
+    "root", "path 2", f"imtwitness {nf_proceeds}",
+]))
+g_note_root = scals(SG, "root")[0]
+GI = imt_get(SG.split("# --- IMT insert witness ---")[1])
+life_lines = [
+    'rho_in = "0x44"', 'sk_o = "0x11"', f'nonce_in = "{nonce0}"',
+    f'path = {arrs(SG, "path")[0]}', f'index_bits = {arrs(SG, "index_bits")[0]}',
+    f'low_value = "{GI["lv"]}"', f'low_next_value = "{GI["lnv"]}"', f'low_next_index = "{GI["lni"]}"',
+    f'low_path = {GI["lp"]}', f'low_index_bits = {GI["lb"]}',
+    f'new_path = {GI["np"]}', f'new_index_bits = {GI["nb"]}',
+    'domain = "2"', f'note_root = "{g_note_root}"',
+    f'nullifier_root_in = "{GI["rin"]}"', f'nullifier_root_out = "{GI["rout"]}"',
+    f'nullifier = "{nf_proceeds}"', 'asset = "2"', 'amount = "1600"', f'recipient = "{g_rcpt}"',
+]
+open(f"{UNSHIELD}/Prover.toml", "w").write("\n".join(life_lines) + "\n")
+prove(UNSHIELD, "unshield.json", "life_unshield")
+
 print("regenerated WS4 fixtures in", FX)
