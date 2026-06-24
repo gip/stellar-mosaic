@@ -28,7 +28,7 @@ Scenario secrets (also hard-coded in tests/ws4.rs so it can recompute tags off-c
   maker: sk 0xAA, note rho 0xBB nonce 0xCC, out 0xDD, cancel 0xEE; order give 1600 asset2 want >=100 asset1
   expiry 1000 (within MAX_ORDER_TTL), match `now` 100.
 """
-import subprocess, re, os, shutil
+import subprocess, re, os, shutil, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "../../../../.."))
@@ -38,12 +38,28 @@ MATCH = os.path.join(ROOT, "circuits/match")
 JOIN = os.path.join(ROOT, "circuits/join")
 UNSHIELD = os.path.join(ROOT, "circuits/unshield")
 CANCEL = os.path.join(ROOT, "circuits/cancel")
-FX = HERE
+# Output dir for proof/pi fixtures (default: this dir = the committed contract-test fixtures).
+# Budget scripts override WS4_FX to a temp dir so a live-timestamp run never clobbers the committed
+# (expiry=1000/now=100) fixtures the contract tests pin.
+FX = os.environ.get("WS4_FX", HERE)
+os.makedirs(FX, exist_ok=True)
 # Fixed recipient for the unshield scenario (tests/integration.rs uses the SAME address so the
 # contract's sha256-derived recipient field matches the proof-bound one). A CONTRACT address (C...)
 # so the test SAC transfer needs no classic-account trustline.
 UNSHIELD_TO = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
-EXP, PART, NOW = "1000", "1", "100"
+# Order expiry + match `now`, overridable for a TESTNET budget run (where the contract bounds both to
+# the live ledger clock: place_order needs now <= expiry <= now+7d; settle_match needs now within
+# 300s of ledger time). Defaults reproduce the committed contract-test fixtures.
+EXP = os.environ.get("WS4_EXP", "1000")
+NOW = os.environ.get("WS4_NOW", "100")
+PART = "1"
+# Proof targets to (re)generate, by proofbase name (e.g. "match", "wmatch", "tk_place"); empty = all.
+# Witness MODELING always runs (cheap); only bb proving is gated, so a single target regenerates fast.
+TARGETS = set(sys.argv[1:])
+
+
+def should(name):
+    return not TARGETS or name in TARGETS
 ZHEX = "[" + ", ".join(['"0x' + "0" * 64 + '"'] * 32) + "]"
 ZBITS = "[" + ", ".join(['"0"'] * 32) + "]"
 
@@ -85,6 +101,8 @@ def t3(a, b, c):
 
 
 def prove(dirp, jsonname, proofbase, want_vk=None):
+    if not should(proofbase):
+        return
     subprocess.run(["nargo", "execute"], cwd=dirp, check=True, capture_output=True)
     gz = jsonname.replace(".json", ".gz")
     for cmd in (["bb", "prove", "-b", f"target/{jsonname}", "-w", f"target/{gz}", "-o", "target/bb",
@@ -132,7 +150,8 @@ IA = imt_get(SA.split("# --- IMT insert witness ---")[1])
 open(f"{LIFT}/Prover.toml", "w").write(lift_pt(nrA, "0x22", "0x11", "0x33", arrs(SA, "path")[0],
     arrs(SA, "index_bits")[0], IA, nf_note_t, 1, 100, 2, 1500, t_out, t_can, t_leaf))
 prove(LIFT, "lift.json", "place", want_vk="lift_vk")
-shutil.move(f"{FX}/place_pi", f"{FX}/place_public_inputs")
+if should("place"):
+    shutil.move(f"{FX}/place_pi", f"{FX}/place_public_inputs")
 open(f"{FX}/note_tag", "wb").write(bytes.fromhex(t_note_tag[2:]))
 
 # --- Scenario B: full lifecycle (two shields, two places, settle_match) ---
