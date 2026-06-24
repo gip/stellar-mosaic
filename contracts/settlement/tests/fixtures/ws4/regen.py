@@ -15,6 +15,10 @@ scenarios:
      -> join_proof, join_pi, join_vk                          (tests/join.rs)
   D. unshield: shield ONE note (100 a1), spend it to UNSHIELD_TO with the recipient bound in-proof.
      -> unshield_proof, unshield_pi, unshield_vk              (tests/integration.rs)
+  E. cancel: shield 100 a1 -> place SELL -> cancel (reclaim). The place proof + the cancel proof.
+     -> cancel_place_{proof,pi}, cancel_{proof,pi,vk}, cancel_note_tag   (scripts/06 budget)
+  F. WORST-CASE settle_match: 1 taker x 3 makers + remainder, with the 4 place proofs that rest it.
+     -> wt_place_*, wm{0,1,2}_place_*, wmatch_{proof,pi}, wmatch_*_tag   (scripts/07 worst case)
 
 Requires on PATH: the `witness` bin (cargo build -p mosaic-indexer --bin witness), `nargo`
 (1.0.0-beta.9), and `bb` (0.87.0). Run:  python3 regen.py
@@ -33,6 +37,7 @@ LIFT = os.path.join(ROOT, "circuits/lift")
 MATCH = os.path.join(ROOT, "circuits/match")
 JOIN = os.path.join(ROOT, "circuits/join")
 UNSHIELD = os.path.join(ROOT, "circuits/unshield")
+CANCEL = os.path.join(ROOT, "circuits/cancel")
 FX = HERE
 # Fixed recipient for the unshield scenario (tests/integration.rs uses the SAME address so the
 # contract's sha256-derived recipient field matches the proof-bound one). A CONTRACT address (C...)
@@ -72,6 +77,11 @@ def imt_get(b):
 
 def a3(x, z):
     return "[" + x + ", " + z + ", " + z + "]"
+
+
+def t3(a, b, c):
+    # A length-3 array literal of three (already-quoted scalar or bracketed array) elements.
+    return "[" + a + ", " + b + ", " + c + "]"
 
 
 def prove(dirp, jsonname, proofbase, want_vk=None):
@@ -177,6 +187,9 @@ match_lines = [
 ]
 open(f"{MATCH}/Prover.toml", "w").write("\n".join(match_lines) + "\n")
 prove(MATCH, "matching.json", "match", want_vk="match_vk")
+# owner tags scripts/06 shields the typical scenario under (taker + maker).
+open(f"{FX}/tk_note_tag", "wb").write(bytes.fromhex(t_note_tag[2:]))
+open(f"{FX}/mk_note_tag", "wb").write(bytes.fromhex(m_note_tag[2:]))
 
 
 # --- Scenario C: join (consolidate two same-asset notes) ---
@@ -231,5 +244,150 @@ unshield_lines = [
 ]
 open(f"{UNSHIELD}/Prover.toml", "w").write("\n".join(unshield_lines) + "\n")
 prove(UNSHIELD, "unshield.json", "unshield", want_vk="unshield_vk")
+
+
+# --- Scenario E: cancel (reclaim a resting order) ---
+# shield 100 a1, place SELL 100 a1 @want 1500 a2, then cancel it (returns the locked 100 a1).
+c_note_tag = one("notetagn 0x81 0x82 0x0"); c_nf_note = one("notenull 0x81 0x82 0x0")
+c_out = one("notetag 0x81 0x83"); c_can = one("notetag 0x81 0x84")
+c_leaf = one(f"orderleaf 1 100 2 1500 {c_out} {c_can} {EXP} {PART}")
+c_ord_nf = one(f"ordernull {c_leaf}")
+c_return = one("notetagn 0x81 0x85 0x0")
+# Model shield -> place (note path + note-spend witness feed the place proof) -> cancel (order path +
+# order-consumption witness feed the cancel proof).
+SE = witness("\n".join([
+    f"shield 1 100 {c_note_tag}", "root", "path 0",
+    f"imtwitness {c_nf_note}", f"nfspent {c_nf_note}",
+    f"orderins 1 100 2 1500 {c_out} {c_can} {EXP} {PART}",
+    "orderroot", "orderpath 0", f"imtwitness {c_ord_nf}",
+]))
+c_note_root = scals(SE, "root")[0]
+c_order_root = scals(SE, "order_root")[0]
+ENI, EI = (imt_get(b) for b in SE.split("# --- IMT insert witness ---")[1:3])
+# The place_order proof that rests the order the cancel below reclaims.
+open(f"{LIFT}/Prover.toml", "w").write(lift_pt(
+    c_note_root, "0x82", "0x81", "0x0", arrs(SE, "path")[0], arrs(SE, "index_bits")[0], ENI,
+    c_nf_note, 1, 100, 2, 1500, c_out, c_can, c_leaf))
+prove(LIFT, "lift.json", "cancel_place")
+cancel_lines = [
+    'sk_o = "0x81"', 'rho_ord = "0x84"', 'asset_out = "2"', 'min_out = "1500"',
+    f'out_owner_tag = "{c_out}"', f'expiry = "{EXP}"', f'partial_allowed = "{PART}"',
+    f'order_path = {arrs(SE, "order_path")[0]}', f'order_index_bits = {arrs(SE, "order_index_bits")[0]}',
+    f'low_value = "{EI["lv"]}"', f'low_next_value = "{EI["lnv"]}"', f'low_next_index = "{EI["lni"]}"',
+    f'low_path = {EI["lp"]}', f'low_index_bits = {EI["lb"]}',
+    f'new_path = {EI["np"]}', f'new_index_bits = {EI["nb"]}',
+    'domain = "3"', f'order_root = "{c_order_root}"',
+    f'nullifier_root_in = "{EI["rin"]}"', f'nullifier_root_out = "{EI["rout"]}"',
+    f'order_nullifier = "{c_ord_nf}"', 'asset_in = "1"', 'amount_in = "100"',
+    f'return_owner_tag = "{c_return}"',
+]
+open(f"{CANCEL}/Prover.toml", "w").write("\n".join(cancel_lines) + "\n")
+prove(CANCEL, "cancel.json", "cancel", want_vk="cancel_vk")
+# owner tags scripts/06 shields the cancel scenario under.
+open(f"{FX}/cancel_note_tag", "wb").write(bytes.fromhex(c_note_tag[2:]))
+
+
+# --- Scenario F: WORST-CASE settle_match (1 taker x 3 makers + remainder) ---
+# taker give 300 a1 want >=4500 a2 (ratio 15). Three makers fully filled:
+#   m0,m1: 1600 a2 for 100 a1 each; m2: 800 a2 for 50 a1. taker pays 250 a1, receives 4000 a2,
+#   re-rests remainder 50 a1 @ 750 a2 (exact ratio 4500*50 == 750*300). This is the most expensive
+#   WS4 tx: one verify, 4 order memberships, 4 sequential IMT inserts, 4 proceeds + 1 re-rest.
+WT = {"sk": "0xF0", "rho": "0xF1", "nonce": "0xF2", "out": "0xF3", "can": "0xF4"}
+WM = [
+    {"sk": "0xA0", "rho": "0xA1", "nonce": "0xA2", "out": "0xA3", "can": "0xA4", "give": 1600, "want": 100},
+    {"sk": "0xB0", "rho": "0xB1", "nonce": "0xB2", "out": "0xB3", "can": "0xB4", "give": 1600, "want": 100},
+    {"sk": "0xC0", "rho": "0xC1", "nonce": "0xC2", "out": "0xC3", "can": "0xC4", "give": 800, "want": 50},
+]
+wt_tag = one(f'notetagn {WT["sk"]} {WT["rho"]} {WT["nonce"]}')
+wt_nf = one(f'notenull {WT["sk"]} {WT["rho"]} {WT["nonce"]}')
+wt_out = one(f'notetag {WT["sk"]} {WT["out"]}'); wt_can = one(f'notetag {WT["sk"]} {WT["can"]}')
+wt_leaf = one(f"orderleaf 1 300 2 4500 {wt_out} {wt_can} {EXP} {PART}")
+wt_ord_nf = one(f"ordernull {wt_leaf}")
+for m in WM:
+    m["tag"] = one(f'notetagn {m["sk"]} {m["rho"]} {m["nonce"]}')
+    m["nf_note"] = one(f'notenull {m["sk"]} {m["rho"]} {m["nonce"]}')
+    m["out_t"] = one(f'notetag {m["sk"]} {m["out"]}'); m["can_t"] = one(f'notetag {m["sk"]} {m["can"]}')
+    m["leaf"] = one(f'orderleaf 2 {m["give"]} 1 {m["want"]} {m["out_t"]} {m["can_t"]} {EXP} {PART}')
+    m["ord_nf"] = one(f'ordernull {m["leaf"]}')
+# Model the full on-chain sequence script 07 reproduces: shield 4 notes, place 4 orders (each
+# consumes its note-spend nullifier; the IMT witnesses below feed the 4 place proofs), then the
+# match (4 order-consumption witnesses feed the wmatch proof). 8 sequential IMT inserts total.
+SF = witness("\n".join(
+    [f"shield 1 300 {wt_tag}"] + [f'shield 2 {m["give"]} {m["tag"]}' for m in WM]
+    + ["root", "path 0", "path 1", "path 2", "path 3"]
+    + [f"imtwitness {wt_nf}", f"nfspent {wt_nf}"]
+    + sum([[f'imtwitness {m["nf_note"]}', f'nfspent {m["nf_note"]}'] for m in WM], [])
+    + [f"orderins 1 300 2 4500 {wt_out} {wt_can} {EXP} {PART}"]
+    + [f'orderins 2 {m["give"]} 1 {m["want"]} {m["out_t"]} {m["can_t"]} {EXP} {PART}' for m in WM]
+    + ["orderroot", "orderpath 0", "orderpath 1", "orderpath 2", "orderpath 3"]
+    + [f"imtwitness {wt_ord_nf}", f"nfspent {wt_ord_nf}"]
+    + [f'imtwitness {m["ord_nf"]}' + ("\nnfspent " + m["ord_nf"] if i < len(WM) - 1 else "")
+       for i, m in enumerate(WM)]
+))
+w_note_root = scals(SF, "root")[0]
+w_order_root = scals(SF, "order_root")[0]
+wnpaths, wnbits = arrs(SF, "path"), arrs(SF, "index_bits")
+wopaths, wobits = arrs(SF, "order_path"), arrs(SF, "order_index_bits")
+blocks = [imt_get(b) for b in SF.split("# --- IMT insert witness ---")[1:9]]
+NTI, NM = blocks[0], blocks[1:4]  # note-spend witnesses (taker, makers): feed the 4 place proofs
+WTI, WM0, WM1, WM2 = blocks[4:8]  # order-consumption witnesses: feed the wmatch proof
+mimt = [WM0, WM1, WM2]
+
+# 4 place_order proofs (so script 07 can rest the worst-case book before the match).
+open(f"{LIFT}/Prover.toml", "w").write(lift_pt(
+    w_note_root, WT["rho"], WT["sk"], WT["nonce"], wnpaths[0], wnbits[0], NTI,
+    wt_nf, 1, 300, 2, 4500, wt_out, wt_can, wt_leaf))
+prove(LIFT, "lift.json", "wt_place")
+for i, m in enumerate(WM):
+    open(f"{LIFT}/Prover.toml", "w").write(lift_pt(
+        w_note_root, m["rho"], m["sk"], m["nonce"], wnpaths[i + 1], wnbits[i + 1], NM[i],
+        m["nf_note"], 2, m["give"], 1, m["want"], m["out_t"], m["can_t"], m["leaf"]))
+    prove(LIFT, "lift.json", f"wm{i}_place")
+# proceeds tags (per-note nonce compress(taker_leaf, slot)).
+wp0 = one(f"compress {wt_out} {one(f'compress {wt_leaf} 0')}")
+wp = [one(f'compress {m["out_t"]} {one(f"compress {wt_leaf} {i + 1}")}') for i, m in enumerate(WM)]
+rem_leaf = one(f"orderleaf 1 50 2 750 {wt_out} {wt_can} {EXP} {PART}")
+wmatch_lines = [
+    't_asset_in = "1"', 't_amount_in = "300"', 't_asset_out = "2"', 't_min_out = "4500"',
+    f't_out_tag = "{wt_out}"', f't_cancel_tag = "{wt_can}"', f't_expiry = "{EXP}"', f't_partial = "{PART}"',
+    f't_path = {wopaths[0]}', f't_index_bits = {wobits[0]}',
+    f't_low_value = "{WTI["lv"]}"', f't_low_next_value = "{WTI["lnv"]}"', f't_low_next_index = "{WTI["lni"]}"',
+    f't_low_path = {WTI["lp"]}', f't_low_index_bits = {WTI["lb"]}',
+    f't_new_path = {WTI["np"]}', f't_new_index_bits = {WTI["nb"]}',
+    f'm_asset_in = {t3("2", "2", "2")}',
+    f'm_amount_in = {t3(*[str(m["give"]) for m in WM])}',
+    f'm_asset_out = {t3("1", "1", "1")}',
+    f'm_min_out = {t3(*[str(m["want"]) for m in WM])}',
+    f'm_out_tag = {t3(*[chr(34) + m["out_t"] + chr(34) for m in WM])}',
+    f'm_cancel_tag = {t3(*[chr(34) + m["can_t"] + chr(34) for m in WM])}',
+    f'm_expiry = {t3(*[chr(34) + EXP + chr(34)] * 3)}',
+    f'm_partial = {t3(*[chr(34) + PART + chr(34)] * 3)}',
+    f'm_path = {t3(wopaths[1], wopaths[2], wopaths[3])}',
+    f'm_index_bits = {t3(wobits[1], wobits[2], wobits[3])}',
+    f'm_low_value = {t3(*[chr(34) + I["lv"] + chr(34) for I in mimt])}',
+    f'm_low_next_value = {t3(*[chr(34) + I["lnv"] + chr(34) for I in mimt])}',
+    f'm_low_next_index = {t3(*[chr(34) + I["lni"] + chr(34) for I in mimt])}',
+    f'm_low_path = {t3(*[I["lp"] for I in mimt])}',
+    f'm_low_index_bits = {t3(*[I["lb"] for I in mimt])}',
+    f'm_new_path = {t3(*[I["np"] for I in mimt])}',
+    f'm_new_index_bits = {t3(*[I["nb"] for I in mimt])}',
+    'domain = "5"', f'order_root = "{w_order_root}"',
+    f'nullifier_root_in = "{WTI["rin"]}"', f'nullifier_root_out = "{WM2["rout"]}"', f'now = "{NOW}"',
+    f'nf_taker = "{wt_ord_nf}"',
+    f'nf_maker0 = "{WM[0]["ord_nf"]}"', f'nf_maker1 = "{WM[1]["ord_nf"]}"', f'nf_maker2 = "{WM[2]["ord_nf"]}"',
+    'p0_live = "1"', 'p0_asset = "2"', 'p0_amount = "4000"', f'p0_tag = "{wp0}"',
+    'p1_live = "1"', 'p1_asset = "1"', f'p1_amount = "{WM[0]["want"]}"', f'p1_tag = "{wp[0]}"',
+    'p2_live = "1"', 'p2_asset = "1"', f'p2_amount = "{WM[1]["want"]}"', f'p2_tag = "{wp[1]}"',
+    'p3_live = "1"', 'p3_asset = "1"', f'p3_amount = "{WM[2]["want"]}"', f'p3_tag = "{wp[2]}"',
+    'remainder_live = "1"', 'rem_asset_in = "1"', 'rem_amount_in = "50"', 'rem_asset_out = "2"',
+    'rem_min_out = "750"', f'rem_output_owner_tag = "{wt_out}"', f'rem_cancel_owner_tag = "{wt_can}"',
+    f'rem_expiry = "{EXP}"', f'rem_partial_allowed = "{PART}"', f'remainder_order_leaf = "{rem_leaf}"',
+]
+open(f"{MATCH}/Prover.toml", "w").write("\n".join(wmatch_lines) + "\n")
+prove(MATCH, "matching.json", "wmatch")
+# owner tags scripts/07 shields the worst-case scenario under (taker + 3 makers).
+open(f"{FX}/wmatch_t_tag", "wb").write(bytes.fromhex(wt_tag[2:]))
+for i, m in enumerate(WM):
+    open(f"{FX}/wmatch_m{i}_tag", "wb").write(bytes.fromhex(m["tag"][2:]))
 
 print("regenerated WS4 fixtures in", FX)
