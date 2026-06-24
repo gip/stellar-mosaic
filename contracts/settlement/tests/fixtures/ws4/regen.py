@@ -11,6 +11,10 @@ scenarios:
 
   B. full lifecycle: shield TWO notes (taker+maker), place both, then settle_match.
      -> tk_place_*, mk_place_*, match_*, match_vk             (test: full_flow_shield_place_place_settle_match)
+  C. join: shield TWO same-asset notes (150 + 200 a1), consolidate -> 300 (target) + 50 (change).
+     -> join_proof, join_pi, join_vk                          (tests/join.rs)
+  D. unshield: shield ONE note (100 a1), spend it to UNSHIELD_TO with the recipient bound in-proof.
+     -> unshield_proof, unshield_pi, unshield_vk              (tests/integration.rs)
 
 Requires on PATH: the `witness` bin (cargo build -p mosaic-indexer --bin witness), `nargo`
 (1.0.0-beta.9), and `bb` (0.87.0). Run:  python3 regen.py
@@ -27,7 +31,13 @@ ROOT = os.path.abspath(os.path.join(HERE, "../../../../.."))
 W = os.path.join(ROOT, "tools/indexer/target/debug/witness")
 LIFT = os.path.join(ROOT, "circuits/lift")
 MATCH = os.path.join(ROOT, "circuits/match")
+JOIN = os.path.join(ROOT, "circuits/join")
+UNSHIELD = os.path.join(ROOT, "circuits/unshield")
 FX = HERE
+# Fixed recipient for the unshield scenario (tests/integration.rs uses the SAME address so the
+# contract's sha256-derived recipient field matches the proof-bound one). A CONTRACT address (C...)
+# so the test SAC transfer needs no classic-account trustline.
+UNSHIELD_TO = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
 EXP, PART, NOW = "1000", "1", "100"
 ZHEX = "[" + ", ".join(['"0x' + "0" * 64 + '"'] * 32) + "]"
 ZBITS = "[" + ", ".join(['"0"'] * 32) + "]"
@@ -167,4 +177,59 @@ match_lines = [
 ]
 open(f"{MATCH}/Prover.toml", "w").write("\n".join(match_lines) + "\n")
 prove(MATCH, "matching.json", "match", want_vk="match_vk")
+
+
+# --- Scenario C: join (consolidate two same-asset notes) ---
+# shield A=150 a1 (leaf 0) + B=200 a1 (leaf 1); join -> out_1 = 300 (target) + out_2 = 50 (change).
+j1_tag = one("notetagn 0x31 0x32 0x0"); j1_nf = one("notenull 0x31 0x32 0x0")
+j2_tag = one("notetagn 0x41 0x42 0x0"); j2_nf = one("notenull 0x41 0x42 0x0")
+j_out1 = one("notetagn 0x51 0x52 0x0"); j_out2 = one("notetagn 0x61 0x62 0x0")
+SC = witness("\n".join([
+    f"shield 1 150 {j1_tag}", f"shield 1 200 {j2_tag}", "root", "path 0", "path 1",
+    f"imtwitness {j1_nf}", f"nfspent {j1_nf}", f"imtwitness {j2_nf}",
+]))
+jnr = scals(SC, "root")[0]
+jpaths, jbits = arrs(SC, "path"), arrs(SC, "index_bits")
+J1, J2 = (imt_get(b) for b in SC.split("# --- IMT insert witness ---")[1:3])
+join_lines = [
+    'sk_1 = "0x31"', 'rho_1 = "0x32"', 'nonce_1 = "0x0"', 'amount_1 = "150"',
+    f'path_1 = {jpaths[0]}', f'index_bits_1 = {jbits[0]}',
+    f'low1_value = "{J1["lv"]}"', f'low1_next_value = "{J1["lnv"]}"', f'low1_next_index = "{J1["lni"]}"',
+    f'low1_path = {J1["lp"]}', f'low1_index_bits = {J1["lb"]}',
+    f'new1_path = {J1["np"]}', f'new1_index_bits = {J1["nb"]}',
+    'sk_2 = "0x41"', 'rho_2 = "0x42"', 'nonce_2 = "0x0"', 'amount_2 = "200"',
+    f'path_2 = {jpaths[1]}', f'index_bits_2 = {jbits[1]}',
+    f'low2_value = "{J2["lv"]}"', f'low2_next_value = "{J2["lnv"]}"', f'low2_next_index = "{J2["lni"]}"',
+    f'low2_path = {J2["lp"]}', f'low2_index_bits = {J2["lb"]}',
+    f'new2_path = {J2["np"]}', f'new2_index_bits = {J2["nb"]}',
+    'domain = "4"', f'note_root = "{jnr}"',
+    f'nullifier_root_in = "{J1["rin"]}"', f'nullifier_root_out = "{J2["rout"]}"',
+    f'nullifier_1 = "{j1_nf}"', f'nullifier_2 = "{j2_nf}"', 'asset = "1"',
+    f'out_tag_1 = "{j_out1}"', 'out_amount_1 = "300"',
+    f'out_tag_2 = "{j_out2}"', 'out_amount_2 = "50"',
+]
+open(f"{JOIN}/Prover.toml", "w").write("\n".join(join_lines) + "\n")
+prove(JOIN, "join.json", "join", want_vk="join_vk")
+
+
+# --- Scenario D: unshield (spend one note to a bound recipient) ---
+# shield U=100 a1 (leaf 0); unshield to UNSHIELD_TO.
+u_tag = one("notetagn 0x71 0x72 0x0"); u_nf = one("notenull 0x71 0x72 0x0")
+u_rcpt = one(f"recipient {UNSHIELD_TO}")
+SD = witness("\n".join([f"shield 1 100 {u_tag}", "root", "path 0", f"imtwitness {u_nf}"]))
+unr = scals(SD, "root")[0]
+UI = imt_get(SD.split("# --- IMT insert witness ---")[1])
+unshield_lines = [
+    'rho_in = "0x72"', 'sk_o = "0x71"', 'nonce_in = "0x0"',
+    f'path = {arrs(SD, "path")[0]}', f'index_bits = {arrs(SD, "index_bits")[0]}',
+    f'low_value = "{UI["lv"]}"', f'low_next_value = "{UI["lnv"]}"', f'low_next_index = "{UI["lni"]}"',
+    f'low_path = {UI["lp"]}', f'low_index_bits = {UI["lb"]}',
+    f'new_path = {UI["np"]}', f'new_index_bits = {UI["nb"]}',
+    'domain = "2"', f'note_root = "{unr}"',
+    f'nullifier_root_in = "{UI["rin"]}"', f'nullifier_root_out = "{UI["rout"]}"',
+    f'nullifier = "{u_nf}"', 'asset = "1"', 'amount = "100"', f'recipient = "{u_rcpt}"',
+]
+open(f"{UNSHIELD}/Prover.toml", "w").write("\n".join(unshield_lines) + "\n")
+prove(UNSHIELD, "unshield.json", "unshield", want_vk="unshield_vk")
+
 print("regenerated WS4 fixtures in", FX)
