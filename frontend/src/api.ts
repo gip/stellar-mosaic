@@ -97,14 +97,67 @@ export async function withClientAction<T>(action: ClientAction, run: () => Promi
   }
 }
 
+/** One resting order from the event-derived book (`GET /desks/:id/book`). */
+export interface BookOrder {
+  leaf_index: number
+  order_leaf: string
+  asset_in: number
+  amount_in: string
+  asset_out: number
+  min_out: string
+  output_owner_tag: string
+  cancel_owner_tag: string
+  expiry: number
+  partial_allowed: boolean
+  active: boolean
+}
+
+/** Order-tree membership path for an order_leaf (`GET /desks/:id/order-proof`). */
+export interface OrderProof {
+  leaf_index: number
+  order_root: string
+  siblings: string[]
+  index_bits: number[]
+  consumption_nullifier: string
+}
+
+/** The nullifier-IMT insert witness for a value (`GET /desks/:id/imt-witness`). The exact private
+ * inputs a WS4 spend circuit's imt_insert needs, plus the root transition. */
+export interface ImtWitnessResp {
+  nullifier_root_in: string
+  nullifier_root_out: string
+  low_value: string
+  low_next_value: string
+  low_next_index: number
+  low_path: string[]
+  low_index_bits: number[]
+  new_path: string[]
+  new_index_bits: number[]
+  pred_leaf: string
+  pred_path: string[]
+  pred_index_bits: number[]
+}
+
+/** The proceeds note a `settle_match` minted for one of the wallet's orders (`GET
+ * /desks/:id/match-proceeds`). `matched` is false while the order is still resting or was cancelled.
+ * The matcher folds an unpredictable `nonce = compress(taker_leaf, slot)` into the proceeds tag, so a
+ * resting maker recovers both from this (correlated from the match's public events) to find + spend
+ * its minted leaf. */
+export interface MatchProceeds {
+  matched: boolean
+  owner_tag: string
+  nonce: string
+  asset: number
+  amount: string
+}
+
 export const api = {
   listDesks: () => req<Desk[]>('/desks'),
   getDesk: (id: string) => req<Desk>(`/desks/${id}`),
   getRoot: (id: string) => req<{ root: string }>(`/desks/${id}/root`),
-  getBook: (id: string, pair: number, side: number) =>
-    req<{ pair: number; side: number; orders: unknown }>(
-      `/desks/${id}/book?pair=${pair}&side=${side}`,
-    ),
+  // WS4: the event-derived active book (all resting orders, each with its full public terms +
+  // active flag). The client filters by asset locally; no pair/side query needed.
+  getBook: (id: string) => req<{ orders: BookOrder[] }>(`/desks/${id}/book`),
   importDesk: (body: {
     name: string
     contract_id: string
@@ -139,6 +192,24 @@ export const api = {
     }),
   getNoteProof: (id: string, ownerTag: string) =>
     req<NoteProof>(`/desks/${id}/note-proof?owner_tag=${ownerTag}`),
+  // WS4 proving inputs: order-tree path (for match/cancel) + the nullifier-IMT insert witness.
+  getOrderProof: (id: string, orderLeaf: string) =>
+    req<OrderProof>(`/desks/${id}/order-proof?order_leaf=${orderLeaf}`),
+  // WS4 maker discovery: the proceeds note a match minted for the wallet's (possibly foreign-taker
+  // matched) order, with the unpredictable match nonce recovered from the match's public events.
+  getMatchProceeds: (id: string, orderLeaf: string) =>
+    req<MatchProceeds>(`/desks/${id}/match-proceeds?order_leaf=${orderLeaf}`),
+  getImtWitness: (id: string, value: string) =>
+    req<ImtWitnessResp>(`/desks/${id}/imt-witness?value=${value}`),
+  // Sequential witnesses for a multi-insert spend (join: 2, match: <=4); each is against the root
+  // after the previous value was inserted.
+  getImtWitnesses: (id: string, values: string[]) =>
+    req<ImtWitnessResp[]>(`/desks/${id}/imt-witnesses?values=${values.join(',')}`),
+  relayMatch: (id: string, proof_b64: string, public_inputs_b64: string) =>
+    req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/match`, {
+      method: 'POST',
+      body: JSON.stringify({ proof_b64, public_inputs_b64 }),
+    }),
   relayOrder: (id: string, proof_b64: string, public_inputs_b64: string) =>
     req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/order`, {
       method: 'POST',

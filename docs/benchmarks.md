@@ -49,20 +49,27 @@ ceiling for scale, not v1); a two-verify tx's memory use (40 MiB cap) is likely 
 
 ## Current measured costs (the headline numbers)
 
+WS4 replaced the atomic `settle` + on-chain `Vec` book (`submit_order`/fill loop) with `place_order`
+(rest one order) + `settle_match` (1 taker × ≤3 makers, off-chain matched, one verify) + the reworked
+`cancel_order`. Every spend now also advances an indexed-merkle nullifier accumulator in-circuit
+(one root CAS on-chain, no per-spend Poseidon). WS4 numbers measured on testnet **2026-06-24
+(protocol 27)**; `shield`/`unshield`/verify carry over from the 2026-06-18 runs.
+
 | operation | instructions | % of 400M | notes |
 |---|---|---|---|
 | one UltraHonk verify | ~80M | ~20% | fixed; proof padded to `CONST_PROOF_SIZE_LOG_N=28` |
 | `shield` (1 tree insert) | 37.7M | ~9% | |
-| atomic `settle` (2 verifies + 2 proceeds inserts) | 230.5M | ~58% | ~160M verify + ~70M inserts |
 | `unshield` (verify + recipient-bound payout) | 81.3M | ~20% | |
-| `submit_order` resting (no fill) | 84.2M | ~21% | verify + book load/store |
-| `submit_order` 2-fill | 220.4M | ~55% | |
-| `cancel_order` | 115.2M | ~28% | |
-| order-book worst case (full book + 4-fill cap) | 359.8M | ~89% | accepted; ~11% margin |
+| `place_order` (verify + nullifier-IMT CAS + order-leaf insert) | 120.8M | ~30% | |
+| `settle_match` (1 taker × 1 maker, no remainder) | 160.6M | ~40% | verify + 2 IMT inserts + 2 proceeds |
+| `settle_match` **worst case** (1 taker × 3 makers + remainder) | 260.7M | ~65% | one verify; ~35% margin |
+| `cancel_order` (verify + order membership + IMT CAS + refund) | 121.9M | ~30% | |
 | depth-32 Poseidon insert | 36M | ~9% | ~1.06M per permutation, ~2.1M fixed/tx |
 
-Sources: `scripts/06_book_budget_testnet.sh` (book), `scripts/07_book_worstcase_testnet.sh` (worst
-case), the e2e demo scripts (`03`/`04`), and the provenance log below.
+Sources: `scripts/06_book_budget_testnet.sh` (place/match/cancel), `scripts/07_book_worstcase_testnet.sh`
+(worst-case match), the e2e demo scripts (`03`/`04`), and the provenance log below. Scripts 06/07
+generate proofs at run time against the live ledger clock (WS4 binds `expiry`/`now` to it); see their
+headers.
 
 ## Poseidon tree-insert cost (testnet probe)
 
@@ -82,24 +89,20 @@ reuse across all compressions. Rebuilding them per hash cost ~80M extra (settle 
 Keep VKs + tree state in persistent storage (not instance) so tree writes don't re-serialize the
 ~1.7 KB VKs.
 
-## Order-book worst case (the ~89% measurement)
+## settle_match worst case (the ~65% measurement)
 
-`MAX_FILLS_PER_SUBMIT = 4`. The absolute worst case — a full 64-deep book + a taker filling the
-4-fill cap (8 proceeds inserts) — was measured directly on testnet at **359.8M instructions (~89% of
-400M)** and **accepted** (`scripts/07_book_worstcase_testnet.sh`; tx `8306fbb3…`, contract
-`CBLRBC6A…`). Margin is ~11%: **do not raise the cap without re-measuring**. (Local-host reference:
-~316M at cap 4, ~251M at cap 3.)
+The match circuit settles **1 taker × ≤3 makers** and re-rests up to one remainder, so the worst
+case is one taker fully crossing 3 makers AND leaving a remainder: one UltraHonk verify, 4 order-tree
+membership checks, 4 sequential nullifier-IMT inserts, 4 proceeds-note mints, + 1 remainder order
+insert. Measured directly on testnet at **260,658,727 instructions (~65% of 400M)** and **accepted**
+(`scripts/07_book_worstcase_testnet.sh`; tx `96bf9a1b…`, contract `CAJ4AWOZ…`). Margin is ~35%:
+matching is one verify regardless of fills (the makers are bound in the proof, not loaded on-chain),
+so this is the ceiling for the merged-trade path — **do not widen the maker cap without re-measuring**.
 
-Non-CPU resources for that same tx: `write_bytes` = **25,776** (~20% of the ~130 KB per-tx cap),
-`disk_read_bytes` = **0**. Under Protocol 23's in-memory state model, TTL-live entries are read from
-memory and don't count against the read-bytes limit — so keeping state bumped (see the storage
-section of `implementation.md`) also keeps reads free. The network accepts a tx only if it is under
-*every* per-tx cap, so acceptance confirms the worst case fits instructions, write/read bytes, and
-entry counts.
-
-Cost model: `submit_order ≈ 80M (verify) + (2·fills + IOC?)·40M (inserts) + book load/store`. The
-real driver is proceeds inserts, not book depth — loading a full 64-deep side is ~58M local
-(monolithic `Vec` (de)serialization), independent of fills.
+Cost model: `settle_match ≈ 80M (verify) + k·~40M (proceeds + IMT inserts, k = fills) + remainder`.
+The driver is the proceeds + IMT inserts, not any on-chain book load — the order book is event-derived,
+so the contract loads nothing per match beyond the trees it appends to. The single verify is fixed at
+~80M (the proof is padded to `CONST_PROOF_SIZE_LOG_N=28` regardless of how many makers it binds).
 
 ---
 

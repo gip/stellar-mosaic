@@ -1,0 +1,7 @@
+[package]
+name = "matching"
+type = "bin"
+authors = ["stellar-mosaic"]
+
+[dependencies]
+mosaic = { path = "../mosaic" }

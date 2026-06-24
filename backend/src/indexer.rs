@@ -9,18 +9,22 @@
 use crate::error::{AppError, AppResult};
 use crate::stellar::Stellar;
 use base64::Engine;
-use mosaic_indexer::NoteTree;
+use mosaic_indexer::{
+    order_consumption_nullifier, u256_to_word, word_to_u256, Hasher, NoteTree, NullifierImt,
+};
 use serde::Serialize;
 use soroban_sdk::{Env, U256};
+use std::collections::HashSet;
 
-/// A leaf-producing event, in insertion order.
+/// A note-tree leaf-producing event, in insertion order (`shielded` / `noteins`). WS4 removed the
+/// monolithic `settled` event; proceeds notes from `settle_match` and cancel returns are plain
+/// `noteins`.
 enum TreeEvent {
     Insert {
         asset: u32,
         amount: i128,
         tag: [u8; 32],
     },
-    Settled([(u32, i128, [u8; 32]); 2]),
 }
 
 /// One note known to the tree.
@@ -153,11 +157,6 @@ fn build_events(events: Vec<TreeEvent>) -> AppResult<(NoteTree, Vec<NoteInfo>)> 
                 let i = tree.ingest_note(asset, amount, &tag);
                 record(i, asset, amount, &tag);
             }
-            TreeEvent::Settled([(aao, bai, at), (bao, aai, bt)]) => {
-                let (ia, ib) = tree.ingest_settled(aao, bai, &at, bao, aai, &bt);
-                record(ia, aao, bai, &at);
-                record(ib, bao, aai, &bt);
-            }
         }
     }
     Ok((tree, notes))
@@ -233,15 +232,6 @@ fn parse_event(v: &serde_json::Value) -> Option<TreeEvent> {
             let tag = r.scbytes32()?;
             Some(TreeEvent::Insert { asset, amount, tag })
         }
-        "settled" if n == 6 => {
-            let aao = r.scu32()?;
-            let bai = r.sci128()?;
-            let at = r.scbytes32()?;
-            let bao = r.scu32()?;
-            let aai = r.sci128()?;
-            let bt = r.scbytes32()?;
-            Some(TreeEvent::Settled([(aao, bai, at), (bao, aai, bt)]))
-        }
         _ => None,
     }
 }
@@ -281,6 +271,446 @@ fn parse_fill(v: &serde_json::Value) -> Option<FillInfo> {
         amount_out: amount_out.to_string(),
         owner_tag: fmt_hex32(&tag),
     })
+}
+
+/// One resting order, decoded from an `orderins` event (full public terms + leaf). `active` is false
+/// once the order's consumption nullifier `compress(ORDER_NULLIFIER_DOMAIN, order_leaf)` appears in a
+/// `nfspent` event (matched or cancelled). This is the event-derived order book: no per-tx calldata
+/// fetching, no contract `book()` call.
+#[derive(Serialize, Clone)]
+pub struct OrderInfo {
+    pub leaf_index: usize,
+    pub order_leaf: String, // 0x + 64 hex
+    pub asset_in: u32,
+    pub amount_in: String,
+    pub asset_out: u32,
+    pub min_out: String,
+    pub output_owner_tag: String,
+    pub cancel_owner_tag: String,
+    pub expiry: u64,
+    pub partial_allowed: bool,
+    pub active: bool,
+}
+
+struct OrderRaw {
+    asset_in: u32,
+    amount_in: i128,
+    asset_out: u32,
+    min_out: i128,
+    output_owner_tag: [u8; 32],
+    cancel_owner_tag: [u8; 32],
+    expiry: u64,
+    partial_allowed: bool,
+    order_leaf: [u8; 32],
+}
+
+/// Reconstruct the active order book purely from events: every `orderins` (placement or re-rested
+/// match remainder) in tree-insert order, minus those whose consumption nullifier appears in
+/// `nfspent`. `include_consumed` keeps the inactive ones (e.g. for history).
+pub fn order_book(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+    include_consumed: bool,
+) -> AppResult<Vec<OrderInfo>> {
+    let orders = scan_events(stellar, contract_id, from_ledger, parse_orderins)?;
+    let spent: Vec<[u8; 32]> = scan_events(stellar, contract_id, from_ledger, parse_nfspent)?;
+    let spent: HashSet<[u8; 32]> = spent.into_iter().collect();
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let h = Hasher::new(&env);
+    let mut out = Vec::new();
+    for (i, o) in orders.iter().enumerate() {
+        let leaf_u = word_to_u256(&env, &o.order_leaf);
+        let nf = u256_to_word(&order_consumption_nullifier(&env, &h, &leaf_u));
+        let active = !spent.contains(&nf);
+        if active || include_consumed {
+            out.push(OrderInfo {
+                leaf_index: i,
+                order_leaf: fmt_hex32(&o.order_leaf),
+                asset_in: o.asset_in,
+                amount_in: o.amount_in.to_string(),
+                asset_out: o.asset_out,
+                min_out: o.min_out.to_string(),
+                output_owner_tag: fmt_hex32(&o.output_owner_tag),
+                cancel_owner_tag: fmt_hex32(&o.cancel_owner_tag),
+                expiry: o.expiry,
+                partial_allowed: o.partial_allowed,
+                active,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Decode an `orderins` event: vec of [asset_in u32, amount_in i128, asset_out u32, min_out i128,
+/// output_owner_tag bytes32, cancel_owner_tag bytes32, expiry u64, partial_allowed bool, order_leaf
+/// bytes32]. Returns `None` for any other event.
+fn parse_orderins(v: &serde_json::Value) -> Option<OrderRaw> {
+    let topic_b64 = v.get("topic")?.as_array()?.first()?.as_str()?;
+    if decode_symbol(topic_b64)? != "orderins" {
+        return None;
+    }
+    let value_b64 = v.get("value")?.as_str()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value_b64)
+        .ok()?;
+    let mut r = Rdr::new(&bytes);
+    if r.vec_header()? != 9 {
+        return None;
+    }
+    Some(OrderRaw {
+        asset_in: r.scu32()?,
+        amount_in: r.sci128()?,
+        asset_out: r.scu32()?,
+        min_out: r.sci128()?,
+        output_owner_tag: r.scbytes32()?,
+        cancel_owner_tag: r.scbytes32()?,
+        expiry: r.scu64()?,
+        partial_allowed: r.scbool()?,
+        order_leaf: r.scbytes32()?,
+    })
+}
+
+/// Decode a `nfspent` event: vec of [nullifier bytes32]. Returns `None` for any other event.
+fn parse_nfspent(v: &serde_json::Value) -> Option<[u8; 32]> {
+    let topic_b64 = v.get("topic")?.as_array()?.first()?.as_str()?;
+    if decode_symbol(topic_b64)? != "nfspent" {
+        return None;
+    }
+    let value_b64 = v.get("value")?.as_str()?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value_b64)
+        .ok()?;
+    let mut r = Rdr::new(&bytes);
+    if r.vec_header()? != 1 {
+        return None;
+    }
+    r.scbytes32()
+}
+
+/// Order-tree membership path for an `order_leaf` (0x hex), against the current order root. Lets a
+/// matcher/canceller prove the order is a member of an accepted order root.
+#[derive(Serialize)]
+pub struct OrderProof {
+    pub leaf_index: usize,
+    pub order_root: String,
+    pub siblings: Vec<String>,
+    pub index_bits: Vec<u8>,
+    /// compress(ORDER_NULLIFIER_DOMAIN, order_leaf) - the value a match/cancel consumes (so the
+    /// client need not compute Poseidon to drive the imt-witness fetch + the proof's public input).
+    pub consumption_nullifier: String,
+}
+
+fn order_proof_inner(orders: &[OrderRaw], order_leaf: &str) -> AppResult<OrderProof> {
+    let want = parse_hex32(order_leaf)?;
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let h = Hasher::new(&env);
+    let mut tree = NoteTree::new(&env);
+    let mut found = None;
+    for o in orders {
+        let i = tree.insert_leaf(word_to_u256(&env, &o.order_leaf));
+        if o.order_leaf == want {
+            found = Some(i);
+        }
+    }
+    let idx =
+        found.ok_or_else(|| AppError::NotFound(format!("no order with leaf {order_leaf}")))?;
+    let p = tree.path(idx);
+    let nf = order_consumption_nullifier(&env, &h, &word_to_u256(&env, &want));
+    Ok(OrderProof {
+        leaf_index: idx,
+        order_root: u256_hex(&tree.root()),
+        siblings: p.siblings.iter().map(u256_hex).collect(),
+        index_bits: p.index_bits.to_vec(),
+        consumption_nullifier: u256_hex(&nf),
+    })
+}
+
+pub fn order_proof_from_raw(raw: &[serde_json::Value], order_leaf: &str) -> AppResult<OrderProof> {
+    let orders: Vec<OrderRaw> = raw.iter().filter_map(parse_orderins).collect();
+    order_proof_inner(&orders, order_leaf)
+}
+
+pub fn order_proof(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+    order_leaf: &str,
+) -> AppResult<OrderProof> {
+    let orders = scan_events(stellar, contract_id, from_ledger, parse_orderins)?;
+    order_proof_inner(&orders, order_leaf)
+}
+
+/// The nullifier-IMT insert witness for `value` (0x hex), against the CURRENT accumulator (all
+/// `nfspent` replayed). This is exactly the imt_insert witness a spend circuit needs; the actual
+/// insert lands when the spend's own `nfspent` is later observed.
+#[derive(Serialize)]
+pub struct ImtWitnessOut {
+    pub nullifier_root_in: String,
+    pub nullifier_root_out: String,
+    pub low_value: String,
+    pub low_next_value: String,
+    pub low_next_index: u64,
+    pub low_path: Vec<String>,
+    pub low_index_bits: Vec<u8>,
+    pub new_path: Vec<String>,
+    pub new_index_bits: Vec<u8>,
+    pub pred_leaf: String,
+    pub pred_path: Vec<String>,
+    pub pred_index_bits: Vec<u8>,
+}
+
+fn imt_witness_inner(spent: &[[u8; 32]], value: &str) -> AppResult<ImtWitnessOut> {
+    let v = parse_hex32(value)?;
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let mut imt = NullifierImt::new(&env);
+    for nf in spent {
+        imt.insert(word_to_u256(&env, nf));
+    }
+    let root_in = imt.root();
+    let w = imt.witness(word_to_u256(&env, &v));
+    Ok(ImtWitnessOut {
+        nullifier_root_in: u256_hex(&root_in),
+        nullifier_root_out: u256_hex(&w.root_out),
+        low_value: u256_hex(&w.low_value),
+        low_next_value: u256_hex(&w.low_next_value),
+        low_next_index: w.low_next_index,
+        low_path: w.low_path.siblings.iter().map(u256_hex).collect(),
+        low_index_bits: w.low_path.index_bits.to_vec(),
+        new_path: w.new_path.siblings.iter().map(u256_hex).collect(),
+        new_index_bits: w.new_path.index_bits.to_vec(),
+        pred_leaf: u256_hex(&w.pred_leaf),
+        pred_path: w.pred_path.siblings.iter().map(u256_hex).collect(),
+        pred_index_bits: w.pred_path.index_bits.to_vec(),
+    })
+}
+
+pub fn imt_witness_from_raw(raw: &[serde_json::Value], value: &str) -> AppResult<ImtWitnessOut> {
+    let spent: Vec<[u8; 32]> = raw.iter().filter_map(parse_nfspent).collect();
+    imt_witness_inner(&spent, value)
+}
+
+/// Witnesses for inserting SEVERAL values in sequence, each against the root after the previous one
+/// was inserted. This is what a multi-insert spend (join: 2; match: <=4) needs - the later inserts
+/// fold against intermediate roots, not the current one.
+fn imt_witnesses_inner(spent: &[[u8; 32]], values: &[String]) -> AppResult<Vec<ImtWitnessOut>> {
+    let parsed: Result<Vec<[u8; 32]>, _> = values.iter().map(|v| parse_hex32(v)).collect();
+    let parsed = parsed?;
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let mut imt = NullifierImt::new(&env);
+    for nf in spent {
+        imt.insert(word_to_u256(&env, nf));
+    }
+    let mut out = Vec::with_capacity(parsed.len());
+    for v in &parsed {
+        let vu = word_to_u256(&env, v);
+        let root_in = imt.root();
+        let w = imt.witness(vu.clone());
+        out.push(ImtWitnessOut {
+            nullifier_root_in: u256_hex(&root_in),
+            nullifier_root_out: u256_hex(&w.root_out),
+            low_value: u256_hex(&w.low_value),
+            low_next_value: u256_hex(&w.low_next_value),
+            low_next_index: w.low_next_index,
+            low_path: w.low_path.siblings.iter().map(u256_hex).collect(),
+            low_index_bits: w.low_path.index_bits.to_vec(),
+            new_path: w.new_path.siblings.iter().map(u256_hex).collect(),
+            new_index_bits: w.new_path.index_bits.to_vec(),
+            pred_leaf: u256_hex(&w.pred_leaf),
+            pred_path: w.pred_path.siblings.iter().map(u256_hex).collect(),
+            pred_index_bits: w.pred_path.index_bits.to_vec(),
+        });
+        imt.insert(vu); // advance so the next value witnesses against the new root
+    }
+    Ok(out)
+}
+
+pub fn imt_witnesses_from_raw(
+    raw: &[serde_json::Value],
+    values: &[String],
+) -> AppResult<Vec<ImtWitnessOut>> {
+    let spent: Vec<[u8; 32]> = raw.iter().filter_map(parse_nfspent).collect();
+    imt_witnesses_inner(&spent, values)
+}
+
+pub fn imt_witnesses(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+    values: &[String],
+) -> AppResult<Vec<ImtWitnessOut>> {
+    let spent = scan_events(stellar, contract_id, from_ledger, parse_nfspent)?;
+    imt_witnesses_inner(&spent, values)
+}
+
+pub fn imt_witness(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+    value: &str,
+) -> AppResult<ImtWitnessOut> {
+    let spent = scan_events(stellar, contract_id, from_ledger, parse_nfspent)?;
+    imt_witness_inner(&spent, value)
+}
+
+/// The proceeds note a `settle_match` minted for one consumed order, recovered by correlating that
+/// match's events. The wallet stored only the *base* `output_owner_tag` it bound into its order; the
+/// matcher mints the proceeds note under `note_owner_tag = compress(output_owner_tag, nonce)` with
+/// `nonce = compress(taker_order_leaf, slot)`, which the resting maker cannot predict (it does not
+/// know which taker crossed it, nor in which slot). This recomputes both from the public match
+/// events so the maker can find the on-chain leaf (`owner_tag`) and later spend it (`nonce`).
+#[derive(Serialize)]
+pub struct MatchProceeds {
+    /// True if `order_leaf` was consumed by a `settle_match` (vs. still resting / cancelled).
+    pub matched: bool,
+    /// The minted proceeds note's on-chain owner tag (`compress(base_tag, nonce)`), 0x hex.
+    pub owner_tag: String,
+    /// The per-note mint nonce the wallet must fold into the spend (`compress(taker_leaf, slot)`).
+    pub nonce: String,
+    pub asset: u32,
+    pub amount: String,
+}
+
+/// One settle_match's correlated proceeds, in slot order (slot 0 = taker, 1.. = makers): the consumed
+/// order's consumption nullifier alongside the proceeds note minted for it and the folding nonce.
+struct MatchTx {
+    taker_leaf: [u8; 32],
+    /// Per slot: (consumed-order consumption nullifier, proceeds {asset, amount, owner_tag}).
+    slots: Vec<([u8; 32], (u32, i128, [u8; 32]))>,
+}
+
+/// Per-raw-event classification used only for match correlation.
+enum MatchEv {
+    Matched,
+    Nfspent([u8; 32]),
+    Noteins(u32, i128, [u8; 32]),
+}
+
+fn classify_match_ev(v: &serde_json::Value) -> Option<MatchEv> {
+    let topic_b64 = v.get("topic")?.as_array()?.first()?.as_str()?;
+    let sym = decode_symbol(topic_b64)?;
+    match sym.as_str() {
+        "matched" => Some(MatchEv::Matched),
+        "nfspent" => parse_nfspent(v).map(MatchEv::Nfspent),
+        "noteins" => {
+            let value_b64 = v.get("value")?.as_str()?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(value_b64)
+                .ok()?;
+            let mut r = Rdr::new(&bytes);
+            if r.vec_header()? != 3 {
+                return None;
+            }
+            Some(MatchEv::Noteins(r.scu32()?, r.sci128()?, r.scbytes32()?))
+        }
+        _ => None,
+    }
+}
+
+/// Reconstruct every `settle_match` from the raw event stream. Soroban returns events ordered by
+/// (ledger, tx, event-index), so one tx's events are contiguous and in contract-emission order:
+/// `nfspent` (taker @ slot 0, then makers in slot order), then `noteins` (proceeds in the same slot
+/// order; only live slots are minted, so the k-th `nfspent` pairs with the k-th `noteins`), then
+/// `matched`. We only keep txs that carry a `matched` event.
+fn match_txs(raw: &[serde_json::Value], env: &Env, h: &Hasher) -> Vec<MatchTx> {
+    // consumption-nullifier -> order_leaf, so we can name the taker by its slot-0 nullifier.
+    let mut nf_to_leaf: std::collections::HashMap<[u8; 32], [u8; 32]> = std::collections::HashMap::new();
+    for o in raw.iter().filter_map(parse_orderins) {
+        let nf = u256_to_word(&order_consumption_nullifier(
+            env,
+            h,
+            &word_to_u256(env, &o.order_leaf),
+        ));
+        nf_to_leaf.insert(nf, o.order_leaf);
+    }
+
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < raw.len() {
+        let tx = raw[i].get("txHash").and_then(|x| x.as_str()).map(str::to_string);
+        // gather this tx's contiguous events
+        let mut j = i;
+        let mut nfs: Vec<[u8; 32]> = Vec::new();
+        let mut notes: Vec<(u32, i128, [u8; 32])> = Vec::new();
+        let mut is_match = false;
+        while j < raw.len()
+            && raw[j].get("txHash").and_then(|x| x.as_str()).map(str::to_string) == tx
+        {
+            if let Some(ev) = classify_match_ev(&raw[j]) {
+                match ev {
+                    MatchEv::Matched => is_match = true,
+                    MatchEv::Nfspent(nf) => nfs.push(nf),
+                    MatchEv::Noteins(a, m, t) => notes.push((a, m, t)),
+                }
+            }
+            j += 1;
+        }
+        if is_match && !nfs.is_empty() && notes.len() == nfs.len() {
+            if let Some(&taker_leaf) = nf_to_leaf.get(&nfs[0]) {
+                let slots = nfs.into_iter().zip(notes.into_iter()).collect();
+                out.push(MatchTx { taker_leaf, slots });
+            }
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+fn match_proceeds_inner(raw: &[serde_json::Value], order_leaf: &str) -> AppResult<MatchProceeds> {
+    let want = parse_hex32(order_leaf)?;
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let h = Hasher::new(&env);
+    let want_nf = u256_to_word(&order_consumption_nullifier(
+        &env,
+        &h,
+        &word_to_u256(&env, &want),
+    ));
+    for mtx in match_txs(raw, &env, &h) {
+        if let Some(slot) = mtx.slots.iter().position(|(nf, _)| *nf == want_nf) {
+            let (_, (asset, amount, tag)) = &mtx.slots[slot];
+            let nonce = h.compress(
+                &env,
+                &word_to_u256(&env, &mtx.taker_leaf),
+                &U256::from_u32(&env, slot as u32),
+            );
+            return Ok(MatchProceeds {
+                matched: true,
+                owner_tag: fmt_hex32(tag),
+                nonce: u256_hex(&nonce),
+                asset: *asset,
+                amount: amount.to_string(),
+            });
+        }
+    }
+    Ok(MatchProceeds {
+        matched: false,
+        owner_tag: String::new(),
+        nonce: String::new(),
+        asset: 0,
+        amount: "0".to_string(),
+    })
+}
+
+pub fn match_proceeds_from_raw(
+    raw: &[serde_json::Value],
+    order_leaf: &str,
+) -> AppResult<MatchProceeds> {
+    match_proceeds_inner(raw, order_leaf)
+}
+
+pub fn match_proceeds(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+    order_leaf: &str,
+) -> AppResult<MatchProceeds> {
+    let raw = scan_events(stellar, contract_id, from_ledger, |v| Some(v.clone()))?;
+    match_proceeds_inner(&raw, order_leaf)
 }
 
 /// Decode a base64 ScVal::Symbol into its string.
@@ -338,6 +768,20 @@ impl<'a> Rdr<'a> {
         }
         let s = self.take(16)?;
         Some(i128::from_be_bytes(s.try_into().ok()?))
+    }
+    fn scu64(&mut self) -> Option<u64> {
+        if self.u32()? != 5 {
+            return None; // SCV_U64
+        }
+        let s = self.b.get(self.pos..self.pos + 8)?;
+        self.pos += 8;
+        Some(u64::from_be_bytes(s.try_into().ok()?))
+    }
+    fn scbool(&mut self) -> Option<bool> {
+        if self.u32()? != 0 {
+            return None; // SCV_BOOL
+        }
+        Some(self.u32()? != 0) // XDR bool is a 4-byte int
     }
     fn scbytes32(&mut self) -> Option<[u8; 32]> {
         if self.u32()? != 13 {

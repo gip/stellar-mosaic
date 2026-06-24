@@ -9,7 +9,7 @@ produced so you always know what is deployed and what to run next.
 
 ```bash
 ./scripts/e2e.sh status     # what's ready, what's blocked (and why), what's been generated
-./scripts/e2e.sh stellar    # Stellar leg: deploy + shield → settle → unshield  (needs only stellar CLI)
+./scripts/e2e.sh stellar    # Stellar leg: deploy + shield → place → settle_match → unshield  (needs stellar CLI + nargo/bb)
 ./scripts/e2e.sh base       # Base leg: shield USDC on Base Sepolia → mint the note on Stellar
 ./scripts/e2e.sh all        # both legs in sequence, then the combined summary
 ./scripts/e2e.sh show       # everything generated so far (contracts, addresses) + explorer links
@@ -26,7 +26,7 @@ The driver does not replace the demo scripts — it orchestrates them and persis
 
 | Leg | Script wrapped | What it proves | Hard requirements |
 |---|---|---|---|
-| **Stellar** | `scripts/04_demo_e2e_testnet.sh` | deploy settlement → `shield` → atomic two-proof `settle` → `unshield`, all as real testnet txs with the committed UltraHonk proofs | `stellar` CLI + a funded testnet identity (auto-created/funded) |
+| **Stellar** | `scripts/04_demo_e2e_testnet.sh` | deploy settlement → `shield` → `place_order` ×2 → `settle_match` → `unshield` the proceeds, all as real testnet txs; asserts the nullifier-accumulator root advances and a replayed `settle_match` reverts | `stellar` CLI + funded testnet identity (auto-created/funded) + the nargo/bb toolchain (proofs are generated at run time against the live clock) |
 | **Base** | `scripts/10_demo_base_shield_testnet.sh` | deploy `MosaicBridge` on Base Sepolia → `shield` USDC → RISC Zero/Steel proof → `shield_from_base` mints the note on Stellar (tree root advances) | foundry, a funded Base key, a `getProof` RPC, the RISC Zero prover stack, the deployed verifier router |
 
 The two legs deploy **separate** settlement contracts (the existing scripts each deploy their own).
@@ -54,15 +54,17 @@ export BASE_RPC=https://base-sepolia.g.alchemy.com/v2/<key>
 ./scripts/e2e.sh all
 ```
 
-> The Stellar leg needs **no** Noir/bb toolchain — it runs the committed proof fixtures
-> (`contracts/settlement/tests/fixtures/demo/`). You only need that toolchain to *regenerate* them
-> (`./scripts/e2e.sh regen`), which is rarely necessary.
+> The Stellar leg **needs the Noir/bb toolchain** (`nargo` 1.0.0-beta.9, `bb` v0.87.0): WS4 binds the
+> live ledger clock (placement TTL + the match's 300s `now` skew), so the leg generates proofs at run
+> time against the current clock into a temp dir (the committed `tests/fixtures/ws4/` set is never
+> touched). The committed VKs are reused as-is.
 
 ## Per-stage tables and the summary
 
-As each leg runs it prints a small **table after every stage** (context, deploy, setup, shield,
-settle, unshield for Stellar; context, deploy, shield, prove, configure, shield_from_base for Base)
-listing the addresses, contracts, transactions, roots, and CPU costs that stage produced:
+As each leg runs it prints a small **table after every stage** (context, deploy, setup, shield, place,
+settle_match, stale-root, unshield for Stellar; context, deploy, shield, prove, configure,
+shield_from_base for Base) listing the addresses, contracts, transactions, roots, and CPU costs that
+stage produced:
 
 ```
   ┌─ Stellar · deploy
@@ -122,15 +124,15 @@ identity (same address), and `.e2e/` state. To force a true clean slate:
 
 The next `stellar`/`base` then recompiles and deploys brand-new contracts on both chains. The Base
 guest image ID is deterministic from source, so a clean rebuild reproduces the same pinned ID (no
-re-pinning needed). To also regenerate the committed UltraHonk proofs, run `regen` (below).
+re-pinning needed).
 
 ## Regenerating fixtures
 
-The Stellar leg's proofs are committed, so you normally never touch them. If a circuit or its
-public-input layout changes, regenerate with:
+The Stellar leg generates its proofs at run time, so you don't normally regenerate anything. The
+committed `tests/fixtures/ws4/` set (used by the contract tests) is rebuilt with:
 
 ```bash
-./scripts/e2e.sh regen       # wraps scripts/03_demo_e2e.sh
+./scripts/e2e.sh regen       # wraps scripts/05_gen_book_fixtures.sh -> tests/fixtures/ws4/regen.py
 ```
 
 This needs the pinned Noir/bb toolchain (`nargo` 1.0.0-beta.9, `bb` v0.87.0 — see `CLAUDE.md`).

@@ -18,6 +18,13 @@ export interface OrderCancelInfo {
   asset_in: number // locked/offered asset — the refund is minted in this asset
   symbol_in: string
   amount_in: string // principal offered; the refund note's initial amount
+  // WS4: the rest of the order's terms, so the cancel circuit can recompute order_leaf to prove
+  // membership in the order tree (the leaf binds all of these).
+  asset_out: number
+  min_out: string
+  output_owner_tag: string
+  expiry: number
+  partial_allowed: boolean
 }
 
 export interface Note {
@@ -29,6 +36,11 @@ export interface Note {
   amount: string // i128 as decimal string
   sk: string // owner secret (0x field)
   rho: string // per-note randomness (0x field)
+  /** Per-note mint nonce (0x field). owner_tag = compress(compress(compress(sk,0),rho),nonce) and
+   * nullifier = compress(sk, compress(rho, nonce)). Wallet-minted notes (shield, cancel return, join
+   * outputs) use '0'; a proceeds note minted by a match carries nonce = compress(match_id, slot).
+   * Absent on pre-WS4 records (treated as '0'). */
+  nonce?: string
   owner_tag: string // 0x field, public
   status: NoteStatus
   indexed: boolean // whether the note has appeared in the indexer and can be spent

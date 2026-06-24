@@ -5,12 +5,14 @@ import { type Note } from '../notes'
 import CancelOrderButton from './CancelOrderButton'
 
 interface OrderEntry {
+  asset_in: number
+  asset_out: number
   amount_in: string | number
   min_out: string | number
-  remaining_in: string | number
   expiry: string | number
   partial_allowed: boolean
-  order_leaf?: string
+  order_leaf: string
+  active: boolean
 }
 
 /** Canonical form of a 32-byte hex tag for comparison. The book passes the Soroban CLI's raw
@@ -23,7 +25,6 @@ function normLeaf(h: string): string {
 export default function BookView({
   desk,
   pairId,
-  side,
   label,
   inDecimals,
   outDecimals,
@@ -35,9 +36,8 @@ export default function BookView({
 }: {
   desk: Desk
   pairId: number
-  side: number
   label: string
-  /** Decimals of the asset offered (amount_in / remaining_in). */
+  /** Decimals of the asset offered (amount_in). */
   inDecimals: number
   /** Decimals of the asset requested (min_out). */
   outDecimals: number
@@ -58,6 +58,11 @@ export default function BookView({
       .filter((n) => n.cancel && n.status === 'active')
       .map((n) => [normLeaf(n.cancel!.order_leaf), n] as const),
   )
+  // This side's asset orientation, used to filter the (pair-agnostic) event-derived book.
+  const pair = desk.pairs.find((p) => p.pair_id === pairId)
+  const myAssetIn = pair ? (inIsBase ? pair.base_asset : pair.quote_asset) : -1
+  const myAssetOut = pair ? (inIsBase ? pair.quote_asset : pair.base_asset) : -1
+
   const [orders, setOrders] = useState<OrderEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -65,10 +70,14 @@ export default function BookView({
     let alive = true
     const tick = () =>
       api
-        .getBook(deskId, pairId, side)
+        .getBook(deskId)
         .then((r) => {
           if (!alive) return
-          setOrders((r.orders as OrderEntry[]) ?? [])
+          // Event-derived book is pair-agnostic; keep only active orders on this side.
+          const mine = ((r.orders as OrderEntry[]) ?? []).filter(
+            (o) => o.active && o.asset_in === myAssetIn && o.asset_out === myAssetOut,
+          )
+          setOrders(mine)
           setError(null)
         })
         .catch((e) => alive && setError(e instanceof Error ? e.message : String(e)))
@@ -78,7 +87,7 @@ export default function BookView({
       alive = false
       clearInterval(h)
     }
-  }, [deskId, pairId, side])
+  }, [deskId, myAssetIn, myAssetOut])
 
   return (
     <div style={{ flex: 1, minWidth: 280 }}>
@@ -95,7 +104,6 @@ export default function BookView({
               <th>price</th>
               <th>in</th>
               <th>min out</th>
-              <th>left</th>
               <th>part</th>
               <th></th>
             </tr>
@@ -112,7 +120,6 @@ export default function BookView({
                   <td>{px ?? '—'}</td>
                   <td>{formatAmount(BigInt(o.amount_in), inDecimals)}</td>
                   <td>{formatAmount(BigInt(o.min_out), outDecimals)}</td>
-                  <td>{formatAmount(BigInt(o.remaining_in), inDecimals)}</td>
                   <td>{o.partial_allowed ? 'Y' : 'N'}</td>
                   <td>
                     {own && <CancelOrderButton desk={desk} note={own} onDone={onCancel} />}

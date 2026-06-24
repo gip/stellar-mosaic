@@ -31,6 +31,7 @@ pub const TREE_DEPTH: usize = 32;
 
 /// Poseidon2 parameters (BN254 t=4) loaded once and reused for every compression — mirrors the
 /// contract's `Hasher`. Building the round-constant tables is expensive, so do it once.
+#[derive(Clone)]
 pub struct Hasher {
     m_diag: Vec<U256>,
     rc: Vec<Vec<U256>>,
@@ -107,8 +108,11 @@ pub struct MerklePath {
     pub index_bits: [u8; TREE_DEPTH],
 }
 
-/// A full-leaf reconstruction of the on-chain note tree. Unlike the contract (which stores only
-/// filled subtrees), this keeps every leaf so it can produce a path for ANY historical note.
+/// A full-leaf reconstruction of an on-chain append-only tree. Unlike the contract (which stores
+/// only filled subtrees), this keeps every leaf so it can produce a path for ANY historical leaf.
+/// Used for both the note tree and (via `insert_leaf`) the order-commitment tree, and as the backing
+/// store for the nullifier IMT (which also needs in-place leaf updates).
+#[derive(Clone)]
 pub struct NoteTree {
     env: Env,
     h: Hasher,
@@ -160,6 +164,12 @@ impl NoteTree {
         idx
     }
 
+    /// Overwrite the leaf at `index` (used by the nullifier IMT to repoint a low leaf). Panics if
+    /// `index >= len()`.
+    pub fn set_leaf(&mut self, index: usize, leaf: U256) {
+        self.leaves[index] = leaf;
+    }
+
     /// Append an AssetNote leaf computed from its fields; returns its index.
     pub fn insert_asset_note(&mut self, asset: u32, amount: i128, owner_tag: &[u8; 32]) -> usize {
         let leaf = asset_note_leaf(&self.env, &self.h, asset, amount, owner_tag);
@@ -172,12 +182,20 @@ impl NoteTree {
         self.insert_asset_note(asset_id, amount, owner_tag)
     }
 
-    /// Ingest a `noteins` event `(asset, amount, owner_tag)` — one AssetNote leaf minted by the
-    /// order book (a fill's proceeds, or a cancel/prune/IOC return). The book emits exactly one such
-    /// event per leaf it inserts, in insertion order, so replaying them rebuilds the tree just like
-    /// `shielded`. Returns the new leaf's index.
+    /// Ingest a `noteins` event `(asset, amount, owner_tag)` — one AssetNote leaf minted by a
+    /// `settle_match` proceeds payout or a `cancel_order` return. One event per inserted leaf, in
+    /// insertion order, so replaying them rebuilds the note tree just like `shielded`. The `owner_tag`
+    /// here is the FINAL note tag (the per-note nonce already folded in by the circuit). Returns the
+    /// new leaf's index.
     pub fn ingest_note(&mut self, asset: u32, amount: i128, owner_tag: &[u8; 32]) -> usize {
         self.insert_asset_note(asset, amount, owner_tag)
+    }
+
+    /// Ingest an `orderins` event into the ORDER tree: the leaf is the order's `order_leaf` (= H8 of
+    /// its terms), supplied directly by the event, so we append it as-is. (Use a separate `NoteTree`
+    /// instance for the order tree.) Returns the new leaf's index.
+    pub fn ingest_orderins(&mut self, order_leaf: &[u8; 32]) -> usize {
+        self.insert_leaf(word_to_u256(&self.env, order_leaf))
     }
 
     /// Ingest a `settled` event. The contract emits, and inserts, in this order:
@@ -242,9 +260,10 @@ impl NoteTree {
         layers[TREE_DEPTH][0].clone()
     }
 
-    /// Membership path for the leaf at `index`. `index` must be < `len()`.
+    /// Membership path for the leaf at `index`. `index == len()` is allowed and yields the path for
+    /// the next (empty) append slot — the nullifier IMT needs this to witness where a new leaf lands.
     pub fn path(&self, index: usize) -> MerklePath {
-        assert!(index < self.leaves.len(), "leaf index out of range");
+        assert!(index <= self.leaves.len(), "leaf index out of range");
         let layers = self.build_layers();
         // Arrays are filled level by level; start from the zero word and overwrite.
         let zero = U256::from_u32(&self.env, 0);
@@ -298,6 +317,170 @@ pub fn u256_hex(v: &U256) -> String {
         s.push_str(&format!("{:02x}", b));
     }
     s
+}
+
+/// Order leaf = H8(asset_in, amount_in, asset_out, min_out, output_owner_tag, cancel_owner_tag,
+/// expiry, partial_allowed), folded left-to-right like the circuit's `hash8` / the contract's order
+/// leaf. Lets the indexer verify an `orderins` event's leaf against its emitted terms.
+#[allow(clippy::too_many_arguments)]
+pub fn order_leaf(
+    env: &Env,
+    h: &Hasher,
+    asset_in: u32,
+    amount_in: i128,
+    asset_out: u32,
+    min_out: i128,
+    output_owner_tag: &[u8; 32],
+    cancel_owner_tag: &[u8; 32],
+    expiry: u64,
+    partial_allowed: bool,
+) -> U256 {
+    let mut acc = h.compress(
+        env,
+        &U256::from_u32(env, asset_in),
+        &U256::from_u128(env, amount_in as u128),
+    );
+    acc = h.compress(env, &acc, &U256::from_u32(env, asset_out));
+    acc = h.compress(env, &acc, &U256::from_u128(env, min_out as u128));
+    acc = h.compress(env, &acc, &word_to_u256(env, output_owner_tag));
+    acc = h.compress(env, &acc, &word_to_u256(env, cancel_owner_tag));
+    acc = h.compress(env, &acc, &U256::from_u128(env, expiry as u128));
+    h.compress(env, &acc, &U256::from_u32(env, partial_allowed as u32))
+}
+
+/// Domain separator for order-consumption nullifiers (matches the circuits' `ORDER_NULLIFIER_DOMAIN`).
+pub const ORDER_NULLIFIER_DOMAIN: u32 = 7;
+
+/// Order-consumption nullifier = compress(ORDER_NULLIFIER_DOMAIN, order_leaf). The frontend computes
+/// this to test a leaf against `nfspent` (active vs. consumed); the witness bin uses it to drive the
+/// IMT on a match/cancel.
+pub fn order_consumption_nullifier(env: &Env, h: &Hasher, order_leaf: &U256) -> U256 {
+    h.compress(env, &U256::from_u32(env, ORDER_NULLIFIER_DOMAIN), order_leaf)
+}
+
+/// One leaf of the indexed merkle tree: a node in the sorted singly-linked list of consumed values.
+#[derive(Clone)]
+pub struct ImtLeaf {
+    pub value: U256,
+    pub next_value: U256,
+    pub next_index: u64,
+}
+
+/// IMT leaf hash = H3(value, next_value, next_index), matching the circuit's `ImtLeaf::hash`.
+pub fn imt_leaf_hash(env: &Env, h: &Hasher, leaf: &ImtLeaf) -> U256 {
+    let acc = h.compress(env, &leaf.value, &leaf.next_value);
+    h.compress(env, &acc, &U256::from_u128(env, leaf.next_index as u128))
+}
+
+/// The witnesses a spend circuit's `imt_insert` needs to consume `value`, plus the resulting root.
+pub struct ImtWitness {
+    pub low_value: U256,
+    pub low_next_value: U256,
+    pub low_next_index: u64,
+    pub low_path: MerklePath,
+    pub new_path: MerklePath,
+    /// Append-frontier proof: the leaf at `new_index - 1` and its path in the intermediate root
+    /// (after the low-leaf repoint, before the new leaf is written). Pins `new_index` to the append
+    /// frontier so the circuit cannot insert into a gap. `pred_path.index_bits` is `pred_index_bits`.
+    pub pred_leaf: U256,
+    pub pred_path: MerklePath,
+    pub root_out: U256,
+}
+
+/// A full reconstruction of the nullifier accumulator (indexed merkle tree). Maintains the sorted
+/// linked list + the backing depth-32 tree, replays consumed nullifiers (`nfspent`) to stay in sync
+/// with the on-chain `NullifierRoot`, and produces low-leaf witnesses for the next spender. The
+/// genesis state is a single {0,0,0} leaf at index 0 (matches the contract's `imt_genesis_root`).
+#[derive(Clone)]
+pub struct NullifierImt {
+    tree: NoteTree,
+    leaves: std::vec::Vec<ImtLeaf>,
+}
+
+impl NullifierImt {
+    pub fn new(env: &Env) -> Self {
+        let mut tree = NoteTree::new(env);
+        let zero = U256::from_u32(env, 0);
+        let genesis = ImtLeaf { value: zero.clone(), next_value: zero, next_index: 0 };
+        let hsh = imt_leaf_hash(env, tree.hasher(), &genesis);
+        tree.insert_leaf(hsh);
+        NullifierImt { tree, leaves: std::vec![genesis] }
+    }
+
+    pub fn root(&self) -> U256 {
+        self.tree.root()
+    }
+
+    /// Number of occupied leaves (>= 1, the genesis leaf is always present).
+    pub fn leaf_count(&self) -> usize {
+        self.leaves.len()
+    }
+
+    /// Index of the low leaf for `value`: the L with L.value < value < L.next_value, or L.value <
+    /// value and L.next_value == 0 (L is the current max). Panics if `value` is already present.
+    fn find_low(&self, value: &U256) -> usize {
+        let zero = U256::from_u32(self.tree.env(), 0);
+        for (i, l) in self.leaves.iter().enumerate() {
+            let is_max = l.next_value == zero;
+            if l.value < *value && (is_max || *value < l.next_value) {
+                return i;
+            }
+        }
+        panic!("no low leaf for value (already present or invalid)");
+    }
+
+    /// Compute the witness for inserting `value` AND apply it (advance the accumulator). Use when
+    /// replaying an observed `nfspent` event.
+    pub fn insert(&mut self, value: U256) -> ImtWitness {
+        let env = self.tree.env().clone();
+        let low_idx = self.find_low(&value);
+        let low = self.leaves[low_idx].clone();
+        let low_path = self.tree.path(low_idx);
+        let new_index = self.tree.len();
+        // repoint the low leaf at the new node -> tree now at intermediate root r1.
+        let updated_low = ImtLeaf {
+            value: low.value.clone(),
+            next_value: value.clone(),
+            next_index: new_index as u64,
+        };
+        let updated_low_hash = imt_leaf_hash(&env, self.tree.hasher(), &updated_low);
+        self.tree.set_leaf(low_idx, updated_low_hash);
+        self.leaves[low_idx] = updated_low;
+        // the new slot's path in r1 (the empty append slot at new_index).
+        let new_path = self.tree.path(new_index);
+        // append-frontier proof: the occupied leaf immediately left of the append slot, in r1. Since
+        // new_index == tree.len(), the predecessor is the last occupied leaf (possibly the just-
+        // repointed low leaf). Both reads are against the current (r1) tree state.
+        let pred_index = new_index - 1;
+        let pred_leaf = imt_leaf_hash(&env, self.tree.hasher(), &self.leaves[pred_index]);
+        let pred_path = self.tree.path(pred_index);
+        // write the new leaf, splicing it after the low leaf.
+        let new_leaf = ImtLeaf {
+            value,
+            next_value: low.next_value.clone(),
+            next_index: low.next_index,
+        };
+        let new_leaf_hash = imt_leaf_hash(&env, self.tree.hasher(), &new_leaf);
+        self.tree.insert_leaf(new_leaf_hash);
+        self.leaves.push(new_leaf);
+        ImtWitness {
+            low_value: low.value,
+            low_next_value: low.next_value,
+            low_next_index: low.next_index,
+            low_path,
+            new_path,
+            pred_leaf,
+            pred_path,
+            root_out: self.tree.root(),
+        }
+    }
+
+    /// Compute the witness for inserting `value` WITHOUT applying it — for a spender building a proof
+    /// against the current on-chain root (the real insert lands when its `nfspent` is later observed).
+    pub fn witness(&self, value: U256) -> ImtWitness {
+        let mut clone = self.clone();
+        clone.insert(value)
+    }
 }
 
 #[cfg(test)]
@@ -399,6 +582,57 @@ mod tests {
                 root,
                 "leaf {i} path must fold to the root"
             );
+        }
+    }
+
+    /// The order tree reuses the append-tree machinery: an `orderins` leaf is inserted verbatim and
+    /// its path folds back to the order root, exactly like the note tree.
+    #[test]
+    fn order_tree_paths_fold_to_root() {
+        let env = env();
+        let h = Hasher::new(&env);
+        let mut order_tree = NoteTree::new(&env);
+        // Two orders with distinct terms -> distinct leaves.
+        let l0 = order_leaf(&env, &h, 1, 100, 2, 1500, &[1u8; 32], &[2u8; 32], 9999, true);
+        let l1 = order_leaf(&env, &h, 2, 2400, 1, 100, &[3u8; 32], &[4u8; 32], 9999, false);
+        order_tree.ingest_orderins(&u256_to_word(&l0));
+        order_tree.ingest_orderins(&u256_to_word(&l1));
+        let root = order_tree.root();
+        for i in 0..order_tree.len() {
+            let leaf = order_tree.leaf(i).unwrap();
+            assert_eq!(order_tree.circuit_fold(&leaf, &order_tree.path(i)), root);
+        }
+    }
+
+    /// IMT witnesses must satisfy the circuit's `imt_insert`: the low leaf is a member of `root_in`,
+    /// and applying advances to the predicted `root_out`. Inserts out of order (5,9,3,7) to exercise
+    /// mid-range and append-at-max low-leaf selection.
+    #[test]
+    fn imt_witnesses_are_consistent() {
+        let env = env();
+        let h = Hasher::new(&env);
+        let mut imt = NullifierImt::new(&env);
+        for k in [5u32, 9, 3, 7] {
+            let v = U256::from_u32(&env, k);
+            let root_in = imt.root();
+            // non-mutating witness used by a spender proving against the current root.
+            let w = imt.witness(v.clone());
+            let low = ImtLeaf {
+                value: w.low_value.clone(),
+                next_value: w.low_next_value.clone(),
+                next_index: w.low_next_index,
+            };
+            // (1) low leaf is a member of root_in (the circuit's first IMT check).
+            assert_eq!(
+                imt.tree.circuit_fold(&imt_leaf_hash(&env, &h, &low), &w.low_path),
+                root_in,
+                "low leaf must be in root_in for value {k}"
+            );
+            // (2) actually applying yields the witness's predicted root_out.
+            let applied = imt.insert(v);
+            assert_eq!(w.root_out, applied.root_out, "witness root_out must match apply for {k}");
+            assert_eq!(imt.root(), applied.root_out);
+            assert_ne!(imt.root(), root_in, "root must advance on insert of {k}");
         }
     }
 

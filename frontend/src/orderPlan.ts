@@ -4,6 +4,7 @@
 // (2 -> {target, change}); with a null padding second input it SPLITS one note (1 -> {target,
 // change}). So any amount up to the spendable balance is reachable. This module decides the steps —
 // it does no IO and is independent of React (see orchestrate.ts for the async executor).
+import type { BookOrder } from './api'
 import type { Note } from './notes'
 
 /** A step input is either an existing note or the target output of the previous step in a chain. */
@@ -97,4 +98,88 @@ export function planAssembly(notes: Note[], assetId: number, targetRaw: bigint):
   }
   // Unreachable: total >= target guarantees a carve above. Defensive only.
   return { kind: 'impossible', reason: 'Could not assemble the requested amount.' }
+}
+
+// --- taker-side matching (WS4): pick the makers a just-placed crossing order should settle against ---
+
+/** The taker order's public terms, in raw integer units. */
+export interface TakerTerms {
+  asset_in: number
+  asset_out: number
+  amount_in: bigint
+  min_out: bigint
+  partial: boolean
+}
+
+/** The chosen full-fill makers + the derived integer outputs the `match` circuit/contract require. */
+export interface MatchSelection {
+  makers: BookOrder[] // 1..3 makers, fully consumed
+  totalOut: bigint // asset_out the taker receives = sum(maker.amount_in)
+  paid: bigint[] // per maker: maker.min_out the taker pays (in asset_in), == proceeds minted to it
+  remainder: bigint // taker's leftover amount_in re-rested (0 = fully consumed)
+  remMinOut: bigint // remainder's min_out at the taker's EXACT limit ratio (0 when no remainder)
+}
+
+function cmpBig(a: bigint, b: bigint): number {
+  return a < b ? -1 : a > b ? 1 : 0
+}
+
+/** Mirror of the contract/circuit price cross: taker crosses maker when
+ * `t_min_out * m_min_out <= t_amount_in * m_amount_in`. */
+function crossesT(tIn: bigint, tMinOut: bigint, mIn: bigint, mMinOut: bigint): boolean {
+  return tMinOut * mMinOut <= tIn * mIn
+}
+
+/**
+ * Choose up to 3 resting makers a crossing taker should settle against, honoring every constraint the
+ * `match` circuit enforces — so the resulting match always verifies:
+ *  - makers oppose the taker's orientation, are unexpired, and price-cross the taker;
+ *  - they are fully consumed; the taker pays sum(maker.min_out) <= its amount_in;
+ *  - any leftover re-rests at the taker's EXACT integer limit ratio
+ *    (`rem_min_out * t_amount_in == t_min_out * remainder`), which requires divisibility.
+ * Best price for the taker first; the largest valid (1..3) prefix wins. Returns null when nothing
+ * crosses or no prefix yields a clean (integer-ratio, or zero) remainder — the order simply rests.
+ */
+export function selectMatch(taker: TakerTerms, book: BookOrder[], now: number): MatchSelection | null {
+  if (taker.amount_in <= 0n || taker.min_out <= 0n) return null
+  const cand = book.filter(
+    (o) =>
+      o.active &&
+      o.asset_in === taker.asset_out &&
+      o.asset_out === taker.asset_in &&
+      o.expiry > now &&
+      BigInt(o.amount_in) > 0n &&
+      BigInt(o.min_out) > 0n &&
+      crossesT(taker.amount_in, taker.min_out, BigInt(o.amount_in), BigInt(o.min_out)),
+  )
+  // Best for the taker first: most received (m.amount_in) per unit paid (m.min_out).
+  cand.sort((a, b) =>
+    cmpBig(BigInt(b.amount_in) * BigInt(a.min_out), BigInt(a.amount_in) * BigInt(b.min_out)),
+  )
+  // Greedy prefix (<=3) whose cumulative payment never exceeds what the taker holds.
+  const chosen: BookOrder[] = []
+  let paidSum = 0n
+  for (const m of cand) {
+    if (chosen.length >= 3) break
+    const next = paidSum + BigInt(m.min_out)
+    if (next > taker.amount_in) break
+    chosen.push(m)
+    paidSum = next
+  }
+  // Trim worst-price makers until the remainder re-rests cleanly (zero, or an exact integer ratio).
+  for (; chosen.length > 0; chosen.pop()) {
+    const paid = chosen.map((m) => BigInt(m.min_out))
+    const paidTotal = paid.reduce((s, x) => s + x, 0n)
+    const remainder = taker.amount_in - paidTotal
+    const totalOut = chosen.reduce((s, m) => s + BigInt(m.amount_in), 0n)
+    if (remainder === 0n) {
+      return { makers: [...chosen], totalOut, paid, remainder: 0n, remMinOut: 0n }
+    }
+    if (!taker.partial) continue // all-or-nothing taker: only a full consumption is acceptable
+    if ((taker.min_out * remainder) % taker.amount_in === 0n) {
+      const remMinOut = (taker.min_out * remainder) / taker.amount_in
+      if (remMinOut > 0n) return { makers: [...chosen], totalOut, paid, remainder, remMinOut }
+    }
+  }
+  return null
 }

@@ -185,25 +185,27 @@ pub async fn get_root(
 
 #[derive(Deserialize)]
 pub struct BookQuery {
-    pub pair: u32,
-    pub side: u32,
+    /// Optional client-side filters; the event-derived book carries each order's assets, so the
+    /// caller can also filter locally. `include_consumed` keeps matched/cancelled orders (history).
+    pub include_consumed: Option<bool>,
 }
 
+/// The active order book, reconstructed purely from `orderins`/`nfspent` events (WS4: no on-chain
+/// `book()` call, no per-tx calldata). Each order carries its full public terms + active flag.
 pub async fn get_book(
     State(st): State<Arc<AppState>>,
     Path(id): Path<String>,
     Query(q): Query<BookQuery>,
 ) -> AppResult<Json<Value>> {
-    tracing::info!(desk = %id, pair = q.pair, side = q.side, "get_book");
+    tracing::info!(desk = %id, "get_book");
     let desk = st.db.get_desk(&id).await?;
-    let book = st
-        .stellar
-        .book(&desk.contract_id, &read_source(&desk, &st), q.pair, q.side)?;
-    Ok(Json(json!({
-        "pair": q.pair,
-        "side": q.side,
-        "orders": book,
-    })))
+    let orders = crate::indexer::order_book(
+        &st.stellar,
+        &desk.contract_id,
+        None,
+        q.include_consumed.unwrap_or(false),
+    )?;
+    Ok(Json(json!({ "orders": orders })))
 }
 
 // ---- note discovery + membership paths (indexer) ----
@@ -279,6 +281,123 @@ pub async fn get_note_proof(
     Ok(Json(serde_json::to_value(proof).unwrap()))
 }
 
+#[derive(Deserialize)]
+pub struct OrderProofQuery {
+    pub order_leaf: String,
+}
+
+/// Order-tree membership path for an `order_leaf` (for building a `match`/`cancel` proof).
+pub async fn get_order_proof(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<OrderProofQuery>,
+) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, order_leaf = %q.order_leaf, "get_order_proof");
+    let desk = st.db.get_desk(&id).await?;
+    let leaf = q.order_leaf;
+    let raw = st.db.chain_events(&desk.contract_id).await?;
+    if !raw.is_empty() {
+        return Ok(Json(
+            serde_json::to_value(crate::indexer::order_proof_from_raw(&raw, &leaf)?).unwrap(),
+        ));
+    }
+    let from = st.db.desk_from_ledger(&id).await?;
+    let proof = tokio::task::spawn_blocking(move || {
+        crate::indexer::order_proof(&st.stellar, &desk.contract_id, from, &leaf)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(serde_json::to_value(proof).unwrap()))
+}
+
+/// Discover the proceeds note a `settle_match` minted for one of the wallet's orders. The matcher
+/// folds an unpredictable `nonce = compress(taker_leaf, slot)` into the proceeds tag, so a resting
+/// maker cannot recompute its own minted leaf without correlating the match's public events — which
+/// this does. Returns `{matched:false}` while the order is still resting (or was cancelled).
+pub async fn get_match_proceeds(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<OrderProofQuery>,
+) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, order_leaf = %q.order_leaf, "get_match_proceeds");
+    let desk = st.db.get_desk(&id).await?;
+    let leaf = q.order_leaf;
+    let raw = st.db.chain_events(&desk.contract_id).await?;
+    if !raw.is_empty() {
+        return Ok(Json(
+            serde_json::to_value(crate::indexer::match_proceeds_from_raw(&raw, &leaf)?).unwrap(),
+        ));
+    }
+    let from = st.db.desk_from_ledger(&id).await?;
+    let r = tokio::task::spawn_blocking(move || {
+        crate::indexer::match_proceeds(&st.stellar, &desk.contract_id, from, &leaf)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(serde_json::to_value(r).unwrap()))
+}
+
+#[derive(Deserialize)]
+pub struct ImtWitnessQuery {
+    /// The nullifier value (0x hex) the spender wants to insert.
+    pub value: String,
+}
+
+/// Nullifier-IMT insert witness for a value (the imt_insert witness a spend circuit needs), against
+/// the current accumulator. The frontend computes its nullifier value, fetches this, and proves.
+pub async fn get_imt_witness(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<ImtWitnessQuery>,
+) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, "get_imt_witness");
+    let desk = st.db.get_desk(&id).await?;
+    let value = q.value;
+    let raw = st.db.chain_events(&desk.contract_id).await?;
+    if !raw.is_empty() {
+        return Ok(Json(
+            serde_json::to_value(crate::indexer::imt_witness_from_raw(&raw, &value)?).unwrap(),
+        ));
+    }
+    let from = st.db.desk_from_ledger(&id).await?;
+    let w = tokio::task::spawn_blocking(move || {
+        crate::indexer::imt_witness(&st.stellar, &desk.contract_id, from, &value)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(serde_json::to_value(w).unwrap()))
+}
+
+#[derive(Deserialize)]
+pub struct ImtWitnessesQuery {
+    /// Comma-separated nullifier values (0x hex), inserted in order — each witness is against the
+    /// root after the previous insert (for multi-insert spends: join 2, match up to 4).
+    pub values: String,
+}
+
+pub async fn get_imt_witnesses(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<ImtWitnessesQuery>,
+) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, "get_imt_witnesses");
+    let desk = st.db.get_desk(&id).await?;
+    let values: Vec<String> = q.values.split(',').map(|s| s.trim().to_string()).collect();
+    let raw = st.db.chain_events(&desk.contract_id).await?;
+    if !raw.is_empty() {
+        return Ok(Json(
+            serde_json::to_value(crate::indexer::imt_witnesses_from_raw(&raw, &values)?).unwrap(),
+        ));
+    }
+    let from = st.db.desk_from_ledger(&id).await?;
+    let w = tokio::task::spawn_blocking(move || {
+        crate::indexer::imt_witnesses(&st.stellar, &desk.contract_id, from, &values)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(serde_json::to_value(w).unwrap()))
+}
+
 // ---- sponsored shield: frontend builds + user-signs the auth entry; sponsor signs envelope ----
 
 #[derive(Deserialize)]
@@ -342,7 +461,7 @@ pub async fn relay_order(
         body.public_inputs_b64,
         |proof, pi| {
             vec![
-                "submit_order".into(),
+                "place_order".into(),
                 "--proof-file-path".into(),
                 proof,
                 "--public_inputs-file-path".into(),
@@ -424,8 +543,6 @@ pub async fn relay_unshield(
 
 #[derive(Deserialize)]
 pub struct RelayCancel {
-    pub pair_id: u32,
-    pub side: u32,
     pub proof_b64: String,
     pub public_inputs_b64: String,
 }
@@ -436,7 +553,8 @@ pub async fn relay_cancel(
     Path(id): Path<String>,
     Json(body): Json<RelayCancel>,
 ) -> AppResult<Json<Value>> {
-    let (pair, side) = (body.pair_id, body.side);
+    // WS4 cancel_order takes only (proof, public_inputs): the proof proves order-tree membership +
+    // cancel authority, so no pair/side hint is needed.
     relay(
         st,
         headers,
@@ -444,13 +562,43 @@ pub async fn relay_cancel(
         "relay_cancel",
         body.proof_b64,
         body.public_inputs_b64,
-        move |proof, pi| {
+        |proof, pi| {
             vec![
                 "cancel_order".into(),
-                "--pair_id".into(),
-                pair.to_string(),
-                "--side".into(),
-                side.to_string(),
+                "--proof-file-path".into(),
+                proof,
+                "--public_inputs-file-path".into(),
+                pi,
+            ]
+        },
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct RelayMatch {
+    pub proof_b64: String,
+    pub public_inputs_b64: String,
+}
+
+/// Relay a permissionless `settle_match`: the matcher builds a match proof off the event-derived
+/// book and submits it fully-sponsored. Soundness is in the proof; the desk only sponsors the fee.
+pub async fn relay_match(
+    State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<RelayMatch>,
+) -> AppResult<Json<Value>> {
+    relay(
+        st,
+        headers,
+        id,
+        "relay_match",
+        body.proof_b64,
+        body.public_inputs_b64,
+        |proof, pi| {
+            vec![
+                "settle_match".into(),
                 "--proof-file-path".into(),
                 proof,
                 "--public_inputs-file-path".into(),
@@ -487,6 +635,7 @@ async fn relay(
             | ("place_order", "relay_order")
             | ("unshield", "relay_unshield")
             | ("cancel_order", "relay_cancel")
+            | ("match", "relay_match")
     );
     if !allowed {
         return Err(AppError::Unauthorized(
@@ -584,12 +733,15 @@ fn validate_public_inputs(action: &str, request: &Value, pi: &[u8], desk: &Desk)
             } else {
                 pair.base_asset
             } as u128;
-            if pi.len() != 12 * 32
+            // WS4 lift/place_order PI (14 fields): [0]domain [1]note_root [2]nf_root_in
+            // [3]nf_root_out [4]nullifier_in [5]asset_in [6]amount_in [7]asset_out [8]min_out
+            // [9]output_owner_tag [10]cancel_owner_tag [11]expiry [12]partial_allowed [13]order_leaf.
+            if pi.len() != 14 * 32
                 || field(0)? != 1
-                || field(3)? != expected_in
-                || field(4)? != requested("amount_in")?
-                || field(5)? != expected_out
-                || field(6)? != requested("min_out")?
+                || field(5)? != expected_in
+                || field(6)? != requested("amount_in")?
+                || field(7)? != expected_out
+                || field(8)? != requested("min_out")?
             {
                 return Err(AppError::BadRequest(
                     "order proof public inputs do not match the queued request".into(),
@@ -599,30 +751,39 @@ fn validate_public_inputs(action: &str, request: &Value, pi: &[u8], desk: &Desk)
                 .get("partial_allowed")
                 .and_then(Value::as_bool)
                 .unwrap_or(false) as u128;
-            if field(10)? != partial {
+            if field(12)? != partial {
                 return Err(AppError::BadRequest(
                     "order partial-fill flag does not match the queued request".into(),
                 ));
             }
         }
         "relay_unshield" => {
-            if pi.len() != 6 * 32
+            // WS4 unshield PI (8 fields): [0]domain [1]note_root [2]nf_root_in [3]nf_root_out
+            // [4]nullifier [5]asset [6]amount [7]recipient.
+            if pi.len() != 8 * 32
                 || field(0)? != 2
-                || field(3)?
+                || field(5)?
                     != request
                         .get("asset_id")
                         .and_then(Value::as_u64)
                         .map(u128::from)
                         .unwrap_or(u128::MAX)
-                || field(4)? != requested("amount")?
+                || field(6)? != requested("amount")?
             {
                 return Err(AppError::BadRequest(
                     "unshield proof public inputs do not match the queued request".into(),
                 ));
             }
         }
-        "relay_cancel" if pi.len() != 4 * 32 || field(0)? != 3 => {
+        // WS4 cancel PI (8 fields): [0]domain=3 ...; the proof binds the order, so a length+domain
+        // check suffices here (the order root / authority are verified on-chain).
+        "relay_cancel" if pi.len() != 8 * 32 || field(0)? != 3 => {
             return Err(AppError::BadRequest("invalid cancel public inputs".into()))
+        }
+        // WS4 match PI (35 fields): [0]domain=5 ...; soundness (cross/conservation/nullifiers) is
+        // proven and verified on-chain, so the relay only length+domain checks it.
+        "relay_match" if pi.len() != 35 * 32 || field(0)? != 5 => {
+            return Err(AppError::BadRequest("invalid match public inputs".into()))
         }
         "relay_join" => {
             let expected_asset = if request.get("kind").and_then(Value::as_str) == Some("unshield")
@@ -644,7 +805,10 @@ fn validate_public_inputs(action: &str, request: &Value, pi: &[u8], desk: &Desk)
                     }
                 })
             };
-            if pi.len() != 9 * 32 || field(0)? != 4 || Some(field(4)?) != expected_asset {
+            // WS4 join PI (11 fields): [0]domain=4 [1]note_root [2]nf_root_in [3]nf_root_out
+            // [4]nullifier_1 [5]nullifier_2 [6]asset [7]out_tag_1 [8]out_amount_1 [9]out_tag_2
+            // [10]out_amount_2.
+            if pi.len() != 11 * 32 || field(0)? != 4 || Some(field(6)?) != expected_asset {
                 return Err(AppError::BadRequest("invalid join public inputs".into()));
             }
         }
