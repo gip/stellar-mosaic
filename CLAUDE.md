@@ -35,14 +35,16 @@ does, the committed image ID and the on-chain config must be regenerated togethe
   proof** (binds the full order; there is no on-chain `lift` entrypoint). `unshield` is the
   recipient-bound asset-note spend. `wallet` holds in-browser Noir helpers.
 - `contracts/settlement/` — the one merged Soroban contract: custody (`shield`/`unshield`), the
-  on-chain depth-32 append-only Merkle tree, the canonical nullifier registry, atomic matching
-  (`settle`/`settle_exact`), and the on-chain order book (`submit_order`/`cancel_order`/`prune_expired`).
+  depth-32 append-only note + order commitment trees, the indexed-merkle-tree nullifier accumulator
+  (single root CAS; non-membership proven in-circuit), order placement (`place_order`), permissionless
+  matching (`settle_match`, 1 taker × ≤3 makers), `cancel_order`, and `join`. (The event-derived book
+  replaced the WS1 on-chain `Vec` book + atomic `settle`/`settle_exact`/`submit_order`/`prune_expired`.)
 - `contracts/groth16_spike/` — RISC Zero Groth16 verifier spike for the Base bridge.
 - `tools/indexer/` (crate `mosaic-indexer`) — read-only off-chain path server. Rebuilds Merkle
   membership paths from `shielded`/`settled`/`noteins` events. **Not a trust anchor** (the on-chain
   root is). Reuses the contract's exact Poseidon2 via a local Soroban host, so its roots are
   byte-identical by construction. The `witness` bin replays an event log and prints `Prover.toml`
-  path witnesses (used by `tests/fixtures/regen.sh` and by wallets before proving).
+  path witnesses (used by `tests/fixtures/ws4/regen.py` and by wallets before proving).
 - `backend/` (crate `mosaic-backend`, axum) — durable per-wallet FIFO operation queues, desk
   registry, event indexer, fully-sponsored relayer, and opaque AES-GCM wallet backups. Holds only
   public workflow state; private notes and proving stay in the browser.
@@ -64,13 +66,15 @@ does, the committed image ID and the on-chain config must be regenerated togethe
 **Settlement contract (Soroban):**
 ```bash
 cd contracts/settlement
-cargo test --test integration   # full custody loop on the local host: real verifier, no testnet
-cargo test -p settlement        # all tests incl. e2e_demo (needs fixtures from scripts/03 first)
+cargo test                      # full WS4 suite on the local host (43 tests; real UltraHonk proofs)
+cargo test --test ws4           # the WS4 lifecycle: shield -> place_order, shield x2 -> place x2 -> settle_match
 stellar contract build --optimize   # target wasm32v1-none; output target/wasm32v1-none/release/settlement.wasm
 ```
-The integration test (14 tests) exercises shield → atomic settle (two crossing proofs) → unshield
-plus negatives (unpublished root, replay, tampered field, incompatible orders, wrong recipient).
-Proof fixtures live in `contracts/settlement/tests/fixtures/` (regenerate via its `regen.sh`).
+The suite (43 tests) covers shield → `place_order`, the full shield×2 → place×2 → `settle_match`
+lifecycle (`ws4.rs`), real-proof `join`, the event wire-format lock (`events.rs`), and
+`place_order`/`settle_match`/`unshield` negatives (unknown root, replay, tampered field, bad PI length,
+missing VK, wrong recipient — `integration.rs`). Proof fixtures live in
+`contracts/settlement/tests/fixtures/ws4/` (regenerate via its `regen.py`, or `scripts/05`).
 
 **Backend** (needs `stellar` CLI on PATH, `artifacts/settlement.wasm`, and `vks/{lift,unshield,cancel}_vk`):
 ```bash
@@ -95,8 +99,10 @@ npm run lint      # eslint
 pinned tag; needs the risc0 toolchain — `r0vm`/`cargo-risczero` — for the guest build).
 
 **Scripts** (run from repo root): `01` local prove/verify · `02` legacy on-chain verifier spike ·
-`03` e2e demo fixtures (local host) · `04` authoritative testnet e2e · `05`/`06`/`07` order-book
-fixtures + budget · `08` web artifacts · `09` join fixtures · `10` Base-shield testnet demo.
+`03` e2e demo fixtures (local host) · `04` authoritative testnet e2e · `05` regenerate all WS4 proof
+fixtures (wraps `tests/fixtures/ws4/regen.py`) · `06`/`07` WS4 testnet budget (place/match/cancel;
+worst-case match) — both generate proofs at run time against the live ledger clock · `08` web
+artifacts · `10` Base-shield testnet demo. (`03`/`04` are WS1-era and await WS4 rework.)
 `scripts/e2e.sh` is the stateful driver over `04`+`10` (status/show/run/regen/clean); it persists
 deployed contracts/addresses to `.e2e/state.env`. See `docs/e2e-testing.md`.
 

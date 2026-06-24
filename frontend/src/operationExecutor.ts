@@ -4,7 +4,7 @@ import { fieldToBytes32, randomField } from './crypto'
 import { noteTag, orderTerms } from './noir'
 import { notesForDesk, removeNote, updateNote, type Note } from './notes'
 import { planAssembly } from './orderPlan'
-import { executeUnshield, runAssembly } from './orchestrate'
+import { executeUnshield, maybeTakerMatch, runAssembly } from './orchestrate'
 import { b64, proveCancel, proveLift } from './prove'
 import { stageRecoverableNote, syncRecoveryNow, updateNoteAndSync } from './recovery'
 import { buildSponsoredShield } from './soroban'
@@ -121,14 +121,21 @@ async function executeOrder(
   const expiry = nowSeconds() + 7 * 86400
   const rho_out = randomField(); const rho_ord = randomField()
   const terms = await orderTerms({
-    sk: offer.sk, rho_in: offer.rho, rho_out, rho_ord, asset_in: assetIn,
-    amount_in: offer.amount, asset_out: assetOut, min_out: request.min_out, expiry,
-    partial_allowed: request.partial_allowed ? 1 : 0,
+    sk: offer.sk, rho_in: offer.rho, nonce_in: offer.nonce ?? '0', rho_out, rho_ord,
+    asset_in: assetIn, amount_in: offer.amount, asset_out: assetOut, min_out: request.min_out,
+    expiry, partial_allowed: request.partial_allowed ? 1 : 0,
   })
   const membership = await api.getNoteProof(desk.id, offer.owner_tag)
+  // The note-spend nullifier's IMT insert witness against the current accumulator.
+  const imt = await api.getImtWitness(desk.id, terms.nullifier_in)
   const bundle = await proveLift({
-    rho_in: offer.rho, sk_o: offer.sk, path: membership.siblings,
-    index_bits: membership.index_bits, root: membership.root,
+    rho_in: offer.rho, sk_o: offer.sk, nonce_in: offer.nonce ?? '0', path: membership.siblings,
+    index_bits: membership.index_bits, note_root: membership.root,
+    nullifier_root_in: imt.nullifier_root_in, nullifier_root_out: imt.nullifier_root_out,
+    low_value: imt.low_value, low_next_value: imt.low_next_value, low_next_index: imt.low_next_index,
+    low_path: imt.low_path, low_index_bits: imt.low_index_bits,
+    new_path: imt.new_path, new_index_bits: imt.new_index_bits,
+    pred_leaf: imt.pred_leaf, pred_path: imt.pred_path, pred_index_bits: imt.pred_index_bits,
     nullifier_in: terms.nullifier_in, asset_in: assetIn, amount_in: offer.amount,
     asset_out: assetOut, min_out: request.min_out, output_owner_tag: terms.output_owner_tag,
     cancel_owner_tag: terms.cancel_owner_tag, expiry,
@@ -145,6 +152,8 @@ async function executeOrder(
       asset_in: assetIn,
       symbol_in: desk.assets.find((a) => a.asset_id === assetIn)?.symbol ?? `#${assetIn}`,
       amount_in: offer.amount,
+      asset_out: assetOut, min_out: request.min_out, output_owner_tag: terms.output_owner_tag,
+      expiry, partial_allowed: !!request.partial_allowed,
     },
   }
   await stageRecoverableNote(output)
@@ -152,6 +161,9 @@ async function executeOrder(
   await updateNote(offer.id, { status: 'spent', operation_state: 'committed' })
   await updateNote(output.id, { operation_state: 'committed' })
   await syncRecoveryNow()
+  // The order now rests on-chain. If it crosses the book, settle it in-browser as the taker
+  // (best-effort; on any failure it simply remains a resting order).
+  await maybeTakerMatch(desk, { ...output, operation_state: 'committed' })
   return { output_tag: terms.output_owner_tag }
 }
 
@@ -179,7 +191,22 @@ async function executeCancel(
   if (!note || !c || note.status !== 'active') throw new Error('The order is no longer cancellable.')
   await updateNote(note.id, { operation_id: operationId, operation_state: 'reserved' })
   const rho_return = randomField(); const return_owner_tag = await noteTag(note.sk, rho_return)
-  const bundle = await proveCancel({ sk_o: note.sk, rho_ord: c.rho_ord, order_leaf: c.order_leaf, cancel_owner_tag: c.cancel_owner_tag, return_owner_tag })
+  // The order's membership path + its consumption nullifier, then that nullifier's IMT insert witness.
+  const op = await api.getOrderProof(desk.id, c.order_leaf)
+  const imt = await api.getImtWitness(desk.id, op.consumption_nullifier)
+  const bundle = await proveCancel({
+    sk_o: note.sk, rho_ord: c.rho_ord,
+    asset_out: c.asset_out, min_out: c.min_out, out_owner_tag: c.output_owner_tag,
+    expiry: c.expiry, partial_allowed: c.partial_allowed ? 1 : 0,
+    order_path: op.siblings, order_index_bits: op.index_bits,
+    nullifier_root_in: imt.nullifier_root_in, nullifier_root_out: imt.nullifier_root_out,
+    low_value: imt.low_value, low_next_value: imt.low_next_value, low_next_index: imt.low_next_index,
+    low_path: imt.low_path, low_index_bits: imt.low_index_bits,
+    new_path: imt.new_path, new_index_bits: imt.new_index_bits,
+    pred_leaf: imt.pred_leaf, pred_path: imt.pred_path, pred_index_bits: imt.pred_index_bits,
+    order_root: op.order_root, order_nullifier: op.consumption_nullifier,
+    asset_in: c.asset_in, amount_in: c.amount_in, return_owner_tag,
+  })
   const refund: Note = {
     id: crypto.randomUUID(), deskId: desk.id, role: 'asset', asset_id: c.asset_in,
     symbol: c.symbol_in, amount: c.amount_in, sk: note.sk, rho: rho_return, owner_tag: return_owner_tag,

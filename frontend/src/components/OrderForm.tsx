@@ -51,10 +51,12 @@ function crosses(aIn: bigint, aMinOut: bigint, bIn: bigint, bMinOut: bigint): bo
 }
 
 interface BookEntry {
+  asset_in: number
+  asset_out: number
   amount_in: string | number
   min_out: string | number
-  remaining_in: string | number
   expiry: string | number
+  active: boolean
 }
 
 /**
@@ -122,17 +124,18 @@ export default function OrderForm({
     let alive = true
     const aIn = amountInRaw
     const aMinOut = minOutRaw
-    const oppSide = side === 'SELL' ? 0 : 1
-    // Only query the opposing book when inputs are well-formed; otherwise the answer is just "no".
+    // Opposing resting orders give what this order wants (assetOut) and want what it gives (assetIn).
     const probe =
       aIn != null && aMinOut != null && aIn > 0n && aMinOut > 0n
-        ? api.getBook(desk.id, pairId, oppSide).then((r) => {
+        ? api.getBook(desk.id).then((r) => {
             const now = nowSeconds()
             const entries = (r.orders as BookEntry[]) ?? []
             return entries.some(
               (o) =>
+                o.active &&
+                o.asset_in === assetOut &&
+                o.asset_out === assetIn &&
                 Number(o.expiry) > now &&
-                BigInt(o.remaining_in) > 0n &&
                 crosses(aIn, aMinOut, BigInt(o.amount_in), BigInt(o.min_out)),
             )
           })
@@ -142,7 +145,8 @@ export default function OrderForm({
       alive = false
     }
     // amountInRaw/minOutRaw are bigints, compared by value via Object.is in the dep array.
-  }, [desk.id, pairId, side, amountInRaw, minOutRaw])
+    // assetIn/assetOut are derived from pairId+side, so they move in lockstep with those deps.
+  }, [desk.id, pairId, side, assetIn, assetOut, amountInRaw, minOutRaw])
 
   // Human-readable preview of what placing the order will do.
   const preview = (() => {

@@ -57,9 +57,9 @@ The goal in WS1 is to design and implement a simplistic desk on Stellar where us
 
 | ID | Title | Description | Status |
 |------|-------|-------------|:------:|
-| WS4.0 | Design document | Off-chain matching-in-Noir + tree-backed orders/nullifiers design — [noir-matching.md](docs/noir-matching.md) | 🟡 |
-| WS4.1 | Orders & nullifiers in a merkle tree | Replace the per-key nullifier set with an indexed-merkle-tree accumulator (non-membership proven in-circuit) and move the order book into a commitment tree — [noir-matching.md](docs/noir-matching.md) | ⬜ |
-| WS4.2 | Offchain order book with onchain verification | Move from a simple onchain order book to an offchain book where trade matching runs in Noir and is verified onchain — [noir-matching.md](docs/noir-matching.md) | ⬜ |
+| WS4.0 | Design document | Off-chain matching-in-Noir + tree-backed orders/nullifiers design — [noir-matching.md](docs/noir-matching.md) | 🟢 |
+| WS4.1 | Orders & nullifiers in a merkle tree | Replace the per-key nullifier set with an indexed-merkle-tree accumulator (non-membership proven in-circuit) and move the order book into a commitment tree — [noir-matching.md](docs/noir-matching.md) | 🟢 |
+| WS4.2 | Offchain order book with onchain verification | Move from a simple onchain order book to an offchain book where trade matching runs in Noir and is verified onchain — [noir-matching.md](docs/noir-matching.md) | 🟢 |
 
 ### WS5 — Shared merkle tree for Stellar ⇄ Base
 

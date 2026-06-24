@@ -89,6 +89,9 @@ impl Config {
     pub fn join_vk(&self) -> PathBuf {
         self.vks_dir.join("join_vk")
     }
+    pub fn match_vk(&self) -> PathBuf {
+        self.vks_dir.join("match_vk")
+    }
 }
 
 fn env(key: &str, default: &str) -> String {

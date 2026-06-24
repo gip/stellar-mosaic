@@ -68,12 +68,12 @@ export default function ShieldFromBaseForm({
     [baseSymbols, desk.assets],
   )
 
-  // Keep the selection on a Base-eligible asset once the catalog has loaded.
-  useEffect(() => {
-    if (baseSymbols && !baseAssets.some((a) => a.asset_id === assetId)) {
-      setAssetId(baseAssets[0]?.asset_id ?? -1)
-    }
-  }, [baseSymbols, baseAssets, assetId])
+  // Keep the selection on a Base-eligible asset once the catalog has loaded. Adjusting state while
+  // rendering (guarded so it can't loop) is React's recommended alternative to a setState effect for
+  // "fix some state when a derived value changes".
+  if (baseSymbols && !baseAssets.some((a) => a.asset_id === assetId)) {
+    setAssetId(baseAssets[0]?.asset_id ?? -1)
+  }
 
   // Poll the backend job until it reaches a terminal state.
   useEffect(() => {

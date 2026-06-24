@@ -1,61 +1,61 @@
 #!/usr/bin/env bash
-# End-to-end demo on Stellar TESTNET: the full shield -> order -> settle -> unshield lifecycle, with
-# the same REAL UltraHonk proofs the local-host demo uses (tests/fixtures/demo/), submitted as real
-# transactions. This is the authoritative version: real network, real submission, real CPU metering.
+# WS4 end-to-end demo on Stellar TESTNET: the full shield -> place_order -> settle_match ->
+# unshield-proceeds lifecycle, with REAL UltraHonk proofs submitted as real transactions. This is the
+# authoritative version: real network, real submission, real CPU metering. It also asserts the two
+# WS4 invariants the cutover cares about: the **nullifier accumulator root advances** through the
+# match, and a **stale-root match reverts** (replaying settle_match hits the accumulator CAS).
 #
-# WHY THE LOCAL-HOST PROOFS WORK UNCHANGED ON TESTNET: the order/unshield proofs bind the protocol
-# asset-IDs (the u32 1 and 2) and the Merkle ROOT, not token addresses. The on-chain tree's compress
-# is deterministic, so shielding the same notes in the same order on a fresh contract reproduces the
-# exact roots R2/R4 the proofs were made against. The membership witnesses inside those proofs were
-# reconstructed by the path server (tools/indexer) — see scripts/03_demo_e2e.sh.
+# WHY RUN-TIME PROOF GENERATION: WS4 binds the live ledger clock — place_order requires
+# now <= expiry <= now + MAX_ORDER_TTL (7d), and settle_match binds `now` within 300s of ledger time.
+# So proofs are generated against the current clock via tests/fixtures/ws4/regen.py into a temp dir
+# (the committed fixtures are never touched): place + the proceeds-unshield with expiry=now+6d, and
+# the match regenerated with a fresh `now` immediately before it is submitted.
 #
-# ASSET SIMPLIFICATION (deliberate, for a robust live run): both protocol asset-ids map to the native
-# XLM Stellar Asset Contract. The protocol distinguishes asset 1 from asset 2 by id; using two
-# distinct real tokens would only add SAC issuance + trustline setup and prove nothing extra about
-# the lifecycle or the path server. Amounts are in stroops (100 and 2000 = tiny).
+# Scenario (regen.py scenario B + G): A shields 100 a1 + 1600 a2 under two notes, places both orders,
+# crosses them with settle_match (taker fully filled), then UNSHIELDS the taker's 1600-a2 proceeds
+# note — a note that exists only as a tree leaf, whose Merkle path the indexer rebuilds from event
+# history (impossible without the path server). Both asset-ids map to the native XLM SAC.
 #
-# Requires: stellar CLI, a funded testnet identity (default m0). No Noir/bb toolchain needed.
+# Requires: stellar CLI + a funded testnet identity (default m0) AND the pinned proving toolchain
+# (nargo 1.0.0-beta.9, bb v0.87.0) since proofs are generated at run time.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DEMO="$ROOT/contracts/settlement/tests/fixtures/demo"
+SRC="$ROOT/contracts/settlement/tests/fixtures/ws4"   # committed VKs
+REGEN="$SRC/regen.py"
 CONTRACT="$ROOT/contracts/settlement"
 NETWORK="${NETWORK:-testnet}"
 IDENTITY="${IDENTITY:-m0}"
-export PATH="$HOME/.cargo/bin:$PATH"
+RPC="${RPC:-https://soroban-testnet.stellar.org}"
+export PATH="$HOME/.nargo/bin:$HOME/.bb:$HOME/.cargo/bin:$PATH"
 
-# Persist key outputs (identity, contract id, roots) to <repo>/.e2e/state.env so the e2e driver
-# (scripts/e2e.sh) can report what was generated. Harmless on a direct run.
 source "$ROOT/scripts/lib/e2e_state.sh"
 
-# The address A withdraws its proceeds to — must match the recipient bound in the unshield proof
-# (scripts/03_demo_e2e.sh used this address). It is a contract address, so the XLM SAC can credit it
-# without a trustline.
+# The taker withdraws its proceeds here — must match the recipient bound in the unshield proof
+# (regen.py scenario G uses this address). A contract address, so the XLM SAC credits it without a
+# trustline.
 DEMO_TO="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
 
-OTA="$(xxd -p -c64 "$DEMO/owner_tag_a")"
-OTB="$(xxd -p -c64 "$DEMO/owner_tag_b")"
+FX="$(mktemp -d)"
+trap 'rm -rf "$FX"; git -C "$ROOT" checkout -- circuits/lift/Prover.toml circuits/match/Prover.toml circuits/unshield/Prover.toml 2>/dev/null || true' EXIT
 
 inv() { stellar contract invoke --id "$CID" --source "$IDENTITY" --network "$NETWORK" "$@"; }
+OT() { xxd -p -c64 "$FX/$1"; }
+ledger_now() { curl -s "$RPC" -X POST -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getLatestLedger"}' | grep -o '"closeTime":"[0-9]*"' | grep -o '[0-9]*'; }
 
-# Authoritative CPU instruction count for a state-changing call (RPC cost.cpu_insns reads 0 on this
-# protocol; the real number is in the assembled tx's SorobanResources). Best-effort + never fatal.
+# Best-effort CPU instruction count for a state-changing call (assembled tx SorobanResources; the RPC
+# cost.cpu_insns reads 0 on this protocol). Never fatal.
 measure() {
   local label="$1"; shift
   set +e
-  local xdr instr pct
+  local xdr instr
   xdr=$(stellar contract invoke --id "$CID" --source "$IDENTITY" --network "$NETWORK" --build-only -- "$@" 2>/dev/null)
   instr=$(printf '%s' "$xdr" | stellar tx simulate --source-account "$IDENTITY" --network "$NETWORK" 2>/dev/null \
           | stellar tx decode 2>/dev/null | grep -o '"instructions"[^0-9]*[0-9]\{1,\}' | grep -o '[0-9]\{1,\}$' | head -1)
   set -e
-  if [ -n "${instr:-}" ]; then
-    pct=$(( instr / 4000000 ))
-    LAST_CPU="$instr (~${pct}% of 400M)"
-    echo "    [$label] CPU instructions (assembled): $instr  (~${pct}% of 400M)"
-  else
-    LAST_CPU="(unavailable)"
-    echo "    [$label] CPU: (count unavailable; see explorer link below)"
-  fi
+  if [ -n "${instr:-}" ]; then LAST_CPU="$instr (~$(( instr / 4000000 ))% of 400M)"; else LAST_CPU="(unavailable)"; fi
+  echo "    [$label] CPU (assembled): ${LAST_CPU}"
 }
 
 run_begin "Stellar"
@@ -63,93 +63,92 @@ echo ">>> network=$NETWORK identity=$IDENTITY"
 ADMIN=$(stellar keys address "$IDENTITY" 2>/dev/null) \
   || { stellar keys generate "$IDENTITY" --network "$NETWORK"; stellar keys fund "$IDENTITY" --network "$NETWORK"; ADMIN=$(stellar keys address "$IDENTITY"); }
 XLM_SAC=$(stellar contract id asset --asset native --network "$NETWORK")
-echo "    admin/holder = $ADMIN"
-echo "    native XLM SAC = $XLM_SAC"
-state_set STELLAR_NETWORK "$NETWORK"
-state_set STELLAR_IDENTITY "$IDENTITY"
-state_set STELLAR_ADDR "$ADMIN"
-state_set XLM_SAC "$XLM_SAC"
-stage "context"
-note "network"     "$NETWORK"
-note "identity"    "$IDENTITY"
-note "admin/holder" "$ADMIN"
-note "native XLM SAC" "$XLM_SAC"
-endstage
+echo "    admin/holder = $ADMIN ; native XLM SAC = $XLM_SAC"
+state_set STELLAR_NETWORK "$NETWORK"; state_set STELLAR_IDENTITY "$IDENTITY"
+state_set STELLAR_ADDR "$ADMIN"; state_set XLM_SAC "$XLM_SAC"
+stage "context"; note "network" "$NETWORK"; note "identity" "$IDENTITY"; note "admin/holder" "$ADMIN"
+note "native XLM SAC" "$XLM_SAC"; endstage
 
-echo ">>> [build] settlement contract -> wasm"
+echo ">>> [build] witness bin + settlement wasm"
+( cd "$ROOT/tools/indexer" && cargo build -q --bin witness )
 ( cd "$CONTRACT" && stellar contract build >/dev/null 2>&1 )
 WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
+cp "$SRC/lift_vk" "$SRC/unshield_vk" "$SRC/match_vk" "$FX/"
 
-echo ">>> [deploy] with the order/lift VK + admin"
+EXP=$(( $(ledger_now) + 6*86400 ))
+echo ">>> [gen] place + proceeds-unshield proofs (expiry=$EXP)"
+WS4_FX="$FX" WS4_EXP="$EXP" python3 "$REGEN" tk_place mk_place life_unshield >/dev/null
+
+echo ">>> [deploy] with the order/lift VK (op 1) + admin"
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
-  -- --vk_bytes-file-path "$DEMO/vk" --admin "$ADMIN")
+  -- --vk_bytes-file-path "$FX/lift_vk" --admin "$ADMIN")
 echo "    SETTLEMENT CONTRACT: $CID"
 state_set SETTLEMENT_CID "$CID"
-stage "deploy"
-note "settlement contract" "$CID"
-note "order/lift VK"       "$DEMO/vk"
-note "admin"              "$ADMIN"
-note "explorer"           "https://stellar.expert/explorer/$NETWORK/contract/$CID"
-endstage
+stage "deploy"; note "settlement contract" "$CID"; note "admin" "$ADMIN"
+note "explorer" "https://stellar.expert/explorer/$NETWORK/contract/$CID"; endstage
 
-echo ">>> [setup] register unshield VK (op 2) + map asset-ids 1,2 -> XLM SAC"
-inv --send yes -- set_vk --op 2 --vk_bytes-file-path "$DEMO/unshield_vk" >/dev/null
+echo ">>> [setup] register unshield VK (op 2) + match VK (op 5) + map asset-ids 1,2 -> XLM SAC"
+inv --send yes -- set_vk --op 2 --vk_bytes-file-path "$FX/unshield_vk" >/dev/null
+inv --send yes -- set_vk --op 5 --vk_bytes-file-path "$FX/match_vk" >/dev/null
 inv --send yes -- register_asset --asset_id 1 --token "$XLM_SAC" >/dev/null
 inv --send yes -- register_asset --asset_id 2 --token "$XLM_SAC" >/dev/null
-stage "setup"
-note "unshield VK (op 2)" "registered"
-note "asset 1 -> token"   "$XLM_SAC"
-note "asset 2 -> token"   "$XLM_SAC"
-endstage
+inv --send yes -- register_pair --base_asset 1 --quote_asset 2 >/dev/null
+stage "setup"; note "VKs" "unshield (op 2), match (op 5)"; note "assets 1,2 -> token" "$XLM_SAC"
+note "pair 0" "1/2"; endstage
 
-echo ">>> [1. SHIELD] A: 100 of asset1   B: 2000 of asset2  (advances on-chain tree to R2)"
-inv --send yes -- shield --from "$ADMIN" --asset_id 1 --amount 100  --owner_tag "$OTA" >/dev/null
-inv --send yes -- shield --from "$ADMIN" --asset_id 2 --amount 2000 --owner_tag "$OTB" >/dev/null
-ROOT_HEX=$(inv -- root 2>/dev/null | tr -d '"')
-echo "    on-chain root after shields (R2): $ROOT_HEX"
-echo "    (proof A's bound root: 0x$(xxd -p -c64 -s 32 -l 32 "$DEMO/public_inputs_a"))"
-stage "shield"
-note "A shields"  "100 of asset 1 -> leaf 0"
-note "B shields"  "2000 of asset 2 -> leaf 1"
-note "tree root (R2)" "$ROOT_HEX"
-endstage
+echo ">>> [1. SHIELD] taker 100 a1 + maker 1600 a2  (advances the note tree)"
+inv --send yes -- shield --from "$ADMIN" --asset_id 1 --amount 100  --owner_tag "$(OT tk_note_tag)" >/dev/null
+inv --send yes -- shield --from "$ADMIN" --asset_id 2 --amount 1600 --owner_tag "$(OT mk_note_tag)" >/dev/null
+stage "shield"; note "taker shields" "100 a1 -> leaf 0"; note "maker shields" "1600 a2 -> leaf 1"
+note "note root" "$(inv -- root 2>/dev/null | tr -d '"')"; endstage
 
-echo ">>> [2/3. SETTLE] atomic two-proof trade (verifies BOTH order proofs in one tx)"
-LAST_CPU=""
-measure settle settle \
-  --proof_a-file-path "$DEMO/proof_a" --public_inputs_a-file-path "$DEMO/public_inputs_a" \
-  --proof_b-file-path "$DEMO/proof_b" --public_inputs_b-file-path "$DEMO/public_inputs_b"
-inv --send yes -- settle \
-  --proof_a-file-path "$DEMO/proof_a" --public_inputs_a-file-path "$DEMO/public_inputs_a" \
-  --proof_b-file-path "$DEMO/proof_b" --public_inputs_b-file-path "$DEMO/public_inputs_b" >/dev/null
-echo "    settle submitted; proceeds notes minted into the tree (root advances to R4)"
-stage "settle"
-note "trade"      "atomic two-proof (A↔B)"
-note "A receives" "2000 of asset 2 -> leaf 2"
-note "B receives" "100 of asset 1 -> leaf 3"
-note "CPU"        "${LAST_CPU:-(unavailable)}"
-endstage
+echo ">>> [2. PLACE] rest both orders in the order tree"
+measure place_order:taker place_order --proof-file-path "$FX/tk_place_proof" --public_inputs-file-path "$FX/tk_place_pi"
+inv --send yes -- place_order --proof-file-path "$FX/tk_place_proof" --public_inputs-file-path "$FX/tk_place_pi" >/dev/null
+inv --send yes -- place_order --proof-file-path "$FX/mk_place_proof" --public_inputs-file-path "$FX/mk_place_pi" >/dev/null
+NF_BEFORE=$(inv -- nullifier_root 2>/dev/null | tr -d '"')
+stage "place"; note "taker order" "SELL 100 a1 @ >=1500 a2"; note "maker order" "SELL 1600 a2 @ >=100 a1"
+note "place_order CPU" "${LAST_CPU}"; note "accumulator root" "$NF_BEFORE"; endstage
 
-echo ">>> [4. UNSHIELD] A withdraws its SETTLE-created 2000 asset2 proceeds note to $DEMO_TO"
-TO_BAL_BEFORE=$(stellar contract invoke --id "$XLM_SAC" --source "$IDENTITY" --network "$NETWORK" -- balance --id "$DEMO_TO" 2>/dev/null | tr -d '"')
-LAST_CPU=""
-measure unshield unshield --to "$DEMO_TO" \
-  --proof_bytes-file-path "$DEMO/unshield_proof" --public_inputs-file-path "$DEMO/unshield_public_inputs"
-inv --send yes -- unshield --to "$DEMO_TO" \
-  --proof_bytes-file-path "$DEMO/unshield_proof" --public_inputs-file-path "$DEMO/unshield_public_inputs" >/dev/null
-TO_BAL_AFTER=$(stellar contract invoke --id "$XLM_SAC" --source "$IDENTITY" --network "$NETWORK" -- balance --id "$DEMO_TO" 2>/dev/null | tr -d '"')
-stage "unshield"
-note "recipient"     "$DEMO_TO"
-note "withdrew"      "2000 of asset 2 (settle-created note)"
-note "balance"       "$TO_BAL_BEFORE -> $TO_BAL_AFTER (expected +2000)"
-note "CPU"           "${LAST_CPU:-(unavailable)}"
-endstage
+echo ">>> [3. SETTLE_MATCH] cross taker vs maker (fresh-now proof; one verify)"
+WS4_FX="$FX" WS4_EXP="$EXP" WS4_NOW=$(( $(ledger_now) - 30 )) python3 "$REGEN" match >/dev/null
+measure settle_match settle_match --proof-file-path "$FX/match_proof" --public_inputs-file-path "$FX/match_pi"
+inv --send yes -- settle_match --proof-file-path "$FX/match_proof" --public_inputs-file-path "$FX/match_pi" >/dev/null
+NF_AFTER=$(inv -- nullifier_root 2>/dev/null | tr -d '"')
+[ "$NF_BEFORE" != "$NF_AFTER" ] || { echo "    *** FAIL: nullifier accumulator did not advance ***"; exit 1; }
+echo "    accumulator advanced: $NF_BEFORE -> $NF_AFTER"
+stage "settle_match"; note "trade" "taker fully filled vs maker"; note "settle_match CPU" "${LAST_CPU}"
+note "accumulator root" "$NF_BEFORE -> $NF_AFTER (advanced)"; endstage
+
+echo ">>> [3b. STALE-ROOT CHECK] replaying settle_match must revert (accumulator CAS)"
+set +e
+inv --send yes -- settle_match --proof-file-path "$FX/match_proof" --public_inputs-file-path "$FX/match_pi" >/dev/null 2>&1
+REPLAY_RC=$?
+set -e
+[ "$REPLAY_RC" -ne 0 ] || { echo "    *** FAIL: replayed settle_match was accepted (double-spend!) ***"; exit 1; }
+echo "    replay correctly rejected (stale nullifier_root_in)"
+stage "stale-root"; note "replayed settle_match" "rejected (NullifierUsed / stale root)"; endstage
+
+echo ">>> [4. UNSHIELD] taker withdraws its 1600-a2 proceeds note to $DEMO_TO"
+# Seed the recipient's SAC balance entry with a direct transfer first: `unshield`'s nested SAC call
+# would otherwise CREATE that entry, and the CLI under-estimates the refundable (rent) fee for a new
+# entry buried in a contract invocation (InsufficientRefundableFee at submit). With the entry already
+# present, the unshield only bumps it — sim matches execution.
+stellar contract invoke --id "$XLM_SAC" --source "$IDENTITY" --network "$NETWORK" --send yes \
+  -- transfer --from "$ADMIN" --to "$DEMO_TO" --amount 1 >/dev/null
+TO_BEFORE=$(stellar contract invoke --id "$XLM_SAC" --source "$IDENTITY" --network "$NETWORK" -- balance --id "$DEMO_TO" 2>/dev/null | tr -d '"')
+measure unshield unshield --to "$DEMO_TO" --proof_bytes-file-path "$FX/life_unshield_proof" --public_inputs-file-path "$FX/life_unshield_pi"
+inv --send yes -- unshield --to "$DEMO_TO" --proof_bytes-file-path "$FX/life_unshield_proof" --public_inputs-file-path "$FX/life_unshield_pi" >/dev/null
+TO_AFTER=$(stellar contract invoke --id "$XLM_SAC" --source "$IDENTITY" --network "$NETWORK" -- balance --id "$DEMO_TO" 2>/dev/null | tr -d '"')
+stage "unshield"; note "recipient" "$DEMO_TO"; note "withdrew" "1600 a2 (match-created proceeds note)"
+note "balance" "$TO_BEFORE -> $TO_AFTER (expected +1600)"; note "unshield CPU" "${LAST_CPU}"; endstage
 
 echo
 echo ">>> RESULT"
-echo "    recipient ($DEMO_TO) XLM balance: $TO_BAL_BEFORE -> $TO_BAL_AFTER (expected +2000)"
+echo "    recipient ($DEMO_TO) XLM balance: $TO_BEFORE -> $TO_AFTER (expected +1600)"
+echo "    accumulator root advanced through the match; replay rejected."
 echo "    contract: $CID"
-echo "    Full shield -> order -> settle -> unshield lifecycle executed on $NETWORK."
-state_set STELLAR_ROOT "$ROOT_HEX"
+echo "    Full WS4 shield -> place -> settle_match -> unshield lifecycle executed on $NETWORK."
+state_set STELLAR_ROOT "$(inv -- root 2>/dev/null | tr -d '"')"
 state_set STELLAR_LAST_RUN "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 print_summary "Stellar"

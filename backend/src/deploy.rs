@@ -8,7 +8,7 @@ use uuid::Uuid;
 /// Pipeline (mirrors `scripts/06_book_budget_testnet.sh`):
 ///   1. generate + friendbot-fund a sponsor ("main") keypair
 ///   2. deploy settlement.wasm with the lift VK + admin = sponsor
-///   3. set_vk(2, unshield_vk), set_vk(3, cancel_vk), set_vk(4, join_vk)
+///   3. set_vk(2, unshield_vk), set_vk(3, cancel_vk), set_vk(4, join_vk), set_vk(5, match_vk)
 ///   4. register_asset for each currency (see `resolve_token` for how `token` is resolved to a SAC)
 ///   5. register_pair for each pair (pair_id assigned sequentially from 0)
 ///
@@ -83,6 +83,13 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, 
         "4",
         "--vk_bytes-file-path",
         &cfg.join_vk().to_string_lossy(),
+    ]))?;
+    inv(svec(&[
+        "set_vk",
+        "--op",
+        "5",
+        "--vk_bytes-file-path",
+        &cfg.match_vk().to_string_lossy(),
     ]))?;
 
     // 4. assets

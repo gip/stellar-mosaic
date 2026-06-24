@@ -70,9 +70,60 @@ the budget. WS4 buys **unbounded depth, O(1) nullifier state, resting-order priv
 sweeps** — at the cost of a matching circuit and the tree migrations. Sequencing: WS4.1 (trees) first,
 because the matching circuit proves against those roots.
 
+## Data availability: a fully-direct frontend (no backend for reads)
+
+Order terms are public (the model is owner-anonymous, *amount-transparent*), so a client may read the
+whole book. The design makes the **book fully event-derived** so a frontend can reconstruct it
+straight from Soroban RPC, with the desk backend reduced to optional conveniences (sponsored
+relaying, durable queues, fast path-serving) — never a trust anchor. The on-chain roots are the only
+trust anchor.
+
+**Active vs. consumed.** Two event streams suffice:
+
+- `OrderInserted` (topic `orderins`) is emitted on every placement *and* every re-rested match
+  remainder, carrying the **full public terms** (`asset_in, amount_in, asset_out, min_out,
+  output_owner_tag, cancel_owner_tag, expiry, partial_allowed`) **plus the leaf**. So the book needs
+  no per-tx calldata fetching.
+- Consumption (match **or** cancel, identically) inserts the order's consumption nullifier
+  `compress(ORDER_NULLIFIER_DOMAIN, order_leaf)` into the IMT and emits `NullifierSpent` (topic
+  `nfspent`).
+
+An order is **active** iff its leaf appears in `orderins` and `compress(ORDER_NULLIFIER_DOMAIN,
+order_leaf)` is **not** in the set of `nfspent` nullifiers — one Poseidon2 hash per order to test.
+(`nfspent` also carries secret-derived note-spend nullifiers, but those are structurally different
+values, so the membership test never collides.)
+
+**Bounded retention.** A correct book would naively need all events from genesis. Instead,
+`place_order` enforces `MAX_ORDER_TTL` (7 days): an order can neither be already-expired nor rest
+longer than that, and the **match circuit refuses `expiry < now`**. So any order older than the
+window is provably unmatchable, and a fully-direct client only needs `getEvents` over `[now −
+MAX_ORDER_TTL, now]` (cursor-paginated, cached locally, incremental on reload). Set `MAX_ORDER_TTL`
+at or below the RPC's `eventLedgerRetentionWindow`.
+
+**The one piece that still needs a tree source.** Reading the book is fully-direct; *building proofs*
+is not. A membership path in an append-only tree needs **all earlier leaves** (note tree:
+`shielded`+`noteins`; order tree: `orderins`) from genesis — more than any retention window, and
+growing forever. The contract's stored `TreeFilled` frontier (readable via `getLedgerEntries`) lets a
+client append / compute the *current root* but not an arbitrary leaf's path.
+
+| Capability | Fully-direct from RPC? |
+|---|---|
+| Active order book / quotes (within `MAX_ORDER_TTL`) | yes |
+| Detecting your own fills / consumption | yes |
+| Membership paths for proving | no — needs full tree history |
+
+That tree source is a **decentralizable, read-only indexer** (the desk's, a third party's, or
+self-hosted — it only *reconstructs* public data) or a periodically published **tree snapshot**
+clients sync once and extend incrementally. WS4 ships the event-derived book + bounded retention now;
+third-party indexers / a snapshot scheme for path-serving come later.
+
 ## Open questions
 
 - Indexed-merkle-tree vs. sparse-merkle-tree for the nullifier accumulator (insert cost vs. proof
-  size on Soroban).
-- Who runs the matcher, and the MEV/ordering threat model once matching is a single submitted proof.
-- Migration: dual-write the `Vec` book and the order tree during rollout, or a hard cutover.
+  size on Soroban). *(Resolved for the build: IMT.)*
+- ~~Who runs the matcher~~ — permissionless submission; the residual MEV/ordering freedom (a valid but
+  not necessarily best-priced match can be the one that lands first) is a documented limitation, since
+  proving *global* optimality over an open-ended book is infeasible in a fixed circuit. WS5 territory.
+- ~~Migration~~ — hard cutover (fresh deploy); no production funds to migrate.
+- Path-serving without any indexer: a verifiable tree-snapshot / checkpoint scheme so even proving is
+  backend-optional.

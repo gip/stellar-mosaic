@@ -4,35 +4,46 @@ The concrete implementation reference: how to build and run the stack, the order
 storage durability, and the status of what's left. Design rationale is in `architecture.md`;
 measurements are in `benchmarks.md`.
 
+> **WS4 update.** Matching moved off the contract into the `match` circuit + permissionless
+> `settle_match` (1 taker × ≤3 makers, full-fill makers + taker remainder), and orders + nullifiers
+> are now **tree-backed**: a depth-32 order-commitment tree plus an indexed-merkle-tree (IMT)
+> nullifier accumulator proven in-circuit (one root CAS on-chain). The atomic `settle`/`settle_exact`
+> and the on-chain `Vec` book (`submit_order`/`prune_expired`) are **removed**; the book is now
+> event-derived. Sections below describing those are **superseded** — see `noir-matching.md` for the
+> current model and the contract source for the exact public-input layouts. The build/run,
+> storage-durability, and toolchain sections remain current.
+
 ## Getting started
 
 ### Local prove + contract tests (no testnet)
 
 ```bash
 ./scripts/01_build_prove.sh                      # local prove/verify half
-cd contracts/settlement && cargo test --test integration   # full custody loop on the local Soroban host
+cd contracts/settlement && cargo test            # full WS4 suite on the local Soroban host
 ```
 
-The integration test exercises shield (token custody) → atomic `settle` (verify two crossing order
-proofs in one tx) → `unshield` (recipient-bound asset-note spend), plus negatives (unpublished root,
-replayed settle, tampered order field, incompatible orders, wrong unshield recipient). Proof fixtures
-live in `contracts/settlement/tests/fixtures/` (regenerate via `regen.sh`). `cargo test -p settlement`
-runs the full suite (34 local tests: real UltraHonk + cancel proofs on the Soroban host).
+`cargo test` runs the full suite (**43 local tests**: real UltraHonk proofs on the Soroban host) —
+`tests/ws4.rs` (shield → place_order, and shield×2 → place×2 → `settle_match`), `tests/integration.rs`
+(asset/pair registration + shield validation + place_order/settle_match/unshield negatives:
+unknown root, replay, tampered field, bad PI length, missing VK, wrong recipient), `tests/join.rs`
+(real-proof note consolidation), `tests/events.rs` (event wire-format lock), and `tests/base_shield.rs`.
+Proof fixtures live in `contracts/settlement/tests/fixtures/ws4/` (regenerate via its `regen.py`, or
+`scripts/05`).
 
 ### End-to-end demos
 
-- `scripts/03_demo_e2e.sh` + `contracts/settlement/tests/e2e_demo.rs` — full lifecycle on the local
-  host with real proofs whose membership witnesses are reconstructed by the path server: A shields
-  asset 1, trades into asset 2 via atomic `settle`, then unshields **the proceeds note `settle`
-  created** (a note that exists only as a tree leaf, whose Merkle path the indexer rebuilds from event
-  history). Run the script, then `cargo test -p settlement`.
-- `scripts/04_demo_e2e_testnet.sh` — the authoritative testnet version: deploys the contract and
-  submits the same flow as real transactions, reusing the local-host proofs unchanged (they bind the
-  protocol asset-id and the Merkle root, not token addresses, and the on-chain tree is deterministic).
-  Both protocol asset-ids map to the native XLM SAC for a robust run.
-- `scripts/06_book_budget_testnet.sh` — order-book lifecycle (shield → rest → cross/partial-fill →
-  cancel); `scripts/07_book_worstcase_testnet.sh` — worst-case stress.
+- **Local full lifecycle:** `tests/ws4.rs::full_flow_shield_place_place_settle_match` runs shield×2 →
+  place×2 → `settle_match` on the local host with real proofs whose witnesses (note/order paths, the
+  per-note nonce, nullifier-IMT inserts) are reconstructed by the path server (`tools/indexer`'s
+  `witness` bin).
+- `scripts/06_book_budget_testnet.sh` — testnet budget run: place_order → settle_match (typical) +
+  place_order → cancel_order. `scripts/07_book_worstcase_testnet.sh` — the worst-case `settle_match`
+  (1 taker × 3 makers + remainder). Both generate proofs at run time against the live ledger clock
+  (WS4 binds `expiry`/`now` to it) and assert each call is within the 400M budget. See `benchmarks.md`.
 - `scripts/10_demo_base_shield_testnet.sh` — Base → Stellar shield (see `base-bridge.md`).
+- `scripts/03_demo_e2e.sh` — local-host WS4 lifecycle (regenerate fixtures + `cargo test --test ws4`);
+  `scripts/04_demo_e2e_testnet.sh` — the authoritative testnet version (shield → place → settle_match
+  → unshield proceeds), driven by `scripts/e2e.sh` (see `e2e-testing.md`).
 
 ### Web app (frontend + backend)
 
@@ -43,9 +54,10 @@ runs the full suite (34 local tests: real UltraHonk + cancel proofs on the Sorob
 ```
 
 `scripts/08_build_web_artifacts.sh` builds `settlement.wasm` (→ `backend/artifacts/`) and compiles
-the lift + wallet helper circuits (→ `frontend/public/circuits/`). The backend also needs
-`vks/{lift,unshield,cancel}_vk` (committed, generated with `bb` v0.87.0). See `backend/README.md` and
-`frontend/README.md` for config env vars and endpoints.
+the lift/unshield/cancel/join/match + wallet helper circuits (→ `frontend/public/circuits/`). The
+backend also needs `vks/{lift,unshield,cancel,join,match}_vk` (committed, generated with `bb` v0.87.0;
+deploy registers them via `set_vk(op, vk)`). See `backend/README.md` and `frontend/README.md` for
+config env vars and endpoints.
 
 ### Building the contract for deploy
 
@@ -71,9 +83,10 @@ Confirmed recipe: `bb prove/write_vk --scheme ultra_honk --oracle_hash keccak --
 bytes_and_fields` (`bytes_and_fields` emits the separate `public_inputs` file the contract needs).
 
 soroban-sdk is pinned to **26.0.1** (matched to Nethermind's verifier workspace; the `hazmat-crypto`
-feature exposes `poseidon2_permutation` for the on-chain tree). The contract depends on a **vendored**
-Nethermind verifier path under `vendor/` (gitignored), so it does not build standalone — making it
-reproducible is an open item.
+feature exposes `poseidon2_permutation` for the on-chain tree). The settlement verifier
+(`ultrahonk_soroban_verifier`, a pinned git rev of NethermindEth's public repo) and `soroban-poseidon`
+(crates.io `26.0.0`) are now resolved by cargo, so the contract builds **standalone** from a fresh
+checkout — no `vendor/` checkout required.
 
 ## Web app architecture
 
@@ -101,8 +114,8 @@ unshield/cancel VKs → register assets (`"native"` → XLM SAC) and pairs.
 - Fund-mutation endpoints require a wallet session **plus** the live client-action lease at the head
   of that wallet's FIFO queue; direct relay calls cannot bypass serialization. Progress events are
   persisted and replayed over SSE.
-- `submit_order` / `unshield` / `cancel_order` are relayer-submittable (the proof is the spend
-  authority), so the desk sponsor is the sole source/fee payer — fully sponsored.
+- `place_order` / `settle_match` / `cancel_order` / `unshield` / `join` are relayer-submittable (the
+  proof is the spend authority), so the desk sponsor is the sole source/fee payer — fully sponsored.
 - `shield` moves the user's own tokens, so it needs the user's authorization but is **also fully
   sponsored** via Soroban auth-entry signing: the frontend builds the tx with the sponsor as source,
   simulates to get the `Address(user)` auth entry, the user signs **only that entry** in Freighter
@@ -116,8 +129,15 @@ in-JS and rests on the on-chain book via the sponsored relay.
 
 ## The order-proof circuit (`circuits/lift`)
 
-The order proof, consumed directly by atomic `settle`/`settle_exact` and by the on-chain order book
-(`submit_order`). The contract has no separate `lift` entrypoint; the name is historical. It consumes
+> **WS4:** the order proof now drives **`place_order`** (rest one order in the order-commitment tree);
+> matching is a separate `match` circuit verified by `settle_match`. The proof additionally binds the
+> nullifier-IMT transition (`nullifier_root_in`/`out`) and folds a per-note nonce, so the public-input
+> vector is now **14 fields** (the contract constants and `circuits/lift/src/main.nr` are the
+> authority). The 12-field table below is the WS1 layout, kept for the conceptual walk-through; the
+> ownership/membership/nullifier/order-leaf assertions are unchanged in spirit.
+
+The order proof drives `place_order` (and the `cancel`/`match` circuits trust the `order_leaf` it
+binds). The contract has no separate `lift` entrypoint; the name is historical. It consumes
 one active **asset note** and creates one active **order note**:
 
 ```
@@ -127,15 +147,15 @@ AssetNote { asset_in, amount_in, owner_tag_in }  --consume-->  OrderNote { asset
 ```
 
 A proof is needed because the consumed asset note is hidden inside the Merkle set — the contract does
-not know *which* note was spent, so it cannot check value conservation in plaintext. (By contrast
-`settle` crosses two already-active, public order notes in the clear.)
+not know *which* note was spent, so it cannot check value conservation in plaintext. (By contrast the
+`match` circuit crosses orders whose terms are public in the order tree.)
 
-**v1 decision: full consumption, no change at lift.** `amount_in` equals the consumed note's amount;
-no change note is emitted at lift. Standard denominations (1/10/100/1000 + change) are the anonymity
-lever (`privacy-model.md`), so full consumption is the normal case, and it removes a conservation
-subtraction and an output leaf. Change still happens at **settle** for partial fills (plaintext,
-proof-free). Change-at-lift is a documented future extension (add a `change_leaf` public input +
-`amount_in + change_amount == note_amount`).
+**v1 decision: full consumption, no change at placement.** `amount_in` equals the consumed note's
+amount; no change note is emitted when the order rests. Standard denominations (1/10/100/1000 +
+change) are the anonymity lever (`privacy-model.md`), so full consumption is the normal case, and it
+removes a conservation subtraction and an output leaf. Partial fills exist only in the matching path:
+`settle_match` re-rests the taker's unspent remainder as a fresh order at the taker's exact integer
+limit ratio (no separate change note). Change-at-placement is a documented future extension.
 
 ### Public input vector (12 fields, BN254, positional)
 
@@ -156,10 +176,10 @@ The contract reads `public_inputs` positionally and the verifier binds the proof
 | 10 | `partial_allowed` | book honors when matching; circuit constrains to {0,1} | may this order be partially filled |
 | 11 | `order_leaf` | book stores as the order's identity; `cancel` references it | `H8(asset_in, amount_in, asset_out, min_out, output_owner_tag, cancel_owner_tag, expiry, partial_allowed)` |
 
-`settle`/`settle_exact` use fields `[0..8]`; the order book additionally reads `cancel_owner_tag`,
-`expiry`, `partial_allowed`, `order_leaf`. `order_leaf` and `nullifier_in` are exposed (not recomputed
-on-chain) so the contract doesn't pay Poseidon cost; it trusts the in-circuit assertion that each
-equals the hash of the stored public fields.
+`place_order` reads all fields; `settle_match`/`cancel` trust the `order_leaf` (and re-derive the
+order-consumption nullifier `compress(7, order_leaf)`). `order_leaf` and `nullifier_in` are exposed
+(not recomputed on-chain) so the contract doesn't pay Poseidon cost; it trusts the in-circuit
+assertion that each equals the hash of the stored public fields.
 
 ### Private witness
 
@@ -197,13 +217,16 @@ A proof is necessary but not sufficient. On a verifying order proof the contract
 all outputs itself from checked public values — **never** accept a caller-supplied output commitment.
 
 Related circuits: `circuits/unshield` (recipient-bound asset-note spend, domain 2), `circuits/cancel`
-(domain 3; proves knowledge of `cancel_owner_tag`, binds `order_leaf` + `return_owner_tag`, no
-membership proof since the resting order is plaintext on-chain).
+(domain 3; proves order-tree membership of `order_leaf` + knowledge of `cancel_owner_tag`, inserts the
+order-consumption nullifier into the IMT, binds `return_owner_tag`), `circuits/join` (domain 4;
+consolidate two same-asset notes), and `circuits/match` (domain 5; settle 1 taker × ≤3 makers, the
+`settle_match` proof). Every spend circuit now folds a per-note nonce and proves its nullifier-IMT
+insert in-circuit.
 
 ## Storage durability
 
-The contract custodies real funds, so the accounting that governs them (nullifiers, the note tree,
-roots, the order book, pairs, VKs) must never disappear. Soroban has three storage tiers:
+The contract custodies real funds, so the accounting that governs them (the nullifier-IMT root, the
+note + order trees, root history, pairs, VKs) must never disappear. Soroban has three storage tiers:
 
 | tier | on TTL expiry | used here for |
 |---|---|---|
@@ -218,49 +241,53 @@ archived persistent entry as if it were absent (access fails until restored), so
 never read back as "unspent." Worst realistic failure is **temporary inaccessibility until someone
 pays to restore** — never loss, never double-spend — and restoration is **permissionless**.
 
+**WS4 closed the only unbounded rent surface.** The per-spend nullifier *set* is gone: the nullifier
+accumulator is a **single `NullifierRoot` (U256)**, with non-membership + insert proven in-circuit and
+just a root CAS on-chain (`advance_nullifier_root`). So nullifier state is now **O(1)** and bumped by
+`bump_core` like the trees — the only remaining unbounded persistent state is the note/order **root
+histories**.
+
 Mechanism (persistent TTLs decay and can't be extended forever):
 - **Bumps on write.** Every fund-critical write extends the entry's TTL to `max_ttl()`. The hot state
-  (instance, the tree singletons `TreeFilled`/`TreeNext`/`TreeRoot`, the current root marker) is
-  refreshed by `bump_core` at the end of every state-changing call; nullifiers, books, pairs, assets,
-  VKs are bumped where written. Cheap — ~0.04% of `submit_order`'s worst case (a flat cost, not a
-  rewrite).
+  (instance, the per-tree filled/next/root frontier singletons, and the single `NullifierRoot`) is
+  refreshed by `bump_core` at the end of every state-changing call; pairs, assets, VKs are bumped where
+  written. Cheap — a flat cost, ~0.04% of `settle_match`'s worst case (not a rewrite).
 - **`keep_alive()`** — permissionless heartbeat re-extending all **bounded** structural state to max.
-- **`keep_alive_keys(nullifiers, roots)`** — permissionless targeted heartbeat for the **unbounded**
-  sets; a keeper or a user about to spend an old note refreshes exactly what they need.
+- **`keep_alive_keys(note_roots, order_roots)`** — permissionless targeted heartbeat for the
+  **unbounded** root histories; a keeper or a user about to prove against an old root refreshes exactly
+  what they need.
 
 Operational: run a keeper calling `keep_alive()` on an interval shorter than `max_ttl` and bumping the
-instance + Wasm code entries; for the unbounded sets, sweep recent entries via `keep_alive_keys` or
-rely on permissionless restore at spend time. Test:
-`contracts/settlement/tests/book.rs::critical_state_ttl_is_extended_and_kept_alive`.
+instance + Wasm code entries; for the root histories, sweep recent entries via `keep_alive_keys` or
+rely on permissionless restore at proof time.
 
 ## Status: what's done and what's left
 
-Functionally complete and demonstrable end-to-end on testnet (un-hardened). 34 local tests (real
-UltraHonk + cancel proofs on the Soroban host).
+WS4 (Noir matching + tree-backed orders/nullifiers) is functionally complete: circuits, the merged
+contract, the off-chain services, and in-browser proving (incl. the taker auto-match path) all built;
+**43 local tests** pass (real UltraHonk proofs on the Soroban host).
 
-**Done (production-blocking safety/correctness):** storage durability (above); worst case fits all
-per-tx resource limits (359.8M instructions ~89%, 25,776 write bytes ~20%, 0 disk-read; see
-`benchmarks.md`).
+**Done (production-blocking safety/correctness):** storage durability (above; the unbounded
+nullifier-set rent surface is now **closed** — O(1) accumulator root); the worst-case `settle_match`
+(1 taker × 3 makers + remainder) measured on testnet at **260.7M instructions (~65% of 400M)** and
+accepted — see `benchmarks.md`. All five entrypoints (`place_order`, `settle_match`, `cancel_order`,
+`unshield`, `join`) verify within budget.
 
 **Open — robustness:**
-- **Crossed-book crank (`match_book`).** A partial-allowed taker that sweeps deeper than
-  `MAX_FILLS_PER_SUBMIT` rests its remainder over still-crossing makers, leaving a price-crossed book
-  until the next taker. Add a permissionless crank that crosses top-of-book resting orders (reusing
-  `compute_lots`, no new proof). Not fund-safety.
-- **Unbounded root history** → bounded-ring eviction (nullifiers prevent double-spend regardless).
-- **Book storage: keyed entries + sorted index** instead of a per-op re-(de)serialized
-  `Vec<OrderEntry>`; do only if measured write-bytes/CPU headroom demands it.
-- **Test gaps:** FOK taker revert (`NotPartialAllowed`) with a real proof; `prune_expired` on testnet.
-- **Richer events + stable order ids** (`placed`/`filled`/`cancelled`/`pruned`); only `noteins` today.
+- **Bounded root history** → ring eviction (nullifier accumulator prevents double-spend regardless).
+- **Maker-discovery without an indexer.** A resting maker recovers its (foreign-taker) proceeds via
+  the backend's event-correlation endpoint; a fully-direct/verifiable scheme is future work.
+- **MEV / ordering.** `settle_match` is permissionless; a valid-but-not-best match can land first
+  (documented in `noir-matching.md`). Needs a threat-model pass; WS5 territory.
 
 **Open — productionization:**
 - **Admin surface:** upgradeability + pause; pair relisting/delisting (pairs are currently permanent).
-- **Nullifier accumulator:** replace the per-spend nullifier set (the only unbounded rent surface)
-  with a single accumulator root, proving non-membership in-circuit — bounds live state to O(1).
-- **Lot-granularity / tick-size policy** (coprime-priced orders can't partially fill).
-- **Relayer / MEV ordering:** `submit_order` ordering is relayer-controlled; needs a threat-model pass.
-- **Standalone build:** the vendored Nethermind verifier path is gitignored; make it reproducible.
+- **Lot-granularity / tick-size policy** (coprime-priced orders can't partially fill cleanly).
 - **Wrapped assets:** define issuers/bridges before advertising ETH/XRP support.
+
+The WS4 hard-cutover lifecycle (shield → place → settle_match → unshield) was validated live on
+testnet via `scripts/e2e.sh stellar` — the accumulator root advanced, a replayed `settle_match`
+reverted, and the recipient was credited exactly; per-tx CPU in `benchmarks.md`.
 
 None of the open gaps can lose funds. Not hardened: no keeper running (TTL upkeep manual; data safe
 regardless), demo scripts use literal owner tags and map both asset-ids to the native XLM SAC.

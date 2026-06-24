@@ -2,7 +2,7 @@
 # e2e.sh — driver for the Stellar-Mosaic end-to-end testnet demos.
 #
 # It does NOT replace the demo scripts; it orchestrates them and remembers what they produced:
-#   - scripts/04_demo_e2e_testnet.sh   Stellar leg: shield -> settle -> unshield (committed proofs)
+#   - scripts/04_demo_e2e_testnet.sh   Stellar leg: shield -> place_order -> settle_match -> unshield
 #   - scripts/10_demo_base_shield_testnet.sh   Base leg: Base Sepolia shield -> mint note on Stellar
 #
 # What it gives you on top of the raw scripts:
@@ -39,7 +39,7 @@ ROUTER_ID="${ROUTER_ID:-CB3ISULTPMQXHUH6BVRO7VQIQE3TTDRGSHWBJ72V7GRO6VF63BMGNWOU
 # proven block to finalize on Base (~10-15 min, reorg-safe).
 WAIT_FINALITY="${WAIT_FINALITY:-0}"
 
-DEMO="$ROOT/contracts/settlement/tests/fixtures/demo"
+SRC="$ROOT/contracts/settlement/tests/fixtures/ws4"   # committed WS4 VKs (04 generates proofs at run time)
 EVM="$ROOT/evm"
 
 # --- tiny ui --------------------------------------------------------------------------------------
@@ -64,12 +64,12 @@ docker_alive() {
 }
 
 # --- readiness probes -----------------------------------------------------------------------------
-# Stellar leg needs only the stellar CLI + the committed demo fixtures (no Noir/bb toolchain).
+# Stellar leg (WS4) needs the stellar CLI + the committed WS4 VKs + the proving toolchain (script 04
+# generates proofs at run time against the live ledger clock — see its header).
 fixtures_ready() {
   local f
-  for f in vk unshield_vk proof_a public_inputs_a proof_b public_inputs_b unshield_proof unshield_public_inputs; do
-    [ -s "$DEMO/$f" ] || return 1
-  done
+  for f in lift_vk unshield_vk match_vk; do [ -s "$SRC/$f" ] || return 1; done
+  have nargo && have bb
 }
 stellar_ready() { have stellar && fixtures_ready; }
 
@@ -120,9 +120,10 @@ cmd_status() {
     if have "$t"; then ok "$t"; else no "$t (missing)"; fi
   done
 
-  hdr "Stellar leg  (scripts/04 — shield → settle → unshield)"
+  hdr "Stellar leg  (scripts/04 — shield → place_order → settle_match → unshield)"
   have stellar     && ok "stellar CLI present"        || no "stellar CLI missing"
-  fixtures_ready   && ok "proof fixtures present"      || no "proof fixtures missing — run: $0 regen"
+  { have nargo && have bb; } && ok "proving toolchain (nargo + bb) present" || no "nargo/bb missing (04 generates proofs at run time)"
+  { [ -s "$SRC/lift_vk" ] && [ -s "$SRC/unshield_vk" ] && [ -s "$SRC/match_vk" ]; } && ok "WS4 VKs present" || no "WS4 VKs missing — run: $0 regen"
   if stellar_ready; then ok "$(b 'READY')  →  $0 stellar"; else warn "blocked (see above)"; fi
 
   hdr "Base leg  (scripts/10 — Base Sepolia shield → mint on Stellar)"
@@ -229,9 +230,9 @@ cmd_all() { cmd_stellar; cmd_base; printf '\n%s\n' "$(b '>>> combined summary (b
 cmd_summary() { print_summary "${2:-}"; }
 
 cmd_regen() {
-  printf '%s\n' "$(b '>>> regenerating proof fixtures (scripts/03_demo_e2e.sh — needs nargo + bb)')"
+  printf '%s\n' "$(b '>>> regenerating WS4 proof fixtures (scripts/05 — needs nargo + bb)')"
   have nargo || { printf 'nargo not found — install nargo 1.0.0-beta.9 (see CLAUDE.md).\n'; exit 1; }
-  "$ROOT/scripts/03_demo_e2e.sh"
+  "$ROOT/scripts/05_gen_book_fixtures.sh"
 }
 
 cmd_clean() {
@@ -274,7 +275,7 @@ cmd_reset() {
   fi
 
   printf '\nclean. Next (each recompiles + deploys fresh contracts):\n'
-  printf '  %s stellar      # rebuild wasm, deploy a fresh Stellar contract + shield/settle/unshield\n' "$0"
+  printf '  %s stellar      # rebuild wasm, deploy a fresh Stellar contract + shield/place/match/unshield\n' "$0"
   printf '  %s base         # rebuild host/guest + EVM, deploy fresh Base + Stellar contracts\n' "$0"
   printf 'Committed proof fixtures are reused; regenerate only if circuits changed: %s regen (needs nargo+bb).\n' "$0"
 }

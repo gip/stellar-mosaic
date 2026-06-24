@@ -1,0 +1,6 @@
+[package]
+name = "mosaic"
+type = "lib"
+authors = ["stellar-mosaic"]
+
+[dependencies]
