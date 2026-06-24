@@ -548,6 +548,162 @@ pub fn imt_witness(
     imt_witness_inner(&spent, value)
 }
 
+/// The proceeds note a `settle_match` minted for one consumed order, recovered by correlating that
+/// match's events. The wallet stored only the *base* `output_owner_tag` it bound into its order; the
+/// matcher mints the proceeds note under `note_owner_tag = compress(output_owner_tag, nonce)` with
+/// `nonce = compress(taker_order_leaf, slot)`, which the resting maker cannot predict (it does not
+/// know which taker crossed it, nor in which slot). This recomputes both from the public match
+/// events so the maker can find the on-chain leaf (`owner_tag`) and later spend it (`nonce`).
+#[derive(Serialize)]
+pub struct MatchProceeds {
+    /// True if `order_leaf` was consumed by a `settle_match` (vs. still resting / cancelled).
+    pub matched: bool,
+    /// The minted proceeds note's on-chain owner tag (`compress(base_tag, nonce)`), 0x hex.
+    pub owner_tag: String,
+    /// The per-note mint nonce the wallet must fold into the spend (`compress(taker_leaf, slot)`).
+    pub nonce: String,
+    pub asset: u32,
+    pub amount: String,
+}
+
+/// One settle_match's correlated proceeds, in slot order (slot 0 = taker, 1.. = makers): the consumed
+/// order's consumption nullifier alongside the proceeds note minted for it and the folding nonce.
+struct MatchTx {
+    taker_leaf: [u8; 32],
+    /// Per slot: (consumed-order consumption nullifier, proceeds {asset, amount, owner_tag}).
+    slots: Vec<([u8; 32], (u32, i128, [u8; 32]))>,
+}
+
+/// Per-raw-event classification used only for match correlation.
+enum MatchEv {
+    Matched,
+    Nfspent([u8; 32]),
+    Noteins(u32, i128, [u8; 32]),
+}
+
+fn classify_match_ev(v: &serde_json::Value) -> Option<MatchEv> {
+    let topic_b64 = v.get("topic")?.as_array()?.first()?.as_str()?;
+    let sym = decode_symbol(topic_b64)?;
+    match sym.as_str() {
+        "matched" => Some(MatchEv::Matched),
+        "nfspent" => parse_nfspent(v).map(MatchEv::Nfspent),
+        "noteins" => {
+            let value_b64 = v.get("value")?.as_str()?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(value_b64)
+                .ok()?;
+            let mut r = Rdr::new(&bytes);
+            if r.vec_header()? != 3 {
+                return None;
+            }
+            Some(MatchEv::Noteins(r.scu32()?, r.sci128()?, r.scbytes32()?))
+        }
+        _ => None,
+    }
+}
+
+/// Reconstruct every `settle_match` from the raw event stream. Soroban returns events ordered by
+/// (ledger, tx, event-index), so one tx's events are contiguous and in contract-emission order:
+/// `nfspent` (taker @ slot 0, then makers in slot order), then `noteins` (proceeds in the same slot
+/// order; only live slots are minted, so the k-th `nfspent` pairs with the k-th `noteins`), then
+/// `matched`. We only keep txs that carry a `matched` event.
+fn match_txs(raw: &[serde_json::Value], env: &Env, h: &Hasher) -> Vec<MatchTx> {
+    // consumption-nullifier -> order_leaf, so we can name the taker by its slot-0 nullifier.
+    let mut nf_to_leaf: std::collections::HashMap<[u8; 32], [u8; 32]> = std::collections::HashMap::new();
+    for o in raw.iter().filter_map(parse_orderins) {
+        let nf = u256_to_word(&order_consumption_nullifier(
+            env,
+            h,
+            &word_to_u256(env, &o.order_leaf),
+        ));
+        nf_to_leaf.insert(nf, o.order_leaf);
+    }
+
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < raw.len() {
+        let tx = raw[i].get("txHash").and_then(|x| x.as_str()).map(str::to_string);
+        // gather this tx's contiguous events
+        let mut j = i;
+        let mut nfs: Vec<[u8; 32]> = Vec::new();
+        let mut notes: Vec<(u32, i128, [u8; 32])> = Vec::new();
+        let mut is_match = false;
+        while j < raw.len()
+            && raw[j].get("txHash").and_then(|x| x.as_str()).map(str::to_string) == tx
+        {
+            if let Some(ev) = classify_match_ev(&raw[j]) {
+                match ev {
+                    MatchEv::Matched => is_match = true,
+                    MatchEv::Nfspent(nf) => nfs.push(nf),
+                    MatchEv::Noteins(a, m, t) => notes.push((a, m, t)),
+                }
+            }
+            j += 1;
+        }
+        if is_match && !nfs.is_empty() && notes.len() == nfs.len() {
+            if let Some(&taker_leaf) = nf_to_leaf.get(&nfs[0]) {
+                let slots = nfs.into_iter().zip(notes.into_iter()).collect();
+                out.push(MatchTx { taker_leaf, slots });
+            }
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+fn match_proceeds_inner(raw: &[serde_json::Value], order_leaf: &str) -> AppResult<MatchProceeds> {
+    let want = parse_hex32(order_leaf)?;
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let h = Hasher::new(&env);
+    let want_nf = u256_to_word(&order_consumption_nullifier(
+        &env,
+        &h,
+        &word_to_u256(&env, &want),
+    ));
+    for mtx in match_txs(raw, &env, &h) {
+        if let Some(slot) = mtx.slots.iter().position(|(nf, _)| *nf == want_nf) {
+            let (_, (asset, amount, tag)) = &mtx.slots[slot];
+            let nonce = h.compress(
+                &env,
+                &word_to_u256(&env, &mtx.taker_leaf),
+                &U256::from_u32(&env, slot as u32),
+            );
+            return Ok(MatchProceeds {
+                matched: true,
+                owner_tag: fmt_hex32(tag),
+                nonce: u256_hex(&nonce),
+                asset: *asset,
+                amount: amount.to_string(),
+            });
+        }
+    }
+    Ok(MatchProceeds {
+        matched: false,
+        owner_tag: String::new(),
+        nonce: String::new(),
+        asset: 0,
+        amount: "0".to_string(),
+    })
+}
+
+pub fn match_proceeds_from_raw(
+    raw: &[serde_json::Value],
+    order_leaf: &str,
+) -> AppResult<MatchProceeds> {
+    match_proceeds_inner(raw, order_leaf)
+}
+
+pub fn match_proceeds(
+    stellar: &Stellar,
+    contract_id: &str,
+    from_ledger: Option<u64>,
+    order_leaf: &str,
+) -> AppResult<MatchProceeds> {
+    let raw = scan_events(stellar, contract_id, from_ledger, |v| Some(v.clone()))?;
+    match_proceeds_inner(&raw, order_leaf)
+}
+
 /// Decode a base64 ScVal::Symbol into its string.
 fn decode_symbol(b64: &str) -> Option<String> {
     let b = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;

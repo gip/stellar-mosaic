@@ -34,6 +34,26 @@ export async function noteTag(sk: string, rho: string, nonce: string = '0'): Pro
   return asField(returnValue)
 }
 
+/** Raw 2-to-1 Poseidon2 compression, byte-identical to the circuits/contract `compress`. Returns
+ * 0x + 64 hex. The building block for match-time tag/nonce recomputation. */
+export async function compress(a: string, b: string): Promise<string> {
+  const noir = await load('compress')
+  const { returnValue } = await noir.execute({ a, b })
+  return asField(returnValue)
+}
+
+/** The per-note nonce the `match` circuit folds into every minted note: `compress(taker_leaf, slot)`
+ * (slot 0 = taker fill, 1.. = makers). Used to recompute proceeds tags + spend nonces. */
+export async function matchNonce(takerLeaf: string, slot: number): Promise<string> {
+  return compress(takerLeaf, String(slot))
+}
+
+/** A minted proceeds note's owner tag: `note_owner_tag(output_owner_tag, nonce) =
+ * compress(output_owner_tag, nonce)`. `outputOwnerTag` is the order's bound base tag. */
+export async function proceedsTag(outputOwnerTag: string, nonce: string): Promise<string> {
+  return compress(outputOwnerTag, nonce)
+}
+
 export interface OrderTerms {
   nullifier_in: string
   output_owner_tag: string

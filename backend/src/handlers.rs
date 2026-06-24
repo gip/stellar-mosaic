@@ -310,6 +310,33 @@ pub async fn get_order_proof(
     Ok(Json(serde_json::to_value(proof).unwrap()))
 }
 
+/// Discover the proceeds note a `settle_match` minted for one of the wallet's orders. The matcher
+/// folds an unpredictable `nonce = compress(taker_leaf, slot)` into the proceeds tag, so a resting
+/// maker cannot recompute its own minted leaf without correlating the match's public events — which
+/// this does. Returns `{matched:false}` while the order is still resting (or was cancelled).
+pub async fn get_match_proceeds(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(q): Query<OrderProofQuery>,
+) -> AppResult<Json<Value>> {
+    tracing::info!(desk = %id, order_leaf = %q.order_leaf, "get_match_proceeds");
+    let desk = st.db.get_desk(&id).await?;
+    let leaf = q.order_leaf;
+    let raw = st.db.chain_events(&desk.contract_id).await?;
+    if !raw.is_empty() {
+        return Ok(Json(
+            serde_json::to_value(crate::indexer::match_proceeds_from_raw(&raw, &leaf)?).unwrap(),
+        ));
+    }
+    let from = st.db.desk_from_ledger(&id).await?;
+    let r = tokio::task::spawn_blocking(move || {
+        crate::indexer::match_proceeds(&st.stellar, &desk.contract_id, from, &leaf)
+    })
+    .await
+    .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    Ok(Json(serde_json::to_value(r).unwrap()))
+}
+
 #[derive(Deserialize)]
 pub struct ImtWitnessQuery {
     /// The nullifier value (0x hex) the spender wants to insert.

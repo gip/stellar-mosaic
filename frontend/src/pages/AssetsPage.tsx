@@ -18,10 +18,25 @@ export default function AssetsPage() {
     }
   }, [])
 
-  // Reload when the wallet connects/disconnects so `trusted_by_me` reflects the current user.
+  // Reload when the wallet connects/disconnects so `trusted_by_me` reflects the current user. Set
+  // state inside the async callback (not synchronously in the effect body) and guard against a stale
+  // resolve after unmount / a newer wallet change.
   useEffect(() => {
-    void load()
-  }, [load, address])
+    let active = true
+    api
+      .listCatalogAssets()
+      .then((a) => {
+        if (!active) return
+        setAssets(a)
+        setError(null)
+      })
+      .catch((e) => {
+        if (active) setError(e instanceof Error ? e.message : String(e))
+      })
+    return () => {
+      active = false
+    }
+  }, [address])
 
   return (
     <>

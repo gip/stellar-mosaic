@@ -284,6 +284,158 @@ export async function proveCancel(input: CancelInputs): Promise<ProofBundle> {
   return { proof, publicInputs: packPublicInputs(publicInputs) }
 }
 
+// --- match (settle_match): 1 taker x up to 3 makers -> up to 4 proceeds + 1 remainder order ---
+
+const M_ZERO_FIELD = '0x' + '0'.repeat(64)
+const M_ZERO_PATH = Array<string>(32).fill(M_ZERO_FIELD)
+const M_ZERO_BITS = Array<number>(32).fill(0)
+const M_ZERO_IMT: ImtWitnessFields = {
+  nullifier_root_in: '0', nullifier_root_out: '0', low_value: '0', low_next_value: '0',
+  low_next_index: 0, low_path: M_ZERO_PATH, low_index_bits: M_ZERO_BITS,
+  new_path: M_ZERO_PATH, new_index_bits: M_ZERO_BITS,
+}
+
+/** One order (taker or maker) the match consumes: its public terms, its order-tree membership path,
+ * and its consumption-nullifier IMT-insert witness. */
+export interface MatchOrderWitness {
+  asset_in: number
+  amount_in: string
+  asset_out: number
+  min_out: string
+  out_tag: string
+  cancel_tag: string
+  expiry: number
+  partial: number
+  path: string[] // 32 order-tree siblings
+  index_bits: number[] // 32 bits
+  imt: ImtWitnessFields // its consumption-nullifier IMT insert (sequential against the running root)
+}
+
+/** A minted proceeds slot the contract emits + inserts verbatim (live=0 leaves it unminted). */
+export interface MatchProceedsSlot {
+  live: number
+  asset: number
+  amount: string
+  tag: string
+}
+
+/** The taker's re-rested leftover order (live=0 => every field forced to 0). */
+export interface MatchRemainder {
+  live: number
+  asset_in: number
+  amount_in: string
+  asset_out: number
+  min_out: string
+  output_owner_tag: string
+  cancel_owner_tag: string
+  expiry: number
+  partial_allowed: number
+  order_leaf: string
+}
+
+export interface MatchInputs {
+  // private witness
+  taker: MatchOrderWitness
+  makers: MatchOrderWitness[] // 0..3 real makers; padded to 3 with null witnesses
+  // public inputs (positional; must match the contract's settle_match)
+  order_root: string
+  nullifier_root_in: string
+  nullifier_root_out: string
+  now: number
+  nf_taker: string
+  nf_makers: string[] // length 3 (0 for unused slots)
+  proceeds: MatchProceedsSlot[] // length 4: slot 0 = taker, 1..3 = makers
+  remainder: MatchRemainder
+}
+
+/** Spread one order's [..32]-sibling path + per-row IMT witness into the maker `m_*` arrays at row n.
+ * Returns the per-field values to assemble into the array-of-3 inputs. */
+function makerRow(w: MatchOrderWitness): {
+  asset_in: string; amount_in: string; asset_out: string; min_out: string
+  out_tag: string; cancel_tag: string; expiry: string; partial: string
+  path: string[]; index_bits: string[]
+  low_value: string; low_next_value: string; low_next_index: string
+  low_path: string[]; low_index_bits: string[]; new_path: string[]; new_index_bits: string[]
+} {
+  return {
+    asset_in: String(w.asset_in), amount_in: w.amount_in, asset_out: String(w.asset_out),
+    min_out: w.min_out, out_tag: w.out_tag, cancel_tag: w.cancel_tag,
+    expiry: String(w.expiry), partial: String(w.partial),
+    path: w.path, index_bits: w.index_bits.map(String),
+    low_value: w.imt.low_value, low_next_value: w.imt.low_next_value,
+    low_next_index: String(w.imt.low_next_index),
+    low_path: w.imt.low_path, low_index_bits: w.imt.low_index_bits.map(String),
+    new_path: w.imt.new_path, new_index_bits: w.imt.new_index_bits.map(String),
+  }
+}
+
+/** A null maker row (amount_in 0 => the circuit gates it off). */
+function nullMakerRow(): ReturnType<typeof makerRow> {
+  return makerRow({
+    asset_in: 0, amount_in: '0', asset_out: 0, min_out: '0', out_tag: '0', cancel_tag: '0',
+    expiry: 0, partial: 0, path: M_ZERO_PATH, index_bits: M_ZERO_BITS, imt: M_ZERO_IMT,
+  })
+}
+
+/** Prove the WS4 match circuit in-browser (35-field PI): settle a taker against up to 3 makers,
+ * minting up to 4 proceeds notes + re-resting up to 1 remainder order. The taker computes every
+ * output (proceeds tags fold the per-note match nonce) and supplies them as public inputs; the
+ * circuit re-derives and asserts them, so the contract mints only verified leaves. */
+export async function proveMatch(input: MatchInputs): Promise<ProofBundle> {
+  const compiled = await circuit('match')
+  const noir = new Noir(compiled)
+
+  const rows = [0, 1, 2].map((i) => (input.makers[i] ? makerRow(input.makers[i]) : nullMakerRow()))
+  const col = <K extends keyof ReturnType<typeof makerRow>>(k: K) => rows.map((r) => r[k])
+  const p = input.proceeds
+
+  const { witness } = await noir.execute({
+    // taker private
+    t_asset_in: String(input.taker.asset_in), t_amount_in: input.taker.amount_in,
+    t_asset_out: String(input.taker.asset_out), t_min_out: input.taker.min_out,
+    t_out_tag: input.taker.out_tag, t_cancel_tag: input.taker.cancel_tag,
+    t_expiry: String(input.taker.expiry), t_partial: String(input.taker.partial),
+    t_path: input.taker.path, t_index_bits: input.taker.index_bits.map(String),
+    t_low_value: input.taker.imt.low_value, t_low_next_value: input.taker.imt.low_next_value,
+    t_low_next_index: String(input.taker.imt.low_next_index),
+    t_low_path: input.taker.imt.low_path, t_low_index_bits: input.taker.imt.low_index_bits.map(String),
+    t_new_path: input.taker.imt.new_path, t_new_index_bits: input.taker.imt.new_index_bits.map(String),
+    // makers private (arrays of 3)
+    m_asset_in: col('asset_in'), m_amount_in: col('amount_in'), m_asset_out: col('asset_out'),
+    m_min_out: col('min_out'), m_out_tag: col('out_tag'), m_cancel_tag: col('cancel_tag'),
+    m_expiry: col('expiry'), m_partial: col('partial'),
+    m_path: col('path'), m_index_bits: col('index_bits'),
+    m_low_value: col('low_value'), m_low_next_value: col('low_next_value'),
+    m_low_next_index: col('low_next_index'),
+    m_low_path: col('low_path'), m_low_index_bits: col('low_index_bits'),
+    m_new_path: col('new_path'), m_new_index_bits: col('new_index_bits'),
+    // public
+    domain: '5',
+    order_root: input.order_root,
+    nullifier_root_in: input.nullifier_root_in,
+    nullifier_root_out: input.nullifier_root_out,
+    now: String(input.now),
+    nf_taker: input.nf_taker,
+    nf_maker0: input.nf_makers[0], nf_maker1: input.nf_makers[1], nf_maker2: input.nf_makers[2],
+    p0_live: String(p[0].live), p0_asset: String(p[0].asset), p0_amount: p[0].amount, p0_tag: p[0].tag,
+    p1_live: String(p[1].live), p1_asset: String(p[1].asset), p1_amount: p[1].amount, p1_tag: p[1].tag,
+    p2_live: String(p[2].live), p2_asset: String(p[2].asset), p2_amount: p[2].amount, p2_tag: p[2].tag,
+    p3_live: String(p[3].live), p3_asset: String(p[3].asset), p3_amount: p[3].amount, p3_tag: p[3].tag,
+    remainder_live: String(input.remainder.live),
+    rem_asset_in: String(input.remainder.asset_in), rem_amount_in: input.remainder.amount_in,
+    rem_asset_out: String(input.remainder.asset_out), rem_min_out: input.remainder.min_out,
+    rem_output_owner_tag: input.remainder.output_owner_tag,
+    rem_cancel_owner_tag: input.remainder.cancel_owner_tag,
+    rem_expiry: String(input.remainder.expiry),
+    rem_partial_allowed: String(input.remainder.partial_allowed),
+    remainder_order_leaf: input.remainder.order_leaf,
+  })
+
+  const backend = new UltraHonkBackend(compiled.bytecode)
+  const { proof, publicInputs } = await backend.generateProof(witness, { keccak: true })
+  return { proof, publicInputs: packPublicInputs(publicInputs) }
+}
+
 /** Base64-encode bytes for JSON transport to the relay. */
 export function b64(bytes: Uint8Array): string {
   let s = ''

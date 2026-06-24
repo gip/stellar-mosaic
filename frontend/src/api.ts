@@ -135,6 +135,19 @@ export interface ImtWitnessResp {
   new_index_bits: number[]
 }
 
+/** The proceeds note a `settle_match` minted for one of the wallet's orders (`GET
+ * /desks/:id/match-proceeds`). `matched` is false while the order is still resting or was cancelled.
+ * The matcher folds an unpredictable `nonce = compress(taker_leaf, slot)` into the proceeds tag, so a
+ * resting maker recovers both from this (correlated from the match's public events) to find + spend
+ * its minted leaf. */
+export interface MatchProceeds {
+  matched: boolean
+  owner_tag: string
+  nonce: string
+  asset: number
+  amount: string
+}
+
 export const api = {
   listDesks: () => req<Desk[]>('/desks'),
   getDesk: (id: string) => req<Desk>(`/desks/${id}`),
@@ -179,6 +192,10 @@ export const api = {
   // WS4 proving inputs: order-tree path (for match/cancel) + the nullifier-IMT insert witness.
   getOrderProof: (id: string, orderLeaf: string) =>
     req<OrderProof>(`/desks/${id}/order-proof?order_leaf=${orderLeaf}`),
+  // WS4 maker discovery: the proceeds note a match minted for the wallet's (possibly foreign-taker
+  // matched) order, with the unpredictable match nonce recovered from the match's public events.
+  getMatchProceeds: (id: string, orderLeaf: string) =>
+    req<MatchProceeds>(`/desks/${id}/match-proceeds?order_leaf=${orderLeaf}`),
   getImtWitness: (id: string, value: string) =>
     req<ImtWitnessResp>(`/desks/${id}/imt-witness?value=${value}`),
   // Sequential witnesses for a multi-insert spend (join: 2, match: <=4); each is against the root

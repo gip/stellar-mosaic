@@ -83,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/desks/:id/fills", get(handlers::get_fills))
         .route("/desks/:id/note-proof", get(handlers::get_note_proof))
         .route("/desks/:id/order-proof", get(handlers::get_order_proof))
+        .route("/desks/:id/match-proceeds", get(handlers::get_match_proceeds))
         .route("/desks/:id/imt-witness", get(handlers::get_imt_witness))
         .route("/desks/:id/imt-witnesses", get(handlers::get_imt_witnesses))
         .route(

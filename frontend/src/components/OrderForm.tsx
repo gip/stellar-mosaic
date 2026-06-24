@@ -145,7 +145,8 @@ export default function OrderForm({
       alive = false
     }
     // amountInRaw/minOutRaw are bigints, compared by value via Object.is in the dep array.
-  }, [desk.id, pairId, side, amountInRaw, minOutRaw])
+    // assetIn/assetOut are derived from pairId+side, so they move in lockstep with those deps.
+  }, [desk.id, pairId, side, assetIn, assetOut, amountInRaw, minOutRaw])
 
   // Human-readable preview of what placing the order will do.
   const preview = (() => {

@@ -8,6 +8,7 @@ import ShieldUnshieldPanel from '../components/ShieldUnshieldPanel'
 import CancelOrderButton from '../components/CancelOrderButton'
 import Toasts, { type ToastItem } from '../components/Toasts'
 import { notesForDesk, reconcile, type Note } from '../notes'
+import { discoverMatchedProceeds } from '../orchestrate'
 import { formatAmount } from '../amount'
 import { isRecoveryUnlocked, syncRecoveryNow } from '../recovery'
 
@@ -56,23 +57,28 @@ export default function DeskPage() {
     }
   }, [deskId])
 
-  // Reconcile local notes against on-chain state every 7s so filled proceeds appear.
+  // Every 7s: discover proceeds a (possibly foreign) taker minted for our resting orders — folding
+  // the match nonce we cannot predict — then reconcile local notes against on-chain state so both
+  // those and ordinary fills become spendable.
   useEffect(() => {
     if (!deskId) return
     let alive = true
-    const tick = () =>
-      api
-        .getNotes(deskId)
-        .then(async (r) => {
-          if (!alive) return
-          if (await reconcile(deskId, r.notes)) {
-            if (isRecoveryUnlocked(address ?? undefined)) syncRecoveryNow().catch(() => {})
-            reloadNotes()
-          }
-        })
-        .catch(() => {})
-    tick()
-    const h = setInterval(tick, 7000)
+    const tick = async () => {
+      try {
+        const discovered = await discoverMatchedProceeds(deskId, address ?? undefined)
+        const r = await api.getNotes(deskId)
+        if (!alive) return
+        const reconciled = await reconcile(deskId, r.notes)
+        if (discovered || reconciled) {
+          if (isRecoveryUnlocked(address ?? undefined)) syncRecoveryNow().catch(() => {})
+          reloadNotes()
+        }
+      } catch {
+        /* transient; retry next tick */
+      }
+    }
+    void tick()
+    const h = setInterval(() => void tick(), 7000)
     return () => {
       alive = false
       clearInterval(h)

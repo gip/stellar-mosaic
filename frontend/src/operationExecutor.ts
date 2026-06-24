@@ -4,7 +4,7 @@ import { fieldToBytes32, randomField } from './crypto'
 import { noteTag, orderTerms } from './noir'
 import { notesForDesk, removeNote, updateNote, type Note } from './notes'
 import { planAssembly } from './orderPlan'
-import { executeUnshield, runAssembly } from './orchestrate'
+import { executeUnshield, maybeTakerMatch, runAssembly } from './orchestrate'
 import { b64, proveCancel, proveLift } from './prove'
 import { stageRecoverableNote, syncRecoveryNow, updateNoteAndSync } from './recovery'
 import { buildSponsoredShield } from './soroban'
@@ -160,6 +160,9 @@ async function executeOrder(
   await updateNote(offer.id, { status: 'spent', operation_state: 'committed' })
   await updateNote(output.id, { operation_state: 'committed' })
   await syncRecoveryNow()
+  // The order now rests on-chain. If it crosses the book, settle it in-browser as the taker
+  // (best-effort; on any failure it simply remains a resting order).
+  await maybeTakerMatch(desk, { ...output, operation_state: 'committed' })
   return { output_tag: terms.output_owner_tag }
 }
 

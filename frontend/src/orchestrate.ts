@@ -2,14 +2,23 @@
 // proving + relaying a `join` and for driving a multi-join sequence:
 // each join's outputs are unindexed until they land on-chain and reconcile, and the next join needs
 // its input's membership proof, so the steps are inherently sequential and gated on confirmation.
-import type { Desk } from './api'
+import type { Desk, OrderProof } from './api'
 import { api } from './api'
 import { randomField } from './crypto'
-import { joinTerms, noteNullifier } from './noir'
-import { proveJoin, proveUnshield, b64 } from './prove'
+import { joinTerms, matchNonce, noteNullifier, orderTerms, proceedsTag } from './noir'
+import {
+  proveJoin,
+  proveMatch,
+  proveUnshield,
+  b64,
+  type MatchOrderWitness,
+  type MatchProceedsSlot,
+  type MatchRemainder,
+} from './prove'
 import { recipientField } from './soroban'
 import { updateNote, notesForDesk, reconcile, type Note } from './notes'
-import type { AssemblyStep } from './orderPlan'
+import { selectMatch, type AssemblyStep, type MatchSelection, type TakerTerms } from './orderPlan'
+import { nowMs, nowSeconds } from './time'
 import {
   stageRecoverableNotes,
   syncRecoveryNow,
@@ -282,4 +291,214 @@ export async function runAssembly(
   }
   if (!prev) throw new Error('Empty assembly plan.')
   return prev
+}
+
+// --- taker-side matching (WS4): settle a just-placed crossing order against resting makers ---
+
+const ZERO_REMAINDER: MatchRemainder = {
+  live: 0, asset_in: 0, amount_in: '0', asset_out: 0, min_out: '0',
+  output_owner_tag: '0', cancel_owner_tag: '0', expiry: 0, partial_allowed: 0, order_leaf: '0',
+}
+
+/** Poll until `order_leaf` is indexed in the order tree (its membership path is derivable), so the
+ * just-placed taker order can prove membership. Returns when ready; throws on timeout. */
+async function waitForOrderIndexed(
+  deskId: string,
+  orderLeaf: string,
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 120_000
+  const intervalMs = opts.intervalMs ?? 3_000
+  const start = Date.now()
+  for (;;) {
+    try {
+      await api.getOrderProof(deskId, orderLeaf)
+      return
+    } catch {
+      /* not indexed yet */
+    }
+    if (Date.now() - start > timeoutMs) throw new Error('Timed out waiting for order indexing.')
+    await sleep(intervalMs)
+  }
+}
+
+/**
+ * Prove + relay one `settle_match` that consumes the wallet's just-placed (taker) order against the
+ * chosen makers, then record the taker's proceeds note and any re-rested remainder order. The taker
+ * builds every output (proceeds tags fold the per-note match nonce `compress(taker_leaf, slot)`); the
+ * circuit re-derives and asserts them. `order` is the order-output note place_order created.
+ */
+async function executeTakerMatch(
+  desk: Desk,
+  order: Note,
+  plan: MatchSelection,
+  now: number,
+): Promise<void> {
+  const c = order.cancel
+  if (!c) return
+  const symOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
+
+  // Membership paths: the taker first (fixes the order_root), then each maker against the same root.
+  const takerProof = await api.getOrderProof(desk.id, c.order_leaf)
+  const orderRoot = takerProof.order_root
+  const makerProofs: OrderProof[] = []
+  for (const m of plan.makers) {
+    const mp = await api.getOrderProof(desk.id, m.order_leaf)
+    if (mp.order_root.toLowerCase() !== orderRoot.toLowerCase()) {
+      throw new Error('Order tree advanced between path fetches; resting instead.')
+    }
+    makerProofs.push(mp)
+  }
+
+  // Sequential consumption-nullifier IMT witnesses: taker, then makers (each against the prior root).
+  const nfs = [takerProof.consumption_nullifier, ...makerProofs.map((p) => p.consumption_nullifier)]
+  const wits = await api.getImtWitnesses(desk.id, nfs)
+
+  // Per-note match nonces + folded proceeds tags (slot 0 = taker, 1.. = makers).
+  const takerLeaf = c.order_leaf
+  const nonce0 = await matchNonce(takerLeaf, 0)
+  const takerTag = await proceedsTag(c.output_owner_tag, nonce0)
+  const makerTags = await Promise.all(
+    plan.makers.map(async (m, i) => proceedsTag(m.output_owner_tag, await matchNonce(takerLeaf, i + 1))),
+  )
+
+  const proceeds: MatchProceedsSlot[] = [
+    { live: 1, asset: c.asset_out, amount: plan.totalOut.toString(), tag: takerTag },
+    ...plan.makers.map((_, i) => ({
+      live: 1, asset: c.asset_in, amount: plan.paid[i].toString(), tag: makerTags[i],
+    })),
+  ]
+  while (proceeds.length < 4) proceeds.push({ live: 0, asset: 0, amount: '0', tag: '0' })
+
+  // Remainder: re-rest the taker's leftover at its exact ratio under the taker's own tags + leaf.
+  let remainder: MatchRemainder = ZERO_REMAINDER
+  let remOrderLeaf = '0'
+  if (plan.remainder > 0n) {
+    const rem = await orderTerms({
+      sk: order.sk, rho_in: order.rho, nonce_in: order.nonce ?? '0', rho_out: order.rho,
+      rho_ord: c.rho_ord, asset_in: c.asset_in, amount_in: plan.remainder.toString(),
+      asset_out: c.asset_out, min_out: plan.remMinOut.toString(), expiry: c.expiry,
+      partial_allowed: c.partial_allowed ? 1 : 0,
+    })
+    remOrderLeaf = rem.order_leaf
+    remainder = {
+      live: 1, asset_in: c.asset_in, amount_in: plan.remainder.toString(), asset_out: c.asset_out,
+      min_out: plan.remMinOut.toString(), output_owner_tag: c.output_owner_tag,
+      cancel_owner_tag: c.cancel_owner_tag, expiry: c.expiry,
+      partial_allowed: c.partial_allowed ? 1 : 0, order_leaf: remOrderLeaf,
+    }
+  }
+
+  const nfMakers = makerProofs.map((p) => p.consumption_nullifier)
+  while (nfMakers.length < 3) nfMakers.push('0')
+
+  const takerW: MatchOrderWitness = {
+    asset_in: c.asset_in, amount_in: c.amount_in, asset_out: c.asset_out, min_out: c.min_out,
+    out_tag: c.output_owner_tag, cancel_tag: c.cancel_owner_tag, expiry: c.expiry,
+    partial: c.partial_allowed ? 1 : 0, path: takerProof.siblings,
+    index_bits: takerProof.index_bits, imt: wits[0],
+  }
+  const makersW: MatchOrderWitness[] = plan.makers.map((m, i) => ({
+    asset_in: m.asset_in, amount_in: m.amount_in, asset_out: m.asset_out, min_out: m.min_out,
+    out_tag: m.output_owner_tag, cancel_tag: m.cancel_owner_tag, expiry: m.expiry,
+    partial: m.partial_allowed ? 1 : 0, path: makerProofs[i].siblings,
+    index_bits: makerProofs[i].index_bits, imt: wits[i + 1],
+  }))
+
+  const bundle = await proveMatch({
+    taker: takerW, makers: makersW, order_root: orderRoot,
+    nullifier_root_in: wits[0].nullifier_root_in,
+    nullifier_root_out: wits[wits.length - 1].nullifier_root_out,
+    now, nf_taker: takerProof.consumption_nullifier, nf_makers: nfMakers, proceeds, remainder,
+  })
+
+  await api.relayMatch(desk.id, b64(bundle.proof), b64(bundle.publicInputs))
+
+  // The placed order was consumed as the taker. We deliberately do NOT mint the taker's slot-0
+  // proceeds note here: `discoverMatchedProceeds` recovers it uniformly (same path as a maker fill)
+  // from the match's public events, keyed off this order's own `order_leaf`. That keeps exactly one
+  // local note per consumed order (no duplicate vs. the discovery poll) and is crash-safe — a reload
+  // after the relay still recovers the proceeds. We only stage the re-rested remainder, which is a
+  // brand-new order the wallet alone knows the secrets for.
+  if (plan.remainder > 0n) {
+    await stageRecoverableNotes([
+      {
+        id: crypto.randomUUID(), deskId: desk.id, role: 'order-output', asset_id: c.asset_out,
+        symbol: symOf(c.asset_out), amount: plan.remMinOut.toString(), sk: order.sk, rho: order.rho,
+        owner_tag: c.output_owner_tag, status: 'active', indexed: false, createdAt: nowMs(),
+        cancel: {
+          rho_ord: c.rho_ord, order_leaf: remOrderLeaf, cancel_owner_tag: c.cancel_owner_tag,
+          pairId: c.pairId, side: c.side, asset_in: c.asset_in, symbol_in: c.symbol_in,
+          amount_in: plan.remainder.toString(), asset_out: c.asset_out,
+          min_out: plan.remMinOut.toString(), output_owner_tag: c.output_owner_tag,
+          expiry: c.expiry, partial_allowed: c.partial_allowed,
+        },
+      },
+    ])
+    await syncRecoveryNow()
+  }
+}
+
+/**
+ * Opportunistically settle a just-placed order in-browser if it crosses the resting book (the taker
+ * path). Best-effort: any failure leaves the order resting on-chain (a valid outcome), so this never
+ * throws — place_order has already succeeded by the time it runs.
+ */
+export async function maybeTakerMatch(desk: Desk, order: Note): Promise<void> {
+  const c = order.cancel
+  if (!c) return
+  try {
+    const taker: TakerTerms = {
+      asset_in: c.asset_in, asset_out: c.asset_out, amount_in: BigInt(c.amount_in),
+      min_out: BigInt(c.min_out), partial: c.partial_allowed,
+    }
+    // Backdate `now` slightly so it stays <= ledger time (the contract bounds now to recent ledger
+    // time within a 300s skew); the circuit also asserts every matched order's expiry >= now.
+    const now = nowSeconds() - 30
+    const probe = await api.getBook(desk.id)
+    if (!selectMatch(taker, probe.orders, now)) return // nothing crosses — just rest
+    await waitForOrderIndexed(desk.id, c.order_leaf)
+    const book = await api.getBook(desk.id)
+    const plan = selectMatch(taker, book.orders, now)
+    if (!plan) return
+    await executeTakerMatch(desk, order, plan, now)
+  } catch (e) {
+    // Leave the order resting; a later (foreign) taker can still cross it.
+    console.warn('taker auto-match skipped:', e instanceof Error ? e.message : e)
+  }
+}
+
+/**
+ * Discover proceeds a (possibly foreign) taker minted for the wallet's resting orders. A maker cannot
+ * predict its proceeds tag — the matcher folds `nonce = compress(taker_leaf, slot)` it never sees —
+ * so we ask the backend to recover both `nonce` and the folded `owner_tag` by correlating the match's
+ * public events. A matched order-output note is rewritten into a spendable asset note (the on-chain
+ * folded tag + nonce); the regular `reconcile` then stamps its leaf once `getNotes` sees it.
+ * Returns true if anything changed. Best-effort: per-order failures are swallowed.
+ */
+export async function discoverMatchedProceeds(
+  deskId: string,
+  walletAddress?: string,
+): Promise<boolean> {
+  const notes = await notesForDesk(deskId, walletAddress)
+  const resting = notes.filter((n) => n.status === 'active' && n.role === 'order-output' && n.cancel)
+  let changed = false
+  for (const n of resting) {
+    try {
+      const r = await api.getMatchProceeds(deskId, n.cancel!.order_leaf)
+      if (!r.matched) continue
+      await updateNote(n.id, {
+        role: 'asset',
+        nonce: r.nonce,
+        owner_tag: r.owner_tag,
+        amount: r.amount,
+        indexed: false,
+        cancel: undefined,
+      })
+      changed = true
+    } catch {
+      /* still resting, cancelled, or transient — retry next tick */
+    }
+  }
+  return changed
 }
