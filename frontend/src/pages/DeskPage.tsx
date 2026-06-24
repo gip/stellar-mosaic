@@ -10,7 +10,7 @@ import Toasts, { type ToastItem } from '../components/Toasts'
 import { notesForDesk, reconcile, type Note } from '../notes'
 import { formatAmount } from '../amount'
 import { isRecoveryUnlocked, syncRecoveryNow } from '../recovery'
-import { ordersFor } from '../bookIndexer'
+import { ordersFor, type BookIndexSnapshot } from '../bookIndexer'
 import { useBookIndex } from '../useBookIndex'
 import { setSubmissionMode, submissionMode } from '../directTransaction'
 
@@ -259,13 +259,25 @@ export default function DeskPage() {
           {active.length > 0 && (
             <details>
               <summary>Active notes ({active.length})</summary>
-              <NotesTable notes={active} dec={dec} desk={verifiedDesk} onDone={reloadNotes} />
+              <NotesTable
+                notes={active}
+                dec={dec}
+                desk={verifiedDesk}
+                bookIndex={bookIndex}
+                onDone={reloadNotes}
+              />
             </details>
           )}
           {history.length > 0 && (
             <details>
               <summary className="muted">Spent &amp; cancelled notes ({history.length})</summary>
-              <NotesTable notes={history} dec={dec} desk={verifiedDesk} onDone={reloadNotes} />
+              <NotesTable
+                notes={history}
+                dec={dec}
+                desk={verifiedDesk}
+                bookIndex={bookIndex}
+                onDone={reloadNotes}
+              />
             </details>
           )}
         </>
@@ -326,11 +338,13 @@ function NotesTable({
   notes,
   dec,
   desk,
+  bookIndex,
   onDone,
 }: {
   notes: Note[]
   dec: (id: number) => number
   desk: Desk
+  bookIndex: BookIndexSnapshot
   onDone: () => void
 }) {
   return (
@@ -355,7 +369,7 @@ function NotesTable({
             <td>{formatAmount(n.amount, dec(n.asset_id))}</td>
             <td className="mono">{n.owner_tag.slice(0, 14)}…</td>
             <td className={n.status === 'active' ? 'ok' : 'muted'}>
-              {n.status === 'active' && !n.indexed ? 'active · pending index' : n.status}
+              {noteDisplayStatus(n, bookIndex)}
             </td>
             <td>
               {n.status === 'active' && n.cancel && (
@@ -367,6 +381,16 @@ function NotesTable({
       </tbody>
     </table>
   )
+}
+
+function noteDisplayStatus(n: Note, bookIndex: BookIndexSnapshot): string {
+  if (n.status !== 'active' || n.indexed) return n.status
+  if (!n.cancel) return 'active · pending index'
+  if (bookIndex.status !== 'synced') return 'order submitted · syncing book'
+  const resting = bookIndex.orders.some(
+    (order) => normTag(order.order_leaf) === normTag(n.cancel!.order_leaf),
+  )
+  return resting ? 'resting · awaiting fill' : 'active · pending proceeds'
 }
 
 /** User-facing note kind. Order notes retain the side used when they were submitted. */
