@@ -27,7 +27,7 @@ pub struct Config {
     pub base_rpc: Option<String>,
     /// `cast` (foundry) binary, used to read the Base chain head + finalized block.
     pub cast_bin: String,
-    /// Directory of the `bridge-prover` workspace (the worker shells `cargo run -p host -- --prove`).
+    /// Directory of the `bridge-prover` workspace (must contain the `run-host` launcher).
     pub prover_dir: PathBuf,
 }
 

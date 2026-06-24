@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# Build the release bridge host only when its actual build inputs changed, then execute it directly.
+# This avoids `cargo run` re-running bridge-methods/build.rs and relinking the fat-LTO host on every
+# invocation (risc0_build::embed_methods intentionally rewrites methods.rs every time Cargo runs).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+CACHE_VERSION="run-host-v1"
+CARGO_BIN="${CARGO:-cargo}"
+FORCE=0
+
+usage() {
+  echo "usage: $0 [--force-rebuild] -- <host arguments>" >&2
+}
+
+if [ "${1:-}" = "--force-rebuild" ]; then
+  FORCE=1
+  shift
+fi
+if [ "${1:-}" != "--" ]; then
+  usage
+  exit 2
+fi
+shift
+
+# Cargo interprets a relative CARGO_TARGET_DIR from its working directory. Normalize it because the
+# launcher can itself be called from anywhere.
+case "${CARGO_TARGET_DIR:-$ROOT/target}" in
+  /*) TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}" ;;
+  *) TARGET_DIR="$ROOT/${CARGO_TARGET_DIR}" ;;
+esac
+export CARGO_TARGET_DIR="$TARGET_DIR"
+
+BINARY="$TARGET_DIR/release/host"
+STAMP="$TARGET_DIR/release/.host-build-fingerprint"
+LOCK_DIR="$TARGET_DIR/release/.host-build-lock"
+LOCK_HELD=0
+
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_file() { sha256sum "$1" | awk '{print $1}'; }
+  sha256_stdin() { sha256sum | awk '{print $1}'; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_file() { shasum -a 256 "$1" | awk '{print $1}'; }
+  sha256_stdin() { shasum -a 256 | awk '{print $1}'; }
+else
+  echo "run-host: need sha256sum or shasum" >&2
+  exit 1
+fi
+
+build_input_files() {
+  local dir parent cargo_home
+  for file in \
+    "$ROOT/run-host" \
+    "$ROOT/Cargo.toml" \
+    "$ROOT/Cargo.lock"; do
+    [ ! -f "$file" ] || printf '%s\n' "$file"
+  done
+
+  # Cargo and rustup discover configuration while walking from the workspace to the filesystem
+  # root. Include every candidate, plus a custom CARGO_HOME if it lives elsewhere.
+  dir="$ROOT"
+  while :; do
+    for file in "$dir/.cargo/config" "$dir/.cargo/config.toml" \
+      "$dir/rust-toolchain" "$dir/rust-toolchain.toml"; do
+      [ ! -f "$file" ] || printf '%s\n' "$file"
+    done
+    parent="$(dirname "$dir")"
+    [ "$parent" != "$dir" ] || break
+    dir="$parent"
+  done
+  cargo_home="${CARGO_HOME:-${HOME:-}/.cargo}"
+  for file in "$cargo_home/config" "$cargo_home/config.toml"; do
+    [ ! -f "$file" ] || printf '%s\n' "$file"
+  done
+
+  find "$ROOT/host" "$ROOT/methods" -type d -name target -prune -o -type f \
+    \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' -o -name 'rust-toolchain' \
+       -o -name 'rust-toolchain.toml' -o -name 'config' -o -name 'config.toml' \) \
+    -print
+}
+
+tool_signature() {
+  local label="$1"
+  shift
+  local output
+  if output=$("$@" 2>&1); then
+    printf 'tool:%s\n%s\n' "$label" "$output"
+  else
+    printf 'tool:%s:<unavailable>\n' "$label"
+  fi
+}
+
+build_environment() {
+  local name value
+  while IFS='=' read -r name value; do
+    case "$name" in
+      RUSTFLAGS|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTUP_TOOLCHAIN|\
+      CARGO_ENCODED_RUSTFLAGS|CARGO_INCREMENTAL|\
+      CC|CXX|CFLAGS|CXXFLAGS|LDFLAGS|MACOSX_DEPLOYMENT_TARGET|SDKROOT|\
+      RISC0_BUILD_DEBUG|RISC0_BUILD_LOCKED|RISC0_RUST_SRC|RISC0_SKIP_BUILD|RISC0_DOCKER_CONTAINER_TAG|\
+      RISC0_SKIP_BUILD_KERNELS|RISC0_CUDART_LINKAGE|RISC0_KECCAK_PO2|\
+      CARGO_BUILD_*|CARGO_PROFILE_RELEASE_*|CARGO_TARGET_*)
+        printf 'env:%s=%s\n' "$name" "$value"
+        ;;
+    esac
+  done < <(env | LC_ALL=C sort)
+}
+
+fingerprint() {
+  {
+    printf 'cache:%s\n' "$CACHE_VERSION"
+    local file rel
+    while IFS= read -r file; do
+      rel="${file#"$ROOT"/}"
+      printf 'file:%s:%s\n' "$rel" "$(sha256_file "$file")"
+    done < <(build_input_files | LC_ALL=C sort -u)
+    tool_signature cargo "$CARGO_BIN" -V
+    tool_signature rustc rustc -Vv
+    tool_signature rzup rzup show
+    build_environment
+  } | sha256_stdin
+}
+
+cache_matches() {
+  local wanted="$1" cached
+  [ -x "$BINARY" ] || return 1
+  [ -f "$STAMP" ] || return 1
+  IFS= read -r cached < "$STAMP" || return 1
+  [ "$cached" = "$wanted" ]
+}
+
+release_lock() {
+  local owner=""
+  [ "$LOCK_HELD" -eq 1 ] || return 0
+  [ ! -f "$LOCK_DIR/owner" ] || IFS= read -r owner < "$LOCK_DIR/owner" || true
+  if [ "$owner" = "$$" ]; then
+    rm -f "$LOCK_DIR/owner"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+  LOCK_HELD=0
+}
+
+acquire_lock() {
+  local owner="" empty_attempts=0
+  mkdir -p "$(dirname "$LOCK_DIR")"
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    if [ -f "$LOCK_DIR/owner" ]; then
+      IFS= read -r owner < "$LOCK_DIR/owner" || owner=""
+      if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+        rm -f "$LOCK_DIR/owner"
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+      fi
+      empty_attempts=0
+    else
+      # A creator normally writes owner immediately. Only reap an empty directory after waiting,
+      # which also recovers the tiny crash window between mkdir and writing owner.
+      empty_attempts=$((empty_attempts + 1))
+      if [ "$empty_attempts" -ge 100 ]; then
+        rmdir "$LOCK_DIR" 2>/dev/null || true
+        empty_attempts=0
+      fi
+    fi
+    sleep 0.1
+  done
+  printf '%s\n' "$$" > "$LOCK_DIR/owner"
+  LOCK_HELD=1
+}
+
+cd "$ROOT"
+wanted_fingerprint="$(fingerprint)"
+
+if [ "$FORCE" -eq 0 ] && cache_matches "$wanted_fingerprint"; then
+  echo "run-host: cache hit; executing $BINARY" >&2
+  exec "$BINARY" "$@"
+fi
+
+trap release_lock EXIT HUP INT TERM
+acquire_lock
+
+# Another launcher may have completed the build while this process waited for the lock.
+wanted_fingerprint="$(fingerprint)"
+if [ "$FORCE" -eq 0 ] && cache_matches "$wanted_fingerprint"; then
+  release_lock
+  trap - EXIT HUP INT TERM
+  echo "run-host: cache hit after waiting; executing $BINARY" >&2
+  exec "$BINARY" "$@"
+fi
+
+echo "run-host: building release host" >&2
+"$CARGO_BIN" build --release -p host
+[ -x "$BINARY" ] || { echo "run-host: Cargo succeeded but $BINARY is missing" >&2; exit 1; }
+
+# Recompute after Cargo succeeds in case it updated Cargo.lock. Publish the stamp atomically and
+# never stamp a failed build, so a stale binary cannot be selected after an error.
+built_fingerprint="$(fingerprint)"
+stamp_tmp="$STAMP.tmp.$$"
+printf '%s\n' "$built_fingerprint" > "$stamp_tmp"
+mv "$stamp_tmp" "$STAMP"
+
+release_lock
+trap - EXIT HUP INT TERM
+exec "$BINARY" "$@"

@@ -8,16 +8,16 @@
 //!
 //! Execute only:
 //!   RPC_URL=<base sepolia rpc> RUST_LOG=info \
-//!     cargo run --release -- --bridge 0x<MosaicBridge> --deposit-id 1 --block <N>
+//!     ./run-host -- --bridge 0x<MosaicBridge> --deposit-id 1 --block <N>
 //!
 //! Prove (Groth16) and write out/{seal.hex,journal.hex,seal.bin,journal.bin}:
-//!   RPC_URL=... RUST_LOG=info cargo run --release -- --bridge 0x.. --deposit-id 1 --block <N> --prove
+//!   RPC_URL=... RUST_LOG=info ./run-host -- --bridge 0x.. --deposit-id 1 --block <N> --prove
 //!
 //! Local Groth16 proving needs the RISC Zero prover stack (`r0vm`/Docker, or `RISC0_PROVER=bonsai`).
 //! The emitted `seal` is what the Boundless marketplace returns and what the Nethermind verifier
 //! router (and thus `shield_from_base`) accepts — see `bridge-prover/README.md`.
 
-use std::{fs, path::PathBuf};
+use std::{fs, future::Future, path::PathBuf, time::Duration};
 
 use alloy_primitives::{hex, Address};
 use alloy_sol_types::{sol, SolValue};
@@ -29,8 +29,8 @@ use risc0_op_steel::{
     optimism::{OpEvmEnv, BASE_SEPOLIA_CHAIN_SPEC},
     Commitment, Contract,
 };
-use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts};
-use tokio::task;
+use risc0_zkvm::{default_executor, default_prover, sha::Digest, ExecutorEnv, ProverOpts};
+use tokio::{task, time::sleep};
 use tracing_subscriber::EnvFilter;
 use url::Url;
 
@@ -43,6 +43,9 @@ sol! {
             returns (uint32 assetId, uint256 amount, bytes32 ownerTag);
     }
 }
+
+const RPC_INPUT_ATTEMPTS: usize = 5;
+const RPC_INPUT_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 sol! {
     /// ABI-encodable journal. MUST match the guest and the Stellar parser (WS4).
@@ -59,17 +62,31 @@ sol! {
 #[derive(Parser, Debug)]
 #[command(about, long_about = None)]
 struct Args {
+    /// Print the embedded guest image ID and exit without contacting an RPC endpoint.
+    #[arg(long)]
+    print_image_id: bool,
+
     /// URL of the Base Sepolia RPC endpoint.
-    #[arg(short, long, env = "RPC_URL")]
-    rpc_url: Url,
+    #[arg(
+        short,
+        long,
+        env = "RPC_URL",
+        required_unless_present = "print_image_id"
+    )]
+    rpc_url: Option<Url>,
 
     /// Deployed MosaicBridge contract address.
-    #[arg(short, long, env = "BRIDGE_ADDRESS")]
-    bridge: Address,
+    #[arg(
+        short,
+        long,
+        env = "BRIDGE_ADDRESS",
+        required_unless_present = "print_image_id"
+    )]
+    bridge: Option<Address>,
 
     /// The deposit id to prove.
-    #[arg(short, long)]
-    deposit_id: u64,
+    #[arg(short, long, required_unless_present = "print_image_id")]
+    deposit_id: Option<u64>,
 
     /// Produce a Groth16 receipt and write the router-ready seal + journal (otherwise execute only).
     #[arg(long)]
@@ -85,6 +102,54 @@ struct Args {
     block: Option<u64>,
 }
 
+fn guest_image_id_hex() -> String {
+    hex::encode(Digest::from(BRIDGE_GUEST_ID).as_bytes())
+}
+
+fn is_block_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string().trim().to_ascii_lowercase();
+        message == "block not found"
+            || message
+                .strip_prefix("block ")
+                .and_then(|rest| rest.strip_suffix(" not found"))
+                .is_some_and(|block_id| !block_id.trim().is_empty())
+    })
+}
+
+async fn retry_block_not_found<T, F, Fut>(
+    target_block: Option<u64>,
+    attempts: usize,
+    delay: Duration,
+    mut operation: F,
+) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    assert!(attempts > 0, "retry attempts must be non-zero");
+
+    for attempt in 1..=attempts {
+        match operation().await {
+            Err(error) if attempt < attempts && is_block_not_found(&error) => {
+                let target = target_block
+                    .map(|block| block.to_string())
+                    .unwrap_or_else(|| "finalized".to_string());
+                log::warn!(
+                    "Base RPC has not exposed block {target} yet ({error:#}); retrying in {}s \
+                     (attempt {}/{attempts})",
+                    delay.as_secs(),
+                    attempt + 1,
+                );
+                sleep(delay).await;
+            }
+            result => return result,
+        }
+    }
+
+    unreachable!("non-zero retry loop must return")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -92,34 +157,69 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
 
-    // OP EVM environment from the RPC, optionally pinned to a block.
-    let builder = OpEvmEnv::builder().rpc(args.rpc_url).chain_spec(&BASE_SEPOLIA_CHAIN_SPEC);
-    let builder = match args.block {
-        Some(b) => builder.block_number(b),
-        // Default to the latest finalized block so the minted note can't be undone by a reorg.
-        None => builder.block_number_or_tag(BlockNumberOrTag::Finalized),
-    };
-    let mut env = builder.build().await?;
+    if args.print_image_id {
+        println!("{}", guest_image_id_hex());
+        return Ok(());
+    }
 
-    // Read the deposit record from contract state (proven against the block's state root).
-    let call = IMosaicBridge::depositsCall { depositId: args.deposit_id };
-    let returns = Contract::preflight(args.bridge, &mut env)
-        .call_builder(&call)
-        .call()
-        .await?;
-    log::info!(
-        "Deposit {} on bridge {}: assetId={} amount={} ownerTag={}",
-        args.deposit_id,
-        args.bridge,
-        returns.assetId,
-        returns.amount,
-        returns.ownerTag,
-    );
-    anyhow::ensure!(returns.assetId != 0, "no deposit recorded for id {}", args.deposit_id);
+    // Clap requires these unless --print-image-id was selected. Keep the checks explicit so this
+    // invariant remains clear if the CLI shape changes later.
+    let rpc_url = args.rpc_url.context("--rpc-url is required")?;
+    let bridge = args.bridge.context("--bridge is required")?;
+    let deposit_id = args.deposit_id.context("--deposit-id is required")?;
+    log::info!("Guest image ID: {}", guest_image_id_hex());
 
-    let evm_input = env.into_input().await?;
-    let bridge_bytes: [u8; 20] = args.bridge.into();
-    let deposit_id = args.deposit_id;
+    // Build the complete Steel input before starting the expensive prover. Some load-balanced RPCs
+    // briefly return a receipt before every backend can serve its block. Retry only Steel's precise
+    // block-not-found errors; malformed requests, unsupported eth_getProof, and prover errors remain
+    // immediately terminal.
+    let evm_input = retry_block_not_found(
+        args.block,
+        RPC_INPUT_ATTEMPTS,
+        RPC_INPUT_RETRY_DELAY,
+        || {
+            let rpc_url = rpc_url.clone();
+            async move {
+                // OP EVM environment from the RPC, optionally pinned to a block.
+                let builder = OpEvmEnv::builder()
+                    .rpc(rpc_url)
+                    .chain_spec(&BASE_SEPOLIA_CHAIN_SPEC);
+                let builder = match args.block {
+                    Some(b) => builder.block_number(b),
+                    // Default to the latest finalized block so the minted note can't be undone by a
+                    // reorg.
+                    None => builder.block_number_or_tag(BlockNumberOrTag::Finalized),
+                };
+                let mut env = builder.build().await?;
+
+                // Read the deposit record from contract state (proven against the block's state
+                // root).
+                let call = IMosaicBridge::depositsCall {
+                    depositId: deposit_id,
+                };
+                let returns = Contract::preflight(bridge, &mut env)
+                    .call_builder(&call)
+                    .call()
+                    .await?;
+                log::info!(
+                    "Deposit {} on bridge {}: assetId={} amount={} ownerTag={}",
+                    deposit_id,
+                    bridge,
+                    returns.assetId,
+                    returns.amount,
+                    returns.ownerTag,
+                );
+                anyhow::ensure!(
+                    returns.assetId != 0,
+                    "no deposit recorded for id {deposit_id}"
+                );
+
+                env.into_input().await
+            }
+        },
+    )
+    .await?;
+    let bridge_bytes: [u8; 20] = bridge.into();
     let do_prove = args.prove;
 
     // Execute (journal only) or prove (Groth16 receipt -> router-ready seal).
@@ -142,8 +242,8 @@ async fn main() -> Result<()> {
             receipt
                 .verify(BRIDGE_GUEST_ID)
                 .context("receipt failed local verification")?;
-            let seal = risc0_ethereum_contracts::encode_seal(&receipt)
-                .context("failed to encode seal")?;
+            let seal =
+                risc0_ethereum_contracts::encode_seal(&receipt).context("failed to encode seal")?;
             Ok::<_, anyhow::Error>((receipt.journal.bytes, Some(seal)))
         } else {
             let info = default_executor()
@@ -176,7 +276,10 @@ async fn main() -> Result<()> {
         fs::create_dir_all(&args.out_dir).context("failed to create out dir")?;
         fs::write(args.out_dir.join("journal.bin"), &journal_bytes)?;
         fs::write(args.out_dir.join("seal.bin"), &seal)?;
-        fs::write(args.out_dir.join("journal.hex"), hex::encode(&journal_bytes))?;
+        fs::write(
+            args.out_dir.join("journal.hex"),
+            hex::encode(&journal_bytes),
+        )?;
         fs::write(args.out_dir.join("seal.hex"), hex::encode(&seal))?;
         log::info!(
             "Wrote {}/{{seal,journal}}.{{bin,hex}} ({} journal bytes, {} seal bytes)",
@@ -193,12 +296,96 @@ async fn main() -> Result<()> {
 mod fixture {
     //! Emits ground-truth values for the Stellar WS4 config: the guest image id and the Base Sepolia
     //! config digest. Run: `cargo test -p host --release -- --nocapture print_journal_fixture`
-    use super::{Journal, BASE_SEPOLIA_CHAIN_SPEC};
+    use super::{
+        guest_image_id_hex, is_block_not_found, retry_block_not_found, Journal,
+        BASE_SEPOLIA_CHAIN_SPEC,
+    };
     use alloy_primitives::{hex, Address, B256, U256};
     use alloy_sol_types::SolValue;
-    use bridge_methods::BRIDGE_GUEST_ID;
+    use anyhow::anyhow;
     use risc0_op_steel::Commitment;
-    use risc0_zkvm::sha::Digest;
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
+    #[test]
+    fn recognizes_wrapped_and_unwrapped_block_not_found_errors() {
+        let unwrapped = anyhow!("block 0x293cd92 not found");
+        let wrapped = anyhow!("block not found").context("eth_getBlock1 failed");
+
+        assert!(is_block_not_found(&unwrapped));
+        assert!(is_block_not_found(&wrapped));
+        assert!(!is_block_not_found(&anyhow!("request timed out")));
+        assert!(!is_block_not_found(&anyhow!(
+            "no deposit recorded for id 0"
+        )));
+    }
+
+    #[tokio::test]
+    async fn retries_block_not_found_until_success() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let operation_calls = Arc::clone(&calls);
+
+        let value = retry_block_not_found(Some(42), 5, Duration::ZERO, move || {
+            let attempt = operation_calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt < 2 {
+                    Err(anyhow!("block 0x2a not found"))
+                } else {
+                    Ok(7)
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(value, 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn stops_after_bounded_block_not_found_attempts() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let operation_calls = Arc::clone(&calls);
+
+        let error = retry_block_not_found(Some(42), 5, Duration::ZERO, move || {
+            operation_calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(anyhow!("block 0x2a not found")) }
+        })
+        .await
+        .unwrap_err();
+
+        assert!(is_block_not_found(&error));
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_unrelated_errors() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let operation_calls = Arc::clone(&calls);
+
+        let error = retry_block_not_found(Some(42), 5, Duration::ZERO, move || {
+            operation_calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(anyhow!("eth_getProof is unsupported")) }
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "eth_getProof is unsupported");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn committed_image_id_matches_embedded_guest() {
+        assert_eq!(
+            include_str!("../../image-id.hex").trim(),
+            guest_image_id_hex()
+        );
+    }
 
     #[test]
     fn print_journal_fixture() {
@@ -218,7 +405,10 @@ mod fixture {
         let enc = journal.abi_encode();
         println!("JOURNAL_LEN={}", enc.len());
         println!("JOURNAL_HEX={}", hex::encode(&enc));
-        println!("IMAGE_ID_HEX={}", hex::encode(Digest::from(BRIDGE_GUEST_ID).as_bytes()));
-        println!("CONFIG_DIGEST_HEX={}", hex::encode(BASE_SEPOLIA_CHAIN_SPEC.digest()));
+        println!("IMAGE_ID_HEX={}", guest_image_id_hex());
+        println!(
+            "CONFIG_DIGEST_HEX={}",
+            hex::encode(BASE_SEPOLIA_CHAIN_SPEC.digest())
+        );
     }
 }
