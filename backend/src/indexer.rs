@@ -218,6 +218,49 @@ fn fetch_events(
 }
 
 fn parse_event(v: &serde_json::Value) -> Option<TreeEvent> {
+    if let Some(event) = parse_decoded_event(v) {
+        return Some(event);
+    }
+    parse_xdr_event(v)
+}
+
+/// Stellar CLI 26 emits human-readable event JSON (`event_name` + named `params`). Keep accepting
+/// the older raw XDR shape too because persisted databases and alternate RPC tooling may contain
+/// either representation.
+fn parse_decoded_event(v: &serde_json::Value) -> Option<TreeEvent> {
+    let name = v.get("event_name")?.as_str()?;
+    let params = v.get("params")?;
+    let u32_param = |key: &str| u32::try_from(params.get(key)?.as_u64()?).ok();
+    let i128_param = |key: &str| params.get(key)?.as_str()?.parse::<i128>().ok();
+    let tag_param = |key: &str| parse_hex32(params.get(key)?.as_str()?).ok();
+    match name {
+        "Shielded" => Some(TreeEvent::Insert {
+            asset: u32_param("asset_id")?,
+            amount: i128_param("amount")?,
+            tag: tag_param("owner_tag")?,
+        }),
+        "NoteInserted" => Some(TreeEvent::Insert {
+            asset: u32_param("asset")?,
+            amount: i128_param("amount")?,
+            tag: tag_param("owner_tag")?,
+        }),
+        "Settled" => Some(TreeEvent::Settled([
+            (
+                u32_param("a_asset_out")?,
+                i128_param("b_amount_in")?,
+                tag_param("a_output_owner_tag")?,
+            ),
+            (
+                u32_param("b_asset_out")?,
+                i128_param("a_amount_in")?,
+                tag_param("b_output_owner_tag")?,
+            ),
+        ])),
+        _ => None,
+    }
+}
+
+fn parse_xdr_event(v: &serde_json::Value) -> Option<TreeEvent> {
     let topic_b64 = v.get("topic")?.as_array()?.first()?.as_str()?;
     let symbol = decode_symbol(topic_b64)?;
     let value_b64 = v.get("value")?.as_str()?;
@@ -250,6 +293,20 @@ fn parse_event(v: &serde_json::Value) -> Option<TreeEvent> {
 /// any other event. Value layout: `(u32 asset_in, i128 amount_in, u32 asset_out, i128 amount_out,
 /// bytes32 output_owner_tag)`.
 fn parse_fill(v: &serde_json::Value) -> Option<FillInfo> {
+    if v.get("event_name").and_then(|name| name.as_str()) == Some("Filled") {
+        let params = v.get("params")?;
+        let tag = parse_hex32(params.get("output_owner_tag")?.as_str()?).ok()?;
+        return Some(FillInfo {
+            id: v.get("id")?.as_str()?.to_string(),
+            ledger: v.get("ledger").and_then(|x| x.as_u64()).unwrap_or(0),
+            tx_hash: event_tx_hash(v),
+            asset_in: u32::try_from(params.get("asset_in")?.as_u64()?).ok()?,
+            amount_in: params.get("amount_in")?.as_str()?.to_string(),
+            asset_out: u32::try_from(params.get("asset_out")?.as_u64()?).ok()?,
+            amount_out: params.get("amount_out")?.as_str()?.to_string(),
+            owner_tag: fmt_hex32(&tag),
+        });
+    }
     let topic_b64 = v.get("topic")?.as_array()?.first()?.as_str()?;
     if decode_symbol(topic_b64)? != "filled" {
         return None;
@@ -270,17 +327,21 @@ fn parse_fill(v: &serde_json::Value) -> Option<FillInfo> {
     Some(FillInfo {
         id: v.get("id")?.as_str()?.to_string(),
         ledger: v.get("ledger").and_then(|x| x.as_u64()).unwrap_or(0),
-        tx_hash: v
-            .get("txHash")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string(),
+        tx_hash: event_tx_hash(v),
         asset_in,
         amount_in: amount_in.to_string(),
         asset_out,
         amount_out: amount_out.to_string(),
         owner_tag: fmt_hex32(&tag),
     })
+}
+
+fn event_tx_hash(v: &serde_json::Value) -> String {
+    v.get("txHash")
+        .or_else(|| v.get("tx_hash"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Decode a base64 ScVal::Symbol into its string.
@@ -382,4 +443,80 @@ fn u256_hex(u: &U256) -> String {
         }
     }
     fmt_hex32(&out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fills_from_raw, note_proof_from_raw, notes_from_raw};
+    use serde_json::json;
+
+    const TAG_A: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const TAG_B: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const TAG_C: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    const TAG_D: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+
+    #[test]
+    fn decoded_cli_events_rebuild_notes_and_membership_paths() {
+        let raw = vec![
+            json!({
+                "event_name": "Shielded",
+                "id": "1-0",
+                "ledger": 10,
+                "params": { "asset_id": 2, "amount": "10000000", "owner_tag": TAG_A }
+            }),
+            json!({
+                "event_name": "NoteInserted",
+                "id": "2-0",
+                "ledger": 11,
+                "params": { "asset": 2, "amount": "5000000", "owner_tag": TAG_B }
+            }),
+            json!({
+                "event_name": "Settled",
+                "id": "3-0",
+                "ledger": 12,
+                "params": {
+                    "a_asset_out": 1,
+                    "b_amount_in": "7",
+                    "a_output_owner_tag": TAG_C,
+                    "b_asset_out": 2,
+                    "a_amount_in": "9",
+                    "b_output_owner_tag": TAG_D
+                }
+            }),
+        ];
+        let notes = notes_from_raw(&raw).unwrap();
+        assert_eq!(notes.len(), 4);
+        assert_eq!(notes[0].asset, 2);
+        assert_eq!(notes[0].amount, "10000000");
+        assert_eq!(notes[3].asset, 2);
+        assert_eq!(notes[3].amount, "9");
+
+        let proof = note_proof_from_raw(&raw, TAG_A).unwrap();
+        assert_eq!(proof.leaf_index, 0);
+        assert_eq!(proof.siblings.len(), 32);
+        assert_eq!(proof.index_bits.len(), 32);
+    }
+
+    #[test]
+    fn decoded_cli_fill_is_exposed_to_clients() {
+        let raw = vec![json!({
+            "event_name": "Filled",
+            "id": "4-0",
+            "ledger": 13,
+            "tx_hash": "abc123",
+            "params": {
+                "asset_in": 1,
+                "amount_in": "10",
+                "asset_out": 2,
+                "amount_out": "20",
+                "output_owner_tag": TAG_A
+            }
+        })];
+        let fills = fills_from_raw(&raw);
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].tx_hash, "abc123");
+        assert_eq!(fills[0].amount_in, "10");
+        assert_eq!(fills[0].amount_out, "20");
+        assert_eq!(fills[0].owner_tag, format!("0x{TAG_A}"));
+    }
 }
