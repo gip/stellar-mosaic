@@ -10,6 +10,9 @@ import Toasts, { type ToastItem } from '../components/Toasts'
 import { notesForDesk, reconcile, type Note } from '../notes'
 import { formatAmount } from '../amount'
 import { isRecoveryUnlocked, syncRecoveryNow } from '../recovery'
+import { ordersFor } from '../bookIndexer'
+import { useBookIndex } from '../useBookIndex'
+import { setSubmissionMode, submissionMode } from '../directTransaction'
 
 /** Canonical 32-byte hex tag for comparison: drop any `0x`, lowercase, left-pad to 64. */
 function normTag(h: string): string {
@@ -18,11 +21,13 @@ function normTag(h: string): string {
 
 export default function DeskPage() {
   const { deskId } = useParams()
-  const { address } = useWallet()
+  const { address, networkPassphrase } = useWallet()
   const [desk, setDesk] = useState<Desk | null>(null)
   const [root, setRoot] = useState<string | null>(null)
   const [notes, setNotes] = useState<Note[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [submitMode, setSubmitMode] = useState<'direct' | 'sponsored'>(submissionMode())
+  const bookIndex = useBookIndex(desk, networkPassphrase)
 
   const reloadNotes = useCallback(() => {
     if (deskId) notesForDesk(deskId, address).then(setNotes)
@@ -135,8 +140,30 @@ export default function DeskPage() {
   if (error) return <p className="err">{error}</p>
   if (!desk) return <p className="muted">Loading…</p>
 
-  const sym = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
-  const dec = (id: number) => desk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
+  const authoritativeAssets = bookIndex.assets.map((chain) => {
+    const display = desk.assets.find((asset) => asset.asset_id === chain.asset_id)
+    return {
+      asset_id: chain.asset_id,
+      token: chain.token,
+      symbol: display?.symbol ?? `#${chain.asset_id}`,
+      decimals: display?.decimals ?? 7,
+    }
+  })
+  const authoritativePairs = bookIndex.pairs
+    .map(({ pair_id, base_asset, quote_asset }) => ({ pair_id, base_asset, quote_asset }))
+    .sort((a, b) => a.pair_id - b.pair_id)
+  const verifiedDesk: Desk = { ...desk, assets: authoritativeAssets, pairs: authoritativePairs }
+  const fundActionsDisabled =
+    bookIndex.status === 'synced'
+      ? null
+      : bookIndex.status === 'error'
+        ? `Contract verification failed: ${bookIndex.error ?? 'unknown integrity error'}`
+        : bookIndex.error
+          ? `Contract verification is retrying: ${bookIndex.error}`
+          : 'Contract verification and event replay are still in progress.'
+  const displayDesk = bookIndex.status === 'synced' ? verifiedDesk : desk
+  const sym = (id: number) => verifiedDesk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
+  const dec = (id: number) => verifiedDesk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
 
   // Active notes first; spent and cancelled history renders last in its own collapsed section.
   const active = notes.filter((n) => n.status === 'active').sort((a, b) => mtime(b) - mtime(a))
@@ -162,7 +189,31 @@ export default function DeskPage() {
             <th>Tree root</th>
             <td className="mono">{root ?? '…'}</td>
           </tr>
-          {desk.assets.map((a) => (
+          <tr>
+            <th>Submission</th>
+            <td>
+              <select
+                value={submitMode}
+                onChange={(event) => {
+                  const mode = event.target.value as 'direct' | 'sponsored'
+                  setSubmissionMode(mode)
+                  setSubmitMode(mode)
+                }}
+              >
+                <option value="direct">Self-submit (you pay network fees)</option>
+                <option value="sponsored">Desk sponsor</option>
+              </select>
+            </td>
+          </tr>
+          <tr>
+            <th>Book index</th>
+            <td>
+              {bookIndex.status} · ledger {bookIndex.lastLedger} · sequence {bookIndex.lastSequence}/
+              {bookIndex.targetSequence}
+              {bookIndex.error && <div className="err">{bookIndex.error}</div>}
+            </td>
+          </tr>
+          {verifiedDesk.assets.map((a) => (
             <tr key={a.asset_id}>
               <th>
                 {a.symbol} (id {a.asset_id})
@@ -174,17 +225,21 @@ export default function DeskPage() {
       </table>
 
       <ShieldUnshieldPanel
-        desk={desk}
+        desk={displayDesk}
         notes={notes}
         userPubkey={address}
+        disabledReason={fundActionsDisabled}
+        onRecheck={bookIndex.status === 'error' ? bookIndex.recheck : undefined}
         onDone={reloadNotes}
       />
 
       <h2>Place limit order</h2>
-      {address ? (
-        <OrderForm desk={desk} notes={notes} onDone={reloadNotes} />
+      {address && bookIndex.status === 'synced' ? (
+        <OrderForm desk={verifiedDesk} notes={notes} bookIndex={bookIndex} onDone={reloadNotes} />
       ) : (
-        <p className="muted">Connect your wallet to place orders.</p>
+        <p className="muted">
+          {address ? 'Waiting for verified book synchronization.' : 'Connect your wallet to place orders.'}
+        </p>
       )}
 
       <h2>Address book — my notes</h2>
@@ -204,28 +259,28 @@ export default function DeskPage() {
           {active.length > 0 && (
             <details>
               <summary>Active notes ({active.length})</summary>
-              <NotesTable notes={active} dec={dec} desk={desk} onDone={reloadNotes} />
+              <NotesTable notes={active} dec={dec} desk={verifiedDesk} onDone={reloadNotes} />
             </details>
           )}
           {history.length > 0 && (
             <details>
               <summary className="muted">Spent &amp; cancelled notes ({history.length})</summary>
-              <NotesTable notes={history} dec={dec} desk={desk} onDone={reloadNotes} />
+              <NotesTable notes={history} dec={dec} desk={verifiedDesk} onDone={reloadNotes} />
             </details>
           )}
         </>
       )}
 
       <h2>Order book</h2>
-      {desk.pairs.length === 0 && <p className="muted">No pairs registered.</p>}
-      {desk.pairs.map((p) => (
+      {verifiedDesk.pairs.length === 0 && bookIndex.status === 'synced' && <p className="muted">No pairs registered.</p>}
+      {verifiedDesk.pairs.map((p) => (
         <div className="card" key={p.pair_id}>
           <h3>
             {sym(p.base_asset)}/{sym(p.quote_asset)} <span className="muted">· pair {p.pair_id}</span>
           </h3>
           <div className="row">
             <BookView
-              desk={desk}
+              desk={verifiedDesk}
               pairId={p.pair_id}
               side={1}
               label="Asks (sell base)"
@@ -235,10 +290,12 @@ export default function DeskPage() {
               quoteDecimals={dec(p.quote_asset)}
               inIsBase={true}
               notes={notes}
+              orders={ordersFor(bookIndex, p.pair_id, 1)}
+              bookIndex={bookIndex}
               onCancel={reloadNotes}
             />
             <BookView
-              desk={desk}
+              desk={verifiedDesk}
               pairId={p.pair_id}
               side={0}
               label="Bids (buy base)"
@@ -248,6 +305,8 @@ export default function DeskPage() {
               quoteDecimals={dec(p.quote_asset)}
               inIsBase={false}
               notes={notes}
+              orders={ordersFor(bookIndex, p.pair_id, 0)}
+              bookIndex={bookIndex}
               onCancel={reloadNotes}
             />
           </div>

@@ -7,10 +7,9 @@ use uuid::Uuid;
 ///
 /// Pipeline (mirrors `scripts/06_book_budget_testnet.sh`):
 ///   1. generate + friendbot-fund a sponsor ("main") keypair
-///   2. deploy settlement.wasm with the lift VK + admin = sponsor
-///   3. set_vk(2, unshield_vk), set_vk(3, cancel_vk), set_vk(4, join_vk)
-///   4. register_asset for each currency (see `resolve_token` for how `token` is resolved to a SAC)
-///   5. register_pair for each pair (pair_id assigned sequentially from 0)
+///   2. deploy settlement.wasm with all immutable operation VKs + admin = sponsor
+///   3. register_asset for each currency (see `resolve_token` for how `token` is resolved to a SAC)
+///   4. register_pair for each pair (pair_id assigned sequentially from 0)
 ///
 /// This makes blocking CLI calls; run it via `spawn_blocking`.
 pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, Option<u64>)> {
@@ -55,37 +54,22 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, 
     // 2. deploy
     let contract_id = st
         .stellar
-        .deploy(&wasm, &cfg.lift_vk(), &sponsor_pubkey, &sponsor_secret)?;
+        .deploy(
+            &wasm,
+            &cfg.lift_vk(),
+            &cfg.unshield_vk(),
+            &cfg.cancel_vk(),
+            &cfg.join_vk(),
+            &sponsor_pubkey,
+            &sponsor_secret,
+        )?;
     tracing::info!(%contract_id, "deployed settlement contract");
 
-    // 3. extra VKs
     let inv = |args: Vec<String>| {
         st.stellar
             .invoke_write(&contract_id, &sponsor_secret, &args)
     };
-    inv(svec(&[
-        "set_vk",
-        "--op",
-        "2",
-        "--vk_bytes-file-path",
-        &cfg.unshield_vk().to_string_lossy(),
-    ]))?;
-    inv(svec(&[
-        "set_vk",
-        "--op",
-        "3",
-        "--vk_bytes-file-path",
-        &cfg.cancel_vk().to_string_lossy(),
-    ]))?;
-    inv(svec(&[
-        "set_vk",
-        "--op",
-        "4",
-        "--vk_bytes-file-path",
-        &cfg.join_vk().to_string_lossy(),
-    ]))?;
-
-    // 4. assets
+    // 3. assets
     for a in &assets {
         inv(svec(&[
             "register_asset",
@@ -96,7 +80,7 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, 
         ]))?;
     }
 
-    // 5. pairs (pair_id is assigned sequentially from 0 in registration order)
+    // 4. pairs (pair_id is assigned sequentially from 0 in registration order)
     let mut pairs = Vec::new();
     for (i, p) in body.pairs.iter().enumerate() {
         inv(svec(&[
@@ -118,6 +102,7 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, 
         name: body.name,
         contract_id,
         sponsor_pubkey,
+        event_start_ledger: from_ledger,
         assets,
         pairs,
     };

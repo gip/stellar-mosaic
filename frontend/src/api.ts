@@ -44,8 +44,18 @@ export interface Desk {
   name: string
   contract_id: string
   sponsor_pubkey: string
+  event_start_ledger: number | null
   assets: Asset[]
   pairs: Pair[]
+}
+
+export interface BaseShieldConfig {
+  available: boolean
+  chain_id: number
+  network: 'base-sepolia'
+  bridge: string | null
+  worker_ready: boolean
+  reason: 'contract_unconfigured' | 'worker_disabled' | null
 }
 
 const BASE = '/api'
@@ -101,10 +111,6 @@ export const api = {
   listDesks: () => req<Desk[]>('/desks'),
   getDesk: (id: string) => req<Desk>(`/desks/${id}`),
   getRoot: (id: string) => req<{ root: string }>(`/desks/${id}/root`),
-  getBook: (id: string, pair: number, side: number) =>
-    req<{ pair: number; side: number; orders: unknown }>(
-      `/desks/${id}/book?pair=${pair}&side=${side}`,
-    ),
   importDesk: (body: {
     name: string
     contract_id: string
@@ -126,7 +132,9 @@ export const api = {
     req<{ ok: boolean }>(`/assets/${id}/trust`, { method: 'DELETE' }),
   getNotes: (id: string) => req<{ notes: ChainNote[] }>(`/desks/${id}/notes`),
   getFills: (id: string) => req<{ fills: Fill[] }>(`/desks/${id}/fills`),
-  enqueueBaseShield: (id: string, body: { bridge: string; deposit_id: number }) =>
+  getBaseShieldConfig: (id: string) =>
+    req<BaseShieldConfig>(`/desks/${id}/base-shield-config`),
+  enqueueBaseShield: (id: string, body: { expected_bridge: string; deposit_id: number }) =>
     req<BaseShieldJob>(`/desks/${id}/base-shields`, {
       method: 'POST',
       body: JSON.stringify(body),

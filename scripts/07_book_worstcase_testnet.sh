@@ -11,6 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WB="$ROOT/contracts/settlement/tests/fixtures/book_worst"
 CONTRACT="$ROOT/contracts/settlement"
+VKS="$ROOT/backend/vks"
 NETWORK="${NETWORK:-testnet}"; IDENTITY="${IDENTITY:-m0}"; BUDGET=400000000; N=64
 export PATH="$HOME/.cargo/bin:$PATH"
 inv() { stellar contract invoke --id "$CID" --source "$IDENTITY" --network "$NETWORK" "$@"; }
@@ -21,7 +22,8 @@ XLM_SAC=$(stellar contract id asset --asset native --network "$NETWORK")
 ( cd "$CONTRACT" && stellar contract build >/dev/null 2>&1 )
 WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
-  -- --vk_bytes-file-path "$WB/vk" --admin "$ADMIN")
+  -- --lift_vk-file-path "$VKS/lift_vk" --unshield_vk-file-path "$VKS/unshield_vk" \
+  --cancel_vk-file-path "$VKS/cancel_vk" --join_vk-file-path "$VKS/join_vk" --admin "$ADMIN")
 echo "    CONTRACT: $CID"
 inv --send yes -- register_asset --asset_id 1 --token "$XLM_SAC" >/dev/null
 inv --send yes -- register_asset --asset_id 2 --token "$XLM_SAC" >/dev/null

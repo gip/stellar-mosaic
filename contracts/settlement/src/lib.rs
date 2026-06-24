@@ -15,10 +15,10 @@
 //! `unshield`= spend an asset note with a proof and transfer the real token out, with the recipient
 //!             bound into the proof so a relayer cannot redirect it.
 //!
-//! Order-proof public-input vector (lift circuit, 10 x 32-byte big-endian field elements):
+//! Order-proof public-input vector (lift circuit, 12 x 32-byte big-endian field elements):
 //!   [0] domain  [1] root  [2] nullifier_in  [3] asset_in  [4] amount_in  [5] asset_out
-//!   [6] min_out [7] output_owner_tag  [8] cancel_owner_tag  [9] order_leaf
-//! settle uses [0..8]; cancel_owner_tag/order_leaf are unused here (no on-chain order note).
+//!   [6] min_out [7] output_owner_tag  [8] cancel_owner_tag  [9] expiry
+//!   [10] partial_allowed [11] order_leaf
 
 use soroban_sdk::{
     contract, contractevent, contracterror, contractimpl, contracttype, crypto::bn254::Bn254Fr,
@@ -93,6 +93,55 @@ pub struct Filled {
     pub output_owner_tag: BytesN<32>,
 }
 
+/// Protocol identity emitted once by the constructor. Clients pin these hashes before replaying.
+#[contractevent(topics = ["bookinit"], data_format = "vec")]
+pub struct BookInitialized {
+    pub schema_version: u32,
+    pub lift_vk_hash: BytesN<32>,
+    pub unshield_vk_hash: BytesN<32>,
+    pub cancel_vk_hash: BytesN<32>,
+    pub join_vk_hash: BytesN<32>,
+}
+
+#[contractevent(topics = ["assetreg"], data_format = "vec")]
+pub struct AssetRegistered {
+    pub asset_id: u32,
+    pub token: Address,
+}
+
+#[contractevent(topics = ["pairreg"], data_format = "vec")]
+pub struct PairRegistered {
+    pub pair_id: u32,
+    pub base_asset: u32,
+    pub quote_asset: u32,
+}
+
+/// Full current value of a newly-rested or partially-filled order.
+#[contractevent(topics = ["ordupsert"], data_format = "vec")]
+pub struct OrderUpserted {
+    pub sequence: u64,
+    pub pair_id: u32,
+    pub side: u32,
+    pub order_id: BytesN<32>,
+    pub amount_in: i128,
+    pub min_out: i128,
+    pub remaining_in: i128,
+    pub output_owner_tag: BytesN<32>,
+    pub cancel_owner_tag: BytesN<32>,
+    pub order_leaf: BytesN<32>,
+    pub expiry: u64,
+    pub partial_allowed: bool,
+}
+
+#[contractevent(topics = ["ordremove"], data_format = "vec")]
+pub struct OrderRemoved {
+    pub sequence: u64,
+    pub pair_id: u32,
+    pub side: u32,
+    pub order_id: BytesN<32>,
+    pub reason: u32,
+}
+
 /// Poseidon2 S-box degree (BN254). The crate's SBOX_D is pub(crate); the value is fixed at 5.
 const SBOX_D: u32 = 5;
 /// Poseidon2 state width used by the circuits (t = 4, rate 3).
@@ -104,6 +153,10 @@ const LIFT_OP: u32 = 1;
 const UNSHIELD_OP: u32 = 2;
 const CANCEL_OP: u32 = 3;
 const JOIN_OP: u32 = 4;
+pub const BOOK_EVENT_SCHEMA_VERSION: u32 = 1;
+pub const REMOVE_FILLED: u32 = 0;
+pub const REMOVE_CANCELLED: u32 = 1;
+pub const REMOVE_EXPIRED: u32 = 2;
 
 /// Order-book limits. A pair has at most this many resting orders per side (buy / sell).
 const BOOK_CAPACITY: u32 = 64;
@@ -220,6 +273,7 @@ const TREE_ZEROS: [[u8; 32]; 32] = [
 #[contracttype]
 pub enum DataKey {
     Vk(u32), // verification key per operation (LIFT_OP / UNSHIELD_OP)
+    VkHash(u32),
     Admin,
     Root(BytesN<32>), // set membership: this root was produced by the on-chain tree (accepted)
     Nullifier(BytesN<32>),
@@ -230,6 +284,7 @@ pub enum DataKey {
     Pair(u32),  // pair id -> PairDef { base_asset, quote_asset } (canonical orientation)
     PairCount,  // u32: number of registered pairs (pair ids are 0..PairCount)
     Book(u32, u32), // (pair_id, side) -> Vec<OrderEntry>, kept sorted best-price-first (<=64)
+    BookSeq,
     // --- Base-shield bridge (one-way deposit from Base; see docs/base-bridge.md) ---
     BaseRouter,         // Address: deployed RISC Zero verifier router (cross-called to verify)
     BaseImageId,        // BytesN<32>: pinned guest image id (bridge-prover BRIDGE_GUEST_ID)
@@ -248,6 +303,7 @@ pub enum DataKey {
 #[contracttype]
 #[derive(Clone)]
 pub struct OrderEntry {
+    pub order_id: BytesN<32>, // globally unique resting-order id: the consumed note nullifier
     pub amount_in: i128,   // original offered amount (fixes the limit price ratio with min_out)
     pub min_out: i128,     // original wanted amount (limit terms)
     pub remaining_in: i128, // locked asset_in still held (decreases as the order fills)
@@ -256,6 +312,27 @@ pub struct OrderEntry {
     pub order_leaf: BytesN<32>,       // identity; the cancel proof references this
     pub expiry: u64,                  // validity deadline (unix seconds)
     pub partial_allowed: bool,        // may this order be partially filled
+}
+
+#[contracttype]
+#[derive(Clone)]
+pub struct ProtocolConfig {
+    pub schema_version: u32,
+    pub lift_vk_hash: BytesN<32>,
+    pub unshield_vk_hash: BytesN<32>,
+    pub cancel_vk_hash: BytesN<32>,
+    pub join_vk_hash: BytesN<32>,
+}
+
+/// The complete Base-side verifier configuration trusted by this settlement contract. Clients use
+/// this read-only view instead of accepting a caller-supplied bridge address.
+#[contracttype]
+#[derive(Clone)]
+pub struct BaseBridgeConfig {
+    pub router: Address,
+    pub image_id: BytesN<32>,
+    pub config_id: BytesN<32>,
+    pub bridge: BytesN<20>,
 }
 
 /// A canonical trading pair. Orders are always specified base/quote in this orientation
@@ -299,26 +376,66 @@ pub struct Settlement;
 
 #[contractimpl]
 impl Settlement {
-    /// Store the order (lift) UltraHonk verification key (validated by parsing) and the admin. The
-    /// unshield VK is registered separately via `set_vk(UNSHIELD_OP, ..)` (a different circuit).
-    pub fn __constructor(env: Env, vk_bytes: Bytes, admin: Address) -> Result<(), Error> {
-        let _ = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
-        env.storage().persistent().set(&DataKey::Vk(LIFT_OP), &vk_bytes);
+    /// Install every operation VK atomically. There is deliberately no post-deploy VK mutator.
+    pub fn __constructor(
+        env: Env,
+        lift_vk: Bytes,
+        unshield_vk: Bytes,
+        cancel_vk: Bytes,
+        join_vk: Bytes,
+        admin: Address,
+    ) -> Result<(), Error> {
+        let vks = [(LIFT_OP, lift_vk), (UNSHIELD_OP, unshield_vk), (CANCEL_OP, cancel_vk), (JOIN_OP, join_vk)];
+        let mut hashes: Vec<BytesN<32>> = Vec::new(&env);
+        for (op, vk) in vks.iter() {
+            let _ = UltraHonkVerifier::new(&env, &vk).map_err(|_| Error::VkInvalid)?;
+            let hash: BytesN<32> = env.crypto().sha256(&vk).into();
+            env.storage().persistent().set(&DataKey::Vk(*op), &vk);
+            env.storage().persistent().set(&DataKey::VkHash(*op), &hash);
+            bump(&env, &DataKey::Vk(*op));
+            bump(&env, &DataKey::VkHash(*op));
+            hashes.push_back(hash);
+        }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::BookSeq, &0u64);
         tree_init(&env, &Hasher::new(&env));
-        bump(&env, &DataKey::Vk(LIFT_OP));
+        bump(&env, &DataKey::BookSeq);
         bump_core(&env); // instance + tree singletons to max from the start
+        BookInitialized {
+            schema_version: BOOK_EVENT_SCHEMA_VERSION,
+            lift_vk_hash: hashes.get(0).unwrap(),
+            unshield_vk_hash: hashes.get(1).unwrap(),
+            cancel_vk_hash: hashes.get(2).unwrap(),
+            join_vk_hash: hashes.get(3).unwrap(),
+        }
+        .publish(&env);
         Ok(())
     }
 
-    /// Register the verification key for an operation (e.g. UNSHIELD_OP). Admin-gated and validated
-    /// by parsing. Each operation is a distinct circuit, so it needs its own VK.
-    pub fn set_vk(env: Env, op: u32, vk_bytes: Bytes) -> Result<(), Error> {
-        Self::require_admin(&env)?;
-        let _ = UltraHonkVerifier::new(&env, &vk_bytes).map_err(|_| Error::VkInvalid)?;
-        env.storage().persistent().set(&DataKey::Vk(op), &vk_bytes);
-        bump(&env, &DataKey::Vk(op));
-        Ok(())
+    pub fn protocol_config(env: Env) -> ProtocolConfig {
+        ProtocolConfig {
+            schema_version: BOOK_EVENT_SCHEMA_VERSION,
+            lift_vk_hash: env.storage().persistent().get(&DataKey::VkHash(LIFT_OP)).unwrap(),
+            unshield_vk_hash: env.storage().persistent().get(&DataKey::VkHash(UNSHIELD_OP)).unwrap(),
+            cancel_vk_hash: env.storage().persistent().get(&DataKey::VkHash(CANCEL_OP)).unwrap(),
+            join_vk_hash: env.storage().persistent().get(&DataKey::VkHash(JOIN_OP)).unwrap(),
+        }
+    }
+
+    /// Return the Base bridge configuration atomically, or `None` when this desk has not enabled
+    /// Base shielding. `configure_base_bridge` writes all four entries in one transaction, so a
+    /// partial configuration is never considered usable.
+    pub fn base_bridge_config(env: Env) -> Option<BaseBridgeConfig> {
+        Some(BaseBridgeConfig {
+            router: env.storage().persistent().get(&DataKey::BaseRouter)?,
+            image_id: env.storage().persistent().get(&DataKey::BaseImageId)?,
+            config_id: env.storage().persistent().get(&DataKey::BaseConfigId)?,
+            bridge: env.storage().persistent().get(&DataKey::BaseBridgeAddr)?,
+        })
+    }
+
+    pub fn book_sequence(env: Env) -> u64 {
+        env.storage().persistent().get(&DataKey::BookSeq).unwrap_or(0)
     }
 
     /// Read a book side (price-sorted, best first). Read-only view for clients/matchers; `side` is
@@ -346,6 +463,7 @@ impl Settlement {
         }
         env.storage().persistent().set(&DataKey::Asset(asset_id), &token);
         bump(&env, &DataKey::Asset(asset_id));
+        AssetRegistered { asset_id, token }.publish(&env);
         Ok(())
     }
 
@@ -384,6 +502,7 @@ impl Settlement {
         env.storage().persistent().set(&DataKey::PairCount, &(count + 1));
         bump(&env, &DataKey::Pair(pair_id));
         bump(&env, &DataKey::PairCount);
+        PairRegistered { pair_id, base_asset, quote_asset }.publish(&env);
         Ok(pair_id)
     }
 
@@ -859,6 +978,8 @@ impl Settlement {
         let (pair_id, taker_side) = pair_and_side(&env, taker.asset_in, taker.asset_out)?;
         let pair: PairDef = env.storage().persistent().get(&DataKey::Pair(pair_id)).unwrap();
         let h = Hasher::new(&env);
+        let initial_book_seq = book_sequence_load(&env);
+        let mut book_seq = initial_book_seq;
 
         let maker_is_sell = matches!(taker_side, Side::Buy); // maker sits on the opposite side
         let opp_u = if maker_is_sell { SIDE_SELL } else { SIDE_BUY };
@@ -911,9 +1032,18 @@ impl Settlement {
             }
             fills += 1;
             if maker.remaining_in == 0 {
+                publish_order_removed(
+                    &env,
+                    &mut book_seq,
+                    pair_id,
+                    opp_u,
+                    &maker.order_id,
+                    REMOVE_FILLED,
+                );
                 book.remove(i); // consumed; next maker shifts into i (do not advance)
             } else {
-                book.set(i, maker); // partially filled => taker is now exhausted; loop will end
+                book.set(i, maker.clone()); // partially filled => taker is now exhausted; loop will end
+                publish_order_upserted(&env, &mut book_seq, pair_id, opp_u, &maker);
             }
         }
         book_store(&env, pair_id, opp_u, &book);
@@ -943,6 +1073,7 @@ impl Settlement {
             let mut myside = book_load(&env, pair_id, taker_u);
             if myside.len() < BOOK_CAPACITY {
                 let entry = OrderEntry {
+                    order_id: taker.nullifier.clone(),
                     amount_in: taker.amount_in,
                     min_out: taker.min_out,
                     remaining_in,
@@ -952,12 +1083,16 @@ impl Settlement {
                     expiry: taker.expiry,
                     partial_allowed: taker.partial_allowed,
                 };
-                book_insert_sorted(&env, &mut myside, entry, taker_u);
+                book_insert_sorted(&env, &mut myside, entry.clone(), taker_u);
                 book_store(&env, pair_id, taker_u, &myside);
+                publish_order_upserted(&env, &mut book_seq, pair_id, taker_u, &entry);
             } else {
                 // Book full: immediate-or-cancel the remainder back to the order's destination.
                 mint_note(&env, &h, taker.asset_in, remaining_in, &taker.output_owner_tag);
             }
+        }
+        if book_seq != initial_book_seq {
+            book_sequence_store(&env, book_seq);
         }
         bump_core(&env);
         Ok(())
@@ -982,6 +1117,8 @@ impl Settlement {
         let order_leaf = BytesN::from_array(&env, &read_word(&public_inputs, 32));
         let cancel_owner_tag = BytesN::from_array(&env, &read_word(&public_inputs, 64));
         let return_owner_tag = BytesN::from_array(&env, &read_word(&public_inputs, 96));
+        let initial_book_seq = book_sequence_load(&env);
+        let mut book_seq = initial_book_seq;
 
         let (asset_in, _asset_out) = side_assets(&env, pair_id, side)?;
         let mut book = book_load(&env, pair_id, side);
@@ -991,8 +1128,17 @@ impl Settlement {
             if e.order_leaf == order_leaf && e.cancel_owner_tag == cancel_owner_tag {
                 let h = Hasher::new(&env);
                 mint_note(&env, &h, asset_in, e.remaining_in, &return_owner_tag);
+                publish_order_removed(
+                    &env,
+                    &mut book_seq,
+                    pair_id,
+                    side,
+                    &e.order_id,
+                    REMOVE_CANCELLED,
+                );
                 book.remove(i);
                 book_store(&env, pair_id, side, &book);
+                book_sequence_store(&env, book_seq);
                 bump_core(&env);
                 return Ok(());
             }
@@ -1009,12 +1155,22 @@ impl Settlement {
         let now = env.ledger().timestamp();
         let h = Hasher::new(&env);
         let mut book = book_load(&env, pair_id, side);
+        let initial_book_seq = book_sequence_load(&env);
+        let mut book_seq = initial_book_seq;
         let mut removed = 0u32;
         let mut i = 0u32;
         while i < book.len() && removed < max {
             let e = book.get(i).unwrap();
             if e.expiry < now {
                 mint_note(&env, &h, asset_in, e.remaining_in, &e.output_owner_tag);
+                publish_order_removed(
+                    &env,
+                    &mut book_seq,
+                    pair_id,
+                    side,
+                    &e.order_id,
+                    REMOVE_EXPIRED,
+                );
                 book.remove(i); // next shifts into i
                 removed += 1;
             } else {
@@ -1023,6 +1179,7 @@ impl Settlement {
         }
         if removed > 0 {
             book_store(&env, pair_id, side, &book);
+            book_sequence_store(&env, book_seq);
         }
         bump_core(&env);
         Ok(removed)
@@ -1036,6 +1193,22 @@ impl Settlement {
     /// anyone, so funds can never be lost regardless.)
     pub fn keep_alive(env: Env) {
         bump_core(&env);
+        let mut op = LIFT_OP;
+        while op <= JOIN_OP {
+            bump(&env, &DataKey::Vk(op));
+            bump(&env, &DataKey::VkHash(op));
+            op += 1;
+        }
+        for key in [
+            DataKey::BaseRouter,
+            DataKey::BaseImageId,
+            DataKey::BaseConfigId,
+            DataKey::BaseBridgeAddr,
+        ] {
+            if env.storage().persistent().has(&key) {
+                bump(&env, &key);
+            }
+        }
         if let Some(pc) = env.storage().persistent().get::<DataKey, u32>(&DataKey::PairCount) {
             bump(&env, &DataKey::PairCount);
             let mut i = 0u32;
@@ -1130,10 +1303,11 @@ fn bump_instance(env: &Env) {
 
 /// Refresh the always-present hot state every state-changing call touches: the instance and the
 /// incremental Merkle tree singletons, plus the current root's membership marker. Cheap and bounded
-/// (≤5 TTL bumps) so it is safe even on `submit_order`'s worst-case path. Unbounded sets (historical
+/// (≤6 TTL bumps) so it is safe even on `submit_order`'s worst-case path. Unbounded sets (historical
 /// roots, nullifiers, per-pair books) are bumped on write and by `keep_alive`, and stay restorable.
 fn bump_core(env: &Env) {
     bump_instance(env);
+    bump(env, &DataKey::BookSeq);
     bump(env, &DataKey::TreeFilled);
     bump(env, &DataKey::TreeNext);
     bump(env, &DataKey::TreeRoot);
@@ -1281,6 +1455,59 @@ fn book_store(env: &Env, pair_id: u32, side: u32, book: &Vec<OrderEntry>) {
     let key = DataKey::Book(pair_id, side);
     env.storage().persistent().set(&key, book);
     bump(env, &key);
+}
+
+fn book_sequence_load(env: &Env) -> u64 {
+    env.storage().persistent().get(&DataKey::BookSeq).unwrap_or(0)
+}
+
+fn book_sequence_store(env: &Env, sequence: u64) {
+    env.storage().persistent().set(&DataKey::BookSeq, &sequence);
+    bump(env, &DataKey::BookSeq);
+}
+
+fn publish_order_upserted(
+    env: &Env,
+    sequence: &mut u64,
+    pair_id: u32,
+    side: u32,
+    entry: &OrderEntry,
+) {
+    *sequence += 1;
+    OrderUpserted {
+        sequence: *sequence,
+        pair_id,
+        side,
+        order_id: entry.order_id.clone(),
+        amount_in: entry.amount_in,
+        min_out: entry.min_out,
+        remaining_in: entry.remaining_in,
+        output_owner_tag: entry.output_owner_tag.clone(),
+        cancel_owner_tag: entry.cancel_owner_tag.clone(),
+        order_leaf: entry.order_leaf.clone(),
+        expiry: entry.expiry,
+        partial_allowed: entry.partial_allowed,
+    }
+    .publish(env);
+}
+
+fn publish_order_removed(
+    env: &Env,
+    sequence: &mut u64,
+    pair_id: u32,
+    side: u32,
+    order_id: &BytesN<32>,
+    reason: u32,
+) {
+    *sequence += 1;
+    OrderRemoved {
+        sequence: *sequence,
+        pair_id,
+        side,
+        order_id: order_id.clone(),
+        reason,
+    }
+    .publish(env);
 }
 
 /// Is order `a` strictly ahead of `b` in priority for `side`? Asks (SELL) rank by ascending price

@@ -11,10 +11,12 @@ import { useActivity } from '../ActivityContext'
  */
 export default function ShieldForm({
   desk,
+  disabledReason,
   onDone,
 }: {
   desk: Desk
   userPubkey: string
+  disabledReason?: string | null
   onDone: () => void
 }) {
   const [assetId, setAssetId] = useState(desk.assets[0]?.asset_id ?? 1)
@@ -62,8 +64,14 @@ export default function ShieldForm({
         <label>Amount ({desk.assets.find((a) => a.asset_id === assetId)?.symbol ?? ''})</label>
         <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
       </div>
-      <button type="submit" disabled={busy || !recoveryReady}>
-        {busy ? 'Shielding…' : recoveryReady ? 'Shield' : 'Enable / repair recovery first'}
+      <button type="submit" disabled={busy || !recoveryReady || !!disabledReason}>
+        {busy
+          ? 'Shielding…'
+          : disabledReason
+            ? 'Waiting for contract verification'
+            : recoveryReady
+              ? 'Shield from Stellar'
+              : 'Enable / repair recovery first'}
       </button>
       {status && <span className="muted">{status}</span>}
       {error && <span className="err">{error}</span>}

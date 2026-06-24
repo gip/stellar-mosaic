@@ -7,10 +7,10 @@
 //! independently of a live verifier. The journal layout is built word-by-word and cross-checked
 //! against the exact bytes alloy's `abi_encode` produced (see bridge-prover fixture printer).
 
-use settlement::{Error, Settlement, SettlementClient};
+use settlement::{DataKey, Error, Settlement, SettlementClient};
 use soroban_sdk::{
     contract, contracterror, contractimpl,
-    testutils::{Address as _, Events, Ledger},
+    testutils::{storage::Persistent as _, Address as _, Events, Ledger},
     Address, Bytes, BytesN, Env,
 };
 
@@ -75,8 +75,16 @@ fn test_env() -> Env {
 
 fn deploy(env: &Env) -> (Address, Address) {
     let admin = Address::generate(env);
-    let vk = Bytes::from_slice(env, VK);
-    let id = env.register(Settlement, (vk, admin.clone()));
+    let id = env.register(
+        Settlement,
+        (
+            Bytes::from_slice(env, VK),
+            Bytes::from_slice(env, VK),
+            Bytes::from_slice(env, VK),
+            Bytes::from_slice(env, VK),
+            admin.clone(),
+        ),
+    );
     (id, admin)
 }
 
@@ -191,6 +199,48 @@ fn shield_from_base_requires_configuration() {
     let err = call(&env, &id, good_seal(&env), journal_bytes(&env, &fixture_journal()))
         .expect_err("unconfigured");
     assert_eq!(err as u32, Error::BaseBridgeNotConfigured as u32);
+}
+
+#[test]
+fn base_bridge_config_reports_only_complete_configuration() {
+    let env = test_env();
+    let (unconfigured, _admin) = deploy(&env);
+    assert!(SettlementClient::new(&env, &unconfigured).base_bridge_config().is_none());
+
+    let (configured, router) = setup(&env);
+    let config = SettlementClient::new(&env, &configured)
+        .base_bridge_config()
+        .expect("configured bridge");
+    assert_eq!(config.router, router);
+    assert_eq!(config.image_id, BytesN::from_array(&env, &IMAGE_ID));
+    assert_eq!(config.config_id, BytesN::from_array(&env, &CONFIG_ID));
+    assert_eq!(config.bridge, BytesN::from_array(&env, &BRIDGE20));
+}
+
+#[test]
+fn keep_alive_refreshes_base_bridge_configuration() {
+    let env = test_env();
+    let (id, _router) = setup(&env);
+    let client = SettlementClient::new(&env, &id);
+    let keys = [
+        DataKey::BaseRouter,
+        DataKey::BaseImageId,
+        DataKey::BaseConfigId,
+        DataKey::BaseBridgeAddr,
+    ];
+    let max = env.as_contract(&id, || env.storage().max_ttl());
+    env.ledger().set_sequence_number(env.ledger().sequence() + 100_000);
+    env.as_contract(&id, || {
+        for key in keys.iter() {
+            assert!(env.storage().persistent().get_ttl(key) < max);
+        }
+    });
+    client.keep_alive();
+    env.as_contract(&id, || {
+        for key in keys.iter() {
+            assert!(env.storage().persistent().get_ttl(key) >= max - 16);
+        }
+    });
 }
 
 #[test]

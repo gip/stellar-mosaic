@@ -1,17 +1,8 @@
-import { useEffect, useState } from 'react'
-import { api, type Desk } from '../api'
+import { type Desk } from '../api'
+import type { BookIndexSnapshot, IndexedOrder } from '../bookIndexer'
 import { formatAmount, formatPrice } from '../amount'
 import { type Note } from '../notes'
 import CancelOrderButton from './CancelOrderButton'
-
-interface OrderEntry {
-  amount_in: string | number
-  min_out: string | number
-  remaining_in: string | number
-  expiry: string | number
-  partial_allowed: boolean
-  order_leaf?: string
-}
 
 /** Canonical form of a 32-byte hex tag for comparison. The book passes the Soroban CLI's raw
  * `BytesN<32>` rendering (bare lowercase hex, no `0x`), while our local notes store `0x`+64-hex;
@@ -22,8 +13,6 @@ function normLeaf(h: string): string {
 
 export default function BookView({
   desk,
-  pairId,
-  side,
   label,
   inDecimals,
   outDecimals,
@@ -31,6 +20,8 @@ export default function BookView({
   quoteDecimals,
   inIsBase,
   notes,
+  orders,
+  bookIndex,
   onCancel,
 }: {
   desk: Desk
@@ -48,9 +39,10 @@ export default function BookView({
   inIsBase: boolean
   /** The user's local notes — used to find orders we placed (and can cancel). */
   notes: Note[]
+  orders: IndexedOrder[]
+  bookIndex: BookIndexSnapshot
   onCancel: () => void
 }) {
-  const deskId = desk.id
   // Our still-cancellable orders, keyed by on-chain order_leaf, so we can offer a cancel button on
   // the matching book row. Only active order-output notes carry usable cancel authority.
   const ownByLeaf = new Map(
@@ -58,36 +50,16 @@ export default function BookView({
       .filter((n) => n.cancel && n.status === 'active')
       .map((n) => [normLeaf(n.cancel!.order_leaf), n] as const),
   )
-  const [orders, setOrders] = useState<OrderEntry[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let alive = true
-    const tick = () =>
-      api
-        .getBook(deskId, pairId, side)
-        .then((r) => {
-          if (!alive) return
-          setOrders((r.orders as OrderEntry[]) ?? [])
-          setError(null)
-        })
-        .catch((e) => alive && setError(e instanceof Error ? e.message : String(e)))
-    tick()
-    const h = setInterval(tick, 5000)
-    return () => {
-      alive = false
-      clearInterval(h)
-    }
-  }, [deskId, pairId, side])
-
   return (
     <div style={{ flex: 1, minWidth: 280 }}>
       <div className="muted" style={{ fontSize: 13, marginBottom: 4 }}>
         {label}
       </div>
-      {error && <p className="err">{error}</p>}
-      {!error && orders === null && <p className="muted">…</p>}
-      {orders?.length === 0 && <p className="muted">empty</p>}
+      {bookIndex.status === 'error' && <p className="err">Book index unavailable: {bookIndex.error}</p>}
+      {bookIndex.status === 'syncing' && (
+        <p className="muted">Syncing events · {bookIndex.lastSequence}/{bookIndex.targetSequence}</p>
+      )}
+      {bookIndex.status === 'synced' && orders.length === 0 && <p className="muted">empty</p>}
       {orders && orders.length > 0 && (
         <table>
           <thead>
@@ -101,14 +73,14 @@ export default function BookView({
             </tr>
           </thead>
           <tbody>
-            {orders.map((o, i) => {
+            {orders.map((o) => {
               const own = o.order_leaf ? ownByLeaf.get(normLeaf(o.order_leaf)) : undefined
               // Price is always quote-per-base: amount_in/min_out are base/quote depending on side.
               const baseRaw = BigInt(inIsBase ? o.amount_in : o.min_out)
               const quoteRaw = BigInt(inIsBase ? o.min_out : o.amount_in)
               const px = formatPrice(baseRaw, quoteRaw, baseDecimals, quoteDecimals)
               return (
-                <tr key={o.order_leaf ?? i}>
+                <tr key={o.order_id}>
                   <td>{px ?? '—'}</td>
                   <td>{formatAmount(BigInt(o.amount_in), inDecimals)}</td>
                   <td>{formatAmount(BigInt(o.min_out), outDecimals)}</td>

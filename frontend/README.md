@@ -17,8 +17,11 @@ the Soroban RPC with `VITE_SOROBAN_RPC` (defaults to testnet).
 ## What it does
 
 - `/` — list desks + pairs; create a new desk (deploys a contract via the backend) or import one.
-- `/desk/:id` — address book (desk contract/sponsor/token addresses + your notes), shield, place a
-  limit order, and a live order book. Auto-refreshes root/book/notes.
+- `/desk/:id` — address book (desk contract/sponsor/token addresses + your notes), shield from
+  Stellar or a configured Base Sepolia bridge, place a limit order, and a live order book
+  reconstructed from the contract's sequenced events in browser IndexedDB. Replay starts at the
+  desk's recorded deployment ledger rather than ledger 1. Fund forms remain visible but disabled
+  with the precise verification error until replay is complete.
 - A global Activity drawer survives navigation/reload and shows queued, running, and historical work.
 
 ## Proving and recovery
@@ -29,7 +32,8 @@ the Soroban RPC with `VITE_SOROBAN_RPC` (defaults to testnet).
   proof + concatenated public inputs are accepted by the on-chain Nethermind verifier (validated
   against the deployed VK).
 - `shield` is fully sponsored via auth-entry signing: the user signs only the Soroban auth entry in
-  Freighter, the sponsor is the tx source and pays the fee. `submit_order` is relayed sponsored too.
+  Freighter. Self-submission is the default (the wallet is source and fee payer); the desk sponsor
+  remains an explicit fallback.
 - Before creating notes, Freighter signs a fixed recovery message. The browser verifies that
   signature, derives domain-separated AES/lookup/write keys with HKDF-SHA-256, and uploads only an
   AES-GCM-encrypted snapshot. Plaintext `sk`/`rho` values never leave the browser. The same account

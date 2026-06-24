@@ -86,6 +86,13 @@ measured. Full cost figures and the worst-case measurement are in `benchmarks.md
 
 ## Off-chain indexer
 
+The contract emits a replay-complete, globally sequenced book log. `ordupsert` carries the full
+current value of a new or partially-filled entry; `ordremove` identifies a filled, cancelled, or
+expired entry by its unique `order_id` (the already-public input nullifier). A client starts at the
+constructor's `bookinit`, validates every consecutive sequence, and sorts equal-price entries by
+their first-upsert sequence. `assetreg` and `pairreg` make the market registry independently
+replayable as well. The frontend persists this state and the RPC cursor atomically in IndexedDB.
+
 Each leaf the book inserts (fill proceeds, cancel/prune/IOC returns) is announced with a `noteins`
 `(asset, amount, owner_tag)` event, in insertion order. The path server (`tools/indexer`) replays them
 via `ingest_note`, exactly like `shielded`, so a wallet can rebuild membership paths for its

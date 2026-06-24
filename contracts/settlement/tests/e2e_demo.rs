@@ -36,7 +36,6 @@ const ASSET_1: u32 = 1;
 const ASSET_2: u32 = 2;
 const AMT_A: i128 = 100; // A shields 100 of asset 1
 const AMT_B: i128 = 2000; // B shields 2000 of asset 2
-const UNSHIELD_OP: u32 = 2;
 const DEMO_TO: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 
 fn bytes(env: &Env, b: &[u8]) -> Bytes {
@@ -66,9 +65,17 @@ fn full_lifecycle_shield_order_settle_unshield() {
 
     // Deploy the merged contract with the order/lift VK; register the unshield VK.
     let admin = Address::generate(&env);
-    let id = env.register(Settlement, (bytes(&env, LIFT_VK), admin.clone()));
+    let id = env.register(
+        Settlement,
+        (
+            bytes(&env, LIFT_VK),
+            bytes(&env, UNSHIELD_VK),
+            bytes(&env, LIFT_VK),
+            bytes(&env, LIFT_VK),
+            admin.clone(),
+        ),
+    );
     let client = SettlementClient::new(&env, &id);
-    client.set_vk(&UNSHIELD_OP, &bytes(&env, UNSHIELD_VK));
 
     // Custody-backing tokens: A is funded 100 of asset 1, B is funded 2000 of asset 2.
     let (token1, holder_a) = register_funded_asset(&env, &id, ASSET_1, AMT_A);

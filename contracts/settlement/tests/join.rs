@@ -26,7 +26,6 @@ const OTAG_B: &[u8] = include_bytes!("fixtures/join/owner_tag_b");
 const ASSET_1: u32 = 1;
 const AMOUNT_A: i128 = 150;
 const AMOUNT_B: i128 = 200;
-const JOIN_OP: u32 = 4;
 // Public-input field indices (see the join circuit / contract `join`).
 const W_OUT_AMOUNT_1: usize = 6;
 const W_OUT_AMOUNT_2: usize = 8;
@@ -41,7 +40,16 @@ fn test_env() -> Env {
 
 fn deploy(env: &Env) -> Address {
     let admin = Address::generate(env);
-    env.register(Settlement, (Bytes::from_slice(env, LIFT_VK), admin))
+    env.register(
+        Settlement,
+        (
+            bytes(env, LIFT_VK),
+            bytes(env, LIFT_VK),
+            bytes(env, LIFT_VK),
+            bytes(env, JOIN_VK),
+            admin,
+        ),
+    )
 }
 
 fn bytes(env: &Env, b: &[u8]) -> Bytes {
@@ -62,7 +70,6 @@ fn pi_word(pi: &[u8], w: usize) -> i128 {
 fn setup(env: &Env) -> Address {
     let id = deploy(env);
     let client = SettlementClient::new(env, &id);
-    client.set_vk(&JOIN_OP, &bytes(env, JOIN_VK));
 
     let token_admin = Address::generate(env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
@@ -122,7 +129,6 @@ fn join_rejects_unknown_root() {
     // but its membership root is not in the published history.
     let env = test_env();
     let id = deploy(&env);
-    SettlementClient::new(&env, &id).set_vk(&JOIN_OP, &bytes(&env, JOIN_VK));
 
     let err = env
         .as_contract(&id, || {
@@ -161,26 +167,4 @@ fn join_rejects_wrong_public_input_length() {
         })
         .expect_err("short public inputs");
     assert_eq!(err as u32, Error::BadPublicInputs as u32);
-}
-
-#[test]
-fn join_rejects_missing_vk() {
-    // Asset registered + notes shielded (root accepted), but the join VK was never set.
-    let env = test_env();
-    let id = deploy(&env);
-    let client = SettlementClient::new(&env, &id);
-    let token_admin = Address::generate(&env);
-    let sac = env.register_stellar_asset_contract_v2(token_admin);
-    let holder = Address::generate(&env);
-    StellarAssetClient::new(&env, &sac.address()).mint(&holder, &(AMOUNT_A + AMOUNT_B));
-    client.register_asset(&ASSET_1, &sac.address());
-    client.shield(&holder, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
-    client.shield(&holder, &ASSET_1, &AMOUNT_B, &tag(&env, OTAG_B));
-
-    let err = env
-        .as_contract(&id, || {
-            Settlement::join(env.clone(), bytes(&env, JOIN_PROOF), bytes(&env, JOIN_PI))
-        })
-        .expect_err("missing join vk");
-    assert_eq!(err as u32, Error::VkNotSet as u32);
 }

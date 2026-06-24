@@ -1,7 +1,16 @@
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
+use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct BaseBridgeConfig {
+    pub router: String,
+    pub image_id: String,
+    pub config_id: String,
+    pub bridge: String,
+}
 
 /// Thin wrapper over the `stellar` CLI. We shell out to the already-validated recipe in
 /// `scripts/0{4,6}_*.sh` rather than reimplement Soroban tx assembly. Read calls simulate
@@ -65,6 +74,23 @@ impl Stellar {
     pub fn root(&self, contract_id: &str, source: &str) -> AppResult<String> {
         let raw = self.invoke_read(contract_id, source, &["root"])?;
         Ok(raw.trim().trim_matches('"').to_string())
+    }
+
+    /// Read the Base bridge configuration pinned by the settlement contract. The CLI serializes an
+    /// unconfigured `Option` as JSON `null` and configured bytes as hex strings.
+    pub fn base_bridge_config(
+        &self,
+        contract_id: &str,
+        source: &str,
+    ) -> AppResult<Option<BaseBridgeConfig>> {
+        let raw = self.invoke_read(contract_id, source, &["base_bridge_config"])?;
+        let mut config: Option<BaseBridgeConfig> = serde_json::from_str(&raw).map_err(|e| {
+            AppError::Stellar(format!("parse base_bridge_config json: {e}; raw={raw}"))
+        })?;
+        if let Some(value) = config.as_mut() {
+            value.bridge = normalize_evm_bridge(&value.bridge)?;
+        }
+        Ok(config)
     }
 
     /// `book(pair_id, side)` -> parsed JSON value (a list of OrderEntry).
@@ -159,6 +185,9 @@ impl Stellar {
         &self,
         wasm: &Path,
         lift_vk: &Path,
+        unshield_vk: &Path,
+        cancel_vk: &Path,
+        join_vk: &Path,
         admin: &str,
         source: &str,
     ) -> AppResult<String> {
@@ -172,8 +201,14 @@ impl Stellar {
             "--network".into(),
             self.network.clone(),
             "--".into(),
-            "--vk_bytes-file-path".into(),
+            "--lift_vk-file-path".into(),
             lift_vk.to_string_lossy().into(),
+            "--unshield_vk-file-path".into(),
+            unshield_vk.to_string_lossy().into(),
+            "--cancel_vk-file-path".into(),
+            cancel_vk.to_string_lossy().into(),
+            "--join_vk-file-path".into(),
+            join_vk.to_string_lossy().into(),
             "--admin".into(),
             admin.into(),
         ])?;
@@ -357,4 +392,29 @@ fn is_contract_id(t: &str) -> bool {
         && t.starts_with('C')
         && t.bytes()
             .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+pub(crate) fn normalize_evm_bridge(value: &str) -> AppResult<String> {
+    let hex = value.trim().strip_prefix("0x").unwrap_or(value.trim());
+    if hex.len() != 40 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest(
+            "bridge must be a 20-byte 0x EVM address".into(),
+        ));
+    }
+    Ok(format!("0x{}", hex.to_ascii_lowercase()))
+}
+
+#[cfg(test)]
+mod base_config_tests {
+    use super::normalize_evm_bridge;
+
+    #[test]
+    fn normalizes_exact_evm_addresses() {
+        assert_eq!(
+            normalize_evm_bridge("0xABABABABABABABABABABABABABABABABABABABAB").unwrap(),
+            "0xabababababababababababababababababababab"
+        );
+        assert!(normalize_evm_bridge("0x1234").is_err());
+        assert!(normalize_evm_bridge("0xgggggggggggggggggggggggggggggggggggggggg").is_err());
+    }
 }

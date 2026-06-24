@@ -11,18 +11,36 @@ export default function ShieldUnshieldPanel({
   desk,
   notes,
   userPubkey,
+  disabledReason,
+  onRecheck,
   onDone,
 }: {
   desk: Desk
   notes: Note[]
   userPubkey: string | null
+  disabledReason: string | null
+  onRecheck?: () => Promise<void>
   onDone: () => void
 }) {
   const [mode, setMode] = useState<TransferMode>('shield')
 
   return (
     <>
-      <h2>Shield / Unshield</h2>
+      <h2>Shield assets</h2>
+      <p className="muted">
+        Choose where funds come from. Every shield creates a private note in this desk’s Stellar
+        settlement contract.
+      </p>
+      {disabledReason && (
+        <div className="card" role="alert">
+          <strong>Fund actions unavailable.</strong> <span className="muted">{disabledReason}</span>
+          {onRecheck && (
+            <button type="button" style={{ marginLeft: 10 }} onClick={() => void onRecheck()}>
+              Recheck contract
+            </button>
+          )}
+        </div>
+      )}
       <div className="tabs" role="tablist" aria-label="Shield or unshield assets">
         <button
           type="button"
@@ -33,7 +51,7 @@ export default function ShieldUnshieldPanel({
           aria-controls="asset-transfer-panel"
           onClick={() => setMode('shield')}
         >
-          Shield
+          From Stellar
         </button>
         <button
           type="button"
@@ -44,7 +62,7 @@ export default function ShieldUnshieldPanel({
           aria-controls="asset-transfer-panel"
           onClick={() => setMode('base')}
         >
-          Shield from Base
+          From Base
         </button>
         <button
           type="button"
@@ -55,7 +73,7 @@ export default function ShieldUnshieldPanel({
           aria-controls="asset-transfer-panel"
           onClick={() => setMode('unshield')}
         >
-          Unshield
+          Unshield to Stellar
         </button>
       </div>
 
@@ -65,17 +83,28 @@ export default function ShieldUnshieldPanel({
         aria-labelledby={`${mode}-tab`}
         className="tab-panel"
       >
-        {userPubkey ? (
+        {mode === 'base' ? (
+          <ShieldFromBaseForm
+            desk={desk}
+            userPubkey={userPubkey}
+            disabledReason={disabledReason}
+            onDone={onDone}
+          />
+        ) : userPubkey ? (
           mode === 'shield' ? (
-            <ShieldForm desk={desk} userPubkey={userPubkey} onDone={onDone} />
-          ) : mode === 'base' ? (
-            <ShieldFromBaseForm desk={desk} userPubkey={userPubkey} onDone={onDone} />
+            <ShieldForm
+              desk={desk}
+              userPubkey={userPubkey}
+              disabledReason={disabledReason}
+              onDone={onDone}
+            />
           ) : (
             <UnshieldForm
               key={userPubkey}
               desk={desk}
               notes={notes}
               userPubkey={userPubkey}
+              disabledReason={disabledReason}
               onDone={onDone}
             />
           )

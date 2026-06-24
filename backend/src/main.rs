@@ -83,6 +83,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/desks/:id/fills", get(handlers::get_fills))
         .route("/desks/:id/note-proof", get(handlers::get_note_proof))
         .route(
+            "/desks/:id/base-shield-config",
+            get(handlers::get_base_shield_config),
+        )
+        .route(
             "/desks/:id/base-shields",
             get(handlers::list_base_shields).post(handlers::enqueue_base_shield),
         )

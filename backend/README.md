@@ -26,6 +26,10 @@ Config via env: `MOSAIC_BIND`, `MOSAIC_NETWORK` (default `testnet`), `MOSAIC_STE
 `MOSAIC_DB=data/mosaic.db`), `MOSAIC_ARTIFACTS` (default `artifacts/`),
 `MOSAIC_READ_IDENTITY` (default `m0`).
 
+Base shielding is enabled only when `MOSAIC_BASE_RPC` is set. `MOSAIC_PROVER_DIR` defaults to
+`bridge-prover` relative to the backend working directory and must contain `run-host`; the
+settlement contract itself must already have a Base bridge configured.
+
 PostgreSQL is required for horizontally-scaled production deployments. SQLite uses a one-connection
 pool and remains supported for local development and tests. Existing SQLite desk and backup tables
 are migrated in place.
@@ -39,6 +43,7 @@ are migrated in place.
 - `POST /client-actions/next` and leased heartbeat/complete/fail routes
 - `GET  /desks` · `POST /desks` (deploy a new desk) · `POST /desks/import` (register existing)
 - `GET  /desks/:id` · `GET /desks/:id/root` · `GET /desks/:id/book?pair=&side=`
+- `GET  /desks/:id/base-shield-config` · `GET|POST /desks/:id/base-shields`
 - `GET|PUT /wallet-backups/:backup_id` — opaque AES-GCM wallet snapshots. Updates require a
   separate write capability and generation compare-and-swap; the backend never receives note keys.
 

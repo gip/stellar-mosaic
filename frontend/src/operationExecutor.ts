@@ -9,6 +9,9 @@ import { b64, proveCancel, proveLift } from './prove'
 import { stageRecoverableNote, syncRecoveryNow, updateNoteAndSync } from './recovery'
 import { buildSponsoredShield } from './soroban'
 import { nowMs, nowSeconds } from './time'
+import { Address, nativeToScVal, xdr } from '@stellar/stellar-sdk'
+import { Buffer } from 'buffer'
+import { submissionMode, submitContractCall, submitDirectOrSponsored } from './directTransaction'
 
 /** Execute the private portion of one leased operation. Secrets and owned-note inventory never
  * enter the returned result; only the existing proof/XDR relay calls cross the boundary. */
@@ -79,19 +82,29 @@ async function executeShield(
   if (!asset) throw new Error('The requested asset is not registered on this desk.')
   const session = await api.getAuthSession()
   const sk = randomField(); const rho = randomField(); const owner_tag = await noteTag(sk, rho)
-  const txXdr = await buildSponsoredShield(
-    desk.contract_id, desk.sponsor_pubkey, session.address, request.asset_id, request.amount,
-    fieldToBytes32(owner_tag),
-  )
   const note: Note = {
     id: crypto.randomUUID(), deskId: desk.id, role: 'asset', asset_id: request.asset_id,
     symbol: asset.symbol, amount: request.amount, sk, rho, owner_tag, status: 'active', indexed: false,
     createdAt: nowMs(), operation_id: operationId, operation_state: 'pending-output',
   }
   await stageRecoverableNote(note)
-  const { result } = await api.submitShield(desk.id, txXdr)
-  await updateNoteAndSync(note.id, { indexed: true, txHash: result, operation_state: 'committed' })
-  return { transaction: result }
+  let transaction: string
+  if (submissionMode() === 'direct') {
+    transaction = await submitContractCall(desk.contract_id, 'shield', [
+      new Address(session.address).toScVal(),
+      nativeToScVal(request.asset_id, { type: 'u32' }),
+      nativeToScVal(BigInt(request.amount), { type: 'i128' }),
+      xdr.ScVal.scvBytes(Buffer.from(fieldToBytes32(owner_tag))),
+    ])
+  } else {
+    const txXdr = await buildSponsoredShield(
+      desk.contract_id, desk.sponsor_pubkey, session.address, request.asset_id, request.amount,
+      fieldToBytes32(owner_tag),
+    )
+    transaction = (await api.submitShield(desk.id, txXdr)).result
+  }
+  await updateNoteAndSync(note.id, { indexed: true, txHash: transaction, operation_state: 'committed' })
+  return { transaction }
 }
 
 async function exactInput(desk: Desk, assetId: number, amount: bigint): Promise<Note> {
@@ -148,7 +161,15 @@ async function executeOrder(
     },
   }
   await stageRecoverableNote(output)
-  await api.relayOrder(desk.id, b64(bundle.proof), b64(bundle.publicInputs))
+  await submitDirectOrSponsored(
+    desk.contract_id,
+    'submit_order',
+    [
+      xdr.ScVal.scvBytes(Buffer.from(bundle.proof)),
+      xdr.ScVal.scvBytes(Buffer.from(bundle.publicInputs)),
+    ],
+    () => api.relayOrder(desk.id, b64(bundle.proof), b64(bundle.publicInputs)),
+  )
   await updateNote(offer.id, { status: 'spent', operation_state: 'committed' })
   await updateNote(output.id, { operation_state: 'committed' })
   await syncRecoveryNow()
@@ -187,7 +208,17 @@ async function executeCancel(
     operation_state: 'pending-output',
   }
   await stageRecoverableNote(refund)
-  await api.relayCancel(desk.id, c.pairId, c.side, b64(bundle.proof), b64(bundle.publicInputs))
+  await submitDirectOrSponsored(
+    desk.contract_id,
+    'cancel_order',
+    [
+      nativeToScVal(c.pairId, { type: 'u32' }),
+      nativeToScVal(c.side, { type: 'u32' }),
+      xdr.ScVal.scvBytes(Buffer.from(bundle.proof)),
+      xdr.ScVal.scvBytes(Buffer.from(bundle.publicInputs)),
+    ],
+    () => api.relayCancel(desk.id, c.pairId, c.side, b64(bundle.proof), b64(bundle.publicInputs)),
+  )
   await updateNote(note.id, { status: 'cancelled', cancelledAt: nowMs(), operation_state: 'committed' })
   await updateNote(refund.id, { operation_state: 'committed' })
   await syncRecoveryNow()

@@ -79,10 +79,11 @@ indexer-derived path folds back to that root.
 
 ## Flow
 
-1. **Shield** — user transfers a supported asset into custody; the contract mints an
+1. **Shield** — from Stellar, the user transfers a supported asset into custody; the contract mints an
    `AssetNote { asset, amount, owner_tag }` by inserting `Poseidon(asset, amount, owner_tag)` into the
    tree and emits a `shielded` event so off-chain clients can rebuild paths. Proof-free: the token
-   transfer enforces the amount and amounts are public.
+   transfer enforces the amount and amounts are public. A configured desk can instead accept a
+   Base Sepolia deposit through `shield_from_base`; both sources create the same Stellar note type.
 
 2. **Order** (off-chain; proof = `circuits/lift`) — a party proves membership of an asset note,
    reveals its nullifier, and binds the order terms (`asset_in`, `amount_in`, `asset_out`, `min_out`,
@@ -105,8 +106,8 @@ indexer-derived path folds back to that root.
    submit but cannot redirect. The contract records the nullifier, then transfers the public
    `asset`/`amount` to `to`.
 
-Per-operation VKs: the order VK (op 1) is set at construction; `set_vk(op, vk)` registers the unshield
-(op 2) and cancel VKs.
+All operation VKs (order, unshield, cancel, and join) are validated and installed atomically by the
+constructor. They are immutable after deployment; `protocol_config()` exposes their hashes.
 
 ## End-to-end demo
 

@@ -9,6 +9,9 @@ pub struct Desk {
     pub contract_id: String,
     /// Sponsor / main account public key (G...). Pays all sponsored fees; admin of the contract.
     pub sponsor_pubkey: String,
+    /// First ledger that can contain this desk's initialization events. Browser-side replay starts
+    /// here instead of ledger 1, which is outside public RPC retention.
+    pub event_start_ledger: Option<u64>,
     pub assets: Vec<Asset>,
     pub pairs: Vec<Pair>,
 }

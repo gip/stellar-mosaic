@@ -21,11 +21,13 @@ export default function UnshieldForm({
   desk,
   notes,
   userPubkey,
+  disabledReason,
   onDone,
 }: {
   desk: Desk
   notes: Note[]
   userPubkey: string
+  disabledReason?: string | null
   onDone: () => void
 }) {
   const [assetId, setAssetId] = useState(desk.assets[0]?.asset_id ?? 1)
@@ -137,9 +139,14 @@ export default function UnshieldForm({
           size={58}
         />
       </div>
-      <button type="submit" disabled={busy || !valid || (!!needsRecovery && !recoveryReady)}>
+      <button
+        type="submit"
+        disabled={busy || !valid || !!disabledReason || (!!needsRecovery && !recoveryReady)}
+      >
         {busy
           ? 'Working…'
+          : disabledReason
+            ? 'Waiting for contract verification'
           : needsRecovery && !recoveryReady
             ? 'Enable / repair recovery to prepare note'
             : 'Unshield'}

@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## What this is
 
@@ -138,7 +138,7 @@ deployed contracts/addresses to `.e2e/state.env`. See `docs/e2e-testing.md`.
 - **`circuits/lift` naming is historical** — it is the order proof, not a `lift` entrypoint. All 12
   of its public inputs are used on-chain (`settle` uses `[0..8]`; the book uses `order_leaf`,
   `cancel_owner_tag`, `expiry`, `partial_allowed`).
-- **Immutable per-operation VKs:** order, unshield, cancel, and join VKs are all installed by the
-  constructor and cannot be changed after deployment.
+- **Per-operation VKs:** the order VK (op 1) is set at construction; `set_vk(op, vk)` registers
+  others (unshield is op 2).
 - **Partial fills** exist only in the on-chain order book (exact integer "lots" of the maker's price
   ratio — no change note); `settle`/`settle_exact` are full-fill.

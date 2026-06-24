@@ -67,7 +67,10 @@ settlement contract with `configure_base_bridge(router, image_id, config_id, bri
 
 `backend/src/base_shield.rs` is a durable, crash-resumable worker that automates the validated
 script server-side (proving can't run in a browser). Enqueue a job with
-`POST /desks/:id/base-shields {bridge, deposit_id}`; the worker advances a `base_shields` row through
+`GET /desks/:id/base-shield-config` reports whether the desk's on-chain bridge configuration and the
+backend worker are ready. The frontend reads the bridge from this endpoint rather than accepting a
+manual address. `POST /desks/:id/base-shields {expected_bridge, deposit_id}` re-reads the contract,
+rejects configuration drift, and advances a `base_shields` row through
 `proving → awaiting_finality → minting → active|failed`, persisting the proof in SQL so a restart
 resumes. It invokes `MOSAIC_PROVER_DIR/run-host -- --prove` (proving at a recent in-window block),
 polls Base `finalized` via `cast` (prove-then-finalize), then attests + `shield_from_base` via the

@@ -53,8 +53,8 @@ the lift + wallet helper circuits (→ `frontend/public/circuits/`). The backend
 cd contracts/settlement && stellar contract build --optimize   # target wasm32v1-none
 ```
 
-The VK is set once at deploy via the constructor (`--vk_bytes-file-path target/vk`); per-operation
-VKs (`set_vk(op, vk)`) register the unshield (op 2) and cancel VKs alongside the order VK (op 1).
+The constructor validates and installs the order, unshield, cancel, and join VKs atomically. There is
+no post-deployment VK mutation entrypoint; `protocol_config()` exposes the pinned hashes.
 
 ## Toolchain & version pinning
 
@@ -88,8 +88,8 @@ signatures, and ZK proving through leased client actions.
 
 **Desk model.** A *desk* is its own deployed `settlement` contract + a friendbot-funded sponsor
 ("main") account + its registered assets and pairs. `POST /desks` runs the full deploy pipeline
-(mirrors `scripts/06`): generate + fund sponsor → deploy wasm with the lift VK + admin → set
-unshield/cancel VKs → register assets (`"native"` → XLM SAC) and pairs.
+(mirrors `scripts/06`): generate + fund sponsor → deploy wasm with all immutable VKs + admin →
+register assets (`"native"` → XLM SAC) and pairs.
 
 **Trust / privacy boundary.**
 - Plaintext note secrets (`sk`, `rho`) never leave the browser; owner tags, nullifiers, order leaves,

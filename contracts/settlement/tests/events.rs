@@ -8,9 +8,13 @@
 //! the legacy field tuple. If the macro's encoding ever drifts (e.g. data_format flips to a map, or a
 //! field is reordered), this fails instead of silently breaking the indexer.
 
-use settlement::{Filled, Joined, NoteInserted, Settled, Shielded, Unshielded};
+use settlement::{
+    AssetRegistered, BookInitialized, Filled, Joined, NoteInserted, OrderRemoved, OrderUpserted,
+    PairRegistered, Settled, Shielded, Unshielded,
+};
 use soroban_sdk::{
-    symbol_short, xdr::ScVal, BytesN, Env, Event, FromVal, IntoVal, Symbol, Val, Vec,
+    symbol_short, testutils::Address as _, xdr::ScVal, Address, BytesN, Env, Event, FromVal, IntoVal,
+    Symbol, Val, Vec,
 };
 
 fn scval(env: &Env, v: Val) -> ScVal {
@@ -106,5 +110,69 @@ fn filled_wire_format() {
         },
         symbol_short!("filled"),
         (1u32, 100i128, 2u32, 2000i128, t).into_val(&env),
+    );
+}
+
+#[test]
+fn book_initialization_and_registry_wire_format() {
+    let env = Env::default();
+    let (a, b, c, d) = (tag(&env, 1), tag(&env, 2), tag(&env, 3), tag(&env, 4));
+    assert_wire(
+        &env,
+        &BookInitialized {
+            schema_version: 1,
+            lift_vk_hash: a.clone(),
+            unshield_vk_hash: b.clone(),
+            cancel_vk_hash: c.clone(),
+            join_vk_hash: d.clone(),
+        },
+        symbol_short!("bookinit"),
+        (1u32, a, b, c, d).into_val(&env),
+    );
+
+    let token = Address::generate(&env);
+    assert_wire(
+        &env,
+        &AssetRegistered { asset_id: 7, token: token.clone() },
+        symbol_short!("assetreg"),
+        (7u32, token).into_val(&env),
+    );
+    assert_wire(
+        &env,
+        &PairRegistered { pair_id: 3, base_asset: 7, quote_asset: 9 },
+        symbol_short!("pairreg"),
+        (3u32, 7u32, 9u32).into_val(&env),
+    );
+}
+
+#[test]
+fn book_delta_wire_format() {
+    let env = Env::default();
+    let (id, output, cancel, leaf) = (tag(&env, 1), tag(&env, 2), tag(&env, 3), tag(&env, 4));
+    assert_wire(
+        &env,
+        &OrderUpserted {
+            sequence: 11,
+            pair_id: 2,
+            side: 1,
+            order_id: id.clone(),
+            amount_in: 100,
+            min_out: 1500,
+            remaining_in: 44,
+            output_owner_tag: output.clone(),
+            cancel_owner_tag: cancel.clone(),
+            order_leaf: leaf.clone(),
+            expiry: 5000,
+            partial_allowed: true,
+        },
+        symbol_short!("ordupsert"),
+        (11u64, 2u32, 1u32, id.clone(), 100i128, 1500i128, 44i128, output, cancel, leaf, 5000u64, true)
+            .into_val(&env),
+    );
+    assert_wire(
+        &env,
+        &OrderRemoved { sequence: 12, pair_id: 2, side: 1, order_id: id.clone(), reason: 1 },
+        symbol_short!("ordremove"),
+        (12u64, 2u32, 1u32, id, 1u32).into_val(&env),
     );
 }

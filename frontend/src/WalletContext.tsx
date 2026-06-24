@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { connect as fxConnect, currentAddress, network as currentNetwork } from './wallet'
+import { reconcileDirectSubmissions } from './directTransaction'
 
 const DISCONNECTED_KEY = 'stellar-mosaic.wallet-disconnected'
 
@@ -39,6 +40,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const disconnected = useRef(isLocallyDisconnected())
 
   useEffect(() => {
+    void reconcileDirectSubmissions()
     let active = true
 
     async function refresh() {

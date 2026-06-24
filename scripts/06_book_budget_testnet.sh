@@ -26,6 +26,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BOOK="$ROOT/contracts/settlement/tests/fixtures/book"
+VKS="$ROOT/backend/vks"
 CONTRACT="$ROOT/contracts/settlement"
 NETWORK="${NETWORK:-testnet}"
 IDENTITY="${IDENTITY:-m0}"
@@ -76,11 +77,11 @@ WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
 
 echo ">>> [deploy] with the order/lift VK + admin"
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
-  -- --vk_bytes-file-path "$BOOK/vk" --admin "$ADMIN")
+  -- --lift_vk-file-path "$VKS/lift_vk" --unshield_vk-file-path "$VKS/unshield_vk" \
+  --cancel_vk-file-path "$VKS/cancel_vk" --join_vk-file-path "$VKS/join_vk" --admin "$ADMIN")
 echo "    SETTLEMENT CONTRACT: $CID"
 
-echo ">>> [setup] cancel VK (op 3) + assets 1,2 -> XLM SAC + canonical pair (id 0)"
-inv --send yes -- set_vk --op 3 --vk_bytes-file-path "$BOOK/cancel_vk" >/dev/null
+echo ">>> [setup] assets 1,2 -> XLM SAC + canonical pair (id 0)"
 inv --send yes -- register_asset --asset_id 1 --token "$XLM_SAC" >/dev/null
 inv --send yes -- register_asset --asset_id 2 --token "$XLM_SAC" >/dev/null
 inv --send yes -- register_pair --base_asset 1 --quote_asset 2 >/dev/null

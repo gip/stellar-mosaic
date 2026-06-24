@@ -225,7 +225,7 @@ impl Db {
     }
 
     pub async fn get_desk(&self, id: &str) -> AppResult<Desk> {
-        let row = sqlx::query("SELECT id,name,contract_id,sponsor_pubkey FROM desks WHERE id=?")
+        let row = sqlx::query("SELECT id,name,contract_id,sponsor_pubkey,from_ledger FROM desks WHERE id=?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?
@@ -266,6 +266,7 @@ impl Db {
             name: row.try_get(1)?,
             contract_id: row.try_get(2)?,
             sponsor_pubkey: row.try_get(3)?,
+            event_start_ledger: row.try_get::<Option<i64>, _>(4)?.map(|x| x as u64),
             assets,
             pairs,
         })

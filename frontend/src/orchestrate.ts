@@ -15,6 +15,9 @@ import {
   syncRecoveryNow,
   updateNoteAndSync,
 } from './recovery'
+import { Address, xdr } from '@stellar/stellar-sdk'
+import { Buffer } from 'buffer'
+import { submitDirectOrSponsored } from './directTransaction'
 
 export interface JoinResult {
   target: Note // the carved/accumulated output (active, but unspendable until indexed)
@@ -52,8 +55,17 @@ export async function executeUnshield(
     recipient,
   })
 
-  onStatus?.('Submitting (sponsored)…')
-  await api.relayUnshield(desk.id, to, b64(bundle.proof), b64(bundle.publicInputs))
+  onStatus?.('Submitting…')
+  await submitDirectOrSponsored(
+    desk.contract_id,
+    'unshield',
+    [
+      new Address(to).toScVal(),
+      xdr.ScVal.scvBytes(Buffer.from(bundle.proof)),
+      xdr.ScVal.scvBytes(Buffer.from(bundle.publicInputs)),
+    ],
+    () => api.relayUnshield(desk.id, to, b64(bundle.proof), b64(bundle.publicInputs)),
+  )
 
   // The relay only resolves after the sponsored transaction succeeds. Preserve the confirmed note
   // on every earlier failure so the user can retry without corrupting local wallet state.
@@ -175,8 +187,16 @@ export async function executeJoin(
   target = staged[0]
   change = change ? staged[1] : null
 
-  onStatus?.('Submitting (sponsored)…')
-  await api.relayJoin(desk.id, b64(bundle.proof), b64(bundle.publicInputs))
+  onStatus?.('Submitting…')
+  await submitDirectOrSponsored(
+    desk.contract_id,
+    'join',
+    [
+      xdr.ScVal.scvBytes(Buffer.from(bundle.proof)),
+      xdr.ScVal.scvBytes(Buffer.from(bundle.publicInputs)),
+    ],
+    () => api.relayJoin(desk.id, b64(bundle.proof), b64(bundle.publicInputs)),
+  )
 
   await updateNote(a.id, { status: 'spent' })
   if (b) await updateNote(b.id, { status: 'spent' })

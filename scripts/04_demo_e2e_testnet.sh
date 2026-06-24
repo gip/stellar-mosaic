@@ -20,6 +20,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEMO="$ROOT/contracts/settlement/tests/fixtures/demo"
 CONTRACT="$ROOT/contracts/settlement"
+VKS="$ROOT/backend/vks"
 NETWORK="${NETWORK:-testnet}"
 IDENTITY="${IDENTITY:-m0}"
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -82,7 +83,8 @@ WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
 
 echo ">>> [deploy] with the order/lift VK + admin"
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
-  -- --vk_bytes-file-path "$DEMO/vk" --admin "$ADMIN")
+  -- --lift_vk-file-path "$VKS/lift_vk" --unshield_vk-file-path "$VKS/unshield_vk" \
+  --cancel_vk-file-path "$VKS/cancel_vk" --join_vk-file-path "$VKS/join_vk" --admin "$ADMIN")
 echo "    SETTLEMENT CONTRACT: $CID"
 state_set SETTLEMENT_CID "$CID"
 stage "deploy"
@@ -92,12 +94,11 @@ note "admin"              "$ADMIN"
 note "explorer"           "https://stellar.expert/explorer/$NETWORK/contract/$CID"
 endstage
 
-echo ">>> [setup] register unshield VK (op 2) + map asset-ids 1,2 -> XLM SAC"
-inv --send yes -- set_vk --op 2 --vk_bytes-file-path "$DEMO/unshield_vk" >/dev/null
+echo ">>> [setup] map asset-ids 1,2 -> XLM SAC"
 inv --send yes -- register_asset --asset_id 1 --token "$XLM_SAC" >/dev/null
 inv --send yes -- register_asset --asset_id 2 --token "$XLM_SAC" >/dev/null
 stage "setup"
-note "unshield VK (op 2)" "registered"
+note "operation VKs"       "immutable"
 note "asset 1 -> token"   "$XLM_SAC"
 note "asset 2 -> token"   "$XLM_SAC"
 endstage

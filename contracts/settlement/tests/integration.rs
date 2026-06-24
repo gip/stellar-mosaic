@@ -40,7 +40,6 @@ const UNSHIELD_PI: &[u8] = include_bytes!("fixtures/unshield_public_inputs");
 const OTAG_U: &[u8] = include_bytes!("fixtures/owner_tag_u");
 // The payout address the unshield proof's `recipient` field commits to (a fixed test address).
 const UNSHIELD_TO: &str = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
-const UNSHIELD_OP: u32 = 2;
 
 // Order A/B and unshield note parameters (must match the fixtures' proofs).
 const ASSET_1: u32 = 1;
@@ -60,8 +59,16 @@ fn test_env() -> Env {
 
 fn deploy(env: &Env) -> (Address, Address) {
     let admin = Address::generate(env);
-    let vk = Bytes::from_slice(env, VK);
-    let id = env.register(Settlement, (vk, admin.clone()));
+    let id = env.register(
+        Settlement,
+        (
+            bytes(env, VK),
+            bytes(env, UNSHIELD_VK),
+            bytes(env, VK),
+            bytes(env, VK),
+            admin.clone(),
+        ),
+    );
     (id, admin)
 }
 
@@ -425,7 +432,6 @@ fn register_asset_rejects_rebind() {
 fn setup_unshield(env: &Env, id: &Address) -> (Address, Address) {
     let (token, holder) = register_funded_asset(env, id, ASSET_1, AMOUNT_U);
     let client = SettlementClient::new(env, id);
-    client.set_vk(&UNSHIELD_OP, &bytes(env, UNSHIELD_VK));
     client.shield(&holder, &ASSET_1, &AMOUNT_U, &tag(env, OTAG_U));
     let to = Address::from_string(&String::from_str(env, UNSHIELD_TO));
     (token, to)
@@ -485,8 +491,7 @@ fn unshield_rejects_wrong_recipient() {
 fn unshield_rejects_unknown_root() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    // Register the VK but do NOT shield, so R_U was never produced on-chain.
-    SettlementClient::new(&env, &id).set_vk(&UNSHIELD_OP, &bytes(&env, UNSHIELD_VK));
+    // Do NOT shield, so R_U was never produced on-chain.
     let to = Address::from_string(&String::from_str(&env, UNSHIELD_TO));
 
     let err = env
@@ -503,21 +508,15 @@ fn unshield_rejects_unknown_root() {
 }
 
 #[test]
-fn unshield_rejects_missing_vk() {
+fn constructor_pins_all_operation_vk_hashes() {
     let env = test_env();
     let (id, _admin) = deploy(&env);
-    let to = Address::from_string(&String::from_str(&env, UNSHIELD_TO));
-    let err = env
-        .as_contract(&id, || {
-            Settlement::unshield(
-                env.clone(),
-                to.clone(),
-                bytes(&env, UNSHIELD_PROOF),
-                bytes(&env, UNSHIELD_PI),
-            )
-        })
-        .expect_err("missing unshield vk");
-    assert_eq!(err as u32, Error::VkNotSet as u32);
+    let config = SettlementClient::new(&env, &id).protocol_config();
+    let lift_hash: BytesN<32> = env.crypto().sha256(&bytes(&env, VK)).into();
+    let unshield_hash: BytesN<32> = env.crypto().sha256(&bytes(&env, UNSHIELD_VK)).into();
+    assert_eq!(config.schema_version, 1);
+    assert_eq!(config.lift_vk_hash, lift_hash);
+    assert_eq!(config.unshield_vk_hash, unshield_hash);
 }
 
 // ===========================================================================

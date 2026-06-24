@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "wasm_hash": "5fe80b5f11ce64275712b7d430fadae9a894153a817129f6e3a9193f8b566d0a",
+  "vk_hashes": {
+    "lift": "3ab366aed23c1f3e2cc6414753e7b3a4fbd18ee394b7919e20e705e94a2ca10a",
+    "unshield": "b22a972af64f33d36e9d7690486e3dbc394239c9187dade96e68bf06fba6a406",
+    "cancel": "d03c1f6fafe74509ee94e9b94365d6af304f2438a92cb4892dc37839114ad993",
+    "join": "4d783fef38b696ab4a39de5efd3c0cb4e0973420f87089d3429376d7a333e2fd"
+  }
+}

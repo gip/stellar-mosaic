@@ -29,6 +29,7 @@ EVM="$ROOT/evm"
 PROVER="$ROOT/bridge-prover"
 CONTRACT="$ROOT/contracts/settlement"
 FIX="$CONTRACT/tests/fixtures"
+VKS="$ROOT/backend/vks"
 export PATH="$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH"
 
 # Persist key outputs (Base contracts, settlement id, router, roots) to <repo>/.e2e/state.env so the
@@ -175,7 +176,8 @@ inv() {
   return 1
 }
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
-  -- --vk_bytes-file-path "$FIX/vk" --admin "$STELLAR_ADDR")
+  -- --lift_vk-file-path "$VKS/lift_vk" --unshield_vk-file-path "$VKS/unshield_vk" \
+  --cancel_vk-file-path "$VKS/cancel_vk" --join_vk-file-path "$VKS/join_vk" --admin "$STELLAR_ADDR")
 echo "    settlement = $CID"
 state_set BASE_SETTLEMENT_CID "$CID"
 state_set BASE_DEPOSIT_BLOCK "$BLOCK"
