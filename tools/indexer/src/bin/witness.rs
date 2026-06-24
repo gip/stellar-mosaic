@@ -390,6 +390,10 @@ fn run() -> Result<(), String> {
                 print_bits_array(&mut out, "low_index_bits", &w.low_path.index_bits)?;
                 print_u256_array(&mut out, "new_path", &w.new_path.siblings)?;
                 print_bits_array(&mut out, "new_index_bits", &w.new_path.index_bits)?;
+                writeln!(out, "pred_leaf = \"{}\"", u256_hex(&w.pred_leaf))
+                    .map_err(|e| e.to_string())?;
+                print_u256_array(&mut out, "pred_path", &w.pred_path.siblings)?;
+                print_bits_array(&mut out, "pred_index_bits", &w.pred_path.index_bits)?;
             }
             "ordernull" => {
                 // order-consumption nullifier = compress(ORDER_NULLIFIER_DOMAIN, order_leaf).

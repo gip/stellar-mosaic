@@ -135,6 +135,7 @@ async function executeOrder(
     low_value: imt.low_value, low_next_value: imt.low_next_value, low_next_index: imt.low_next_index,
     low_path: imt.low_path, low_index_bits: imt.low_index_bits,
     new_path: imt.new_path, new_index_bits: imt.new_index_bits,
+    pred_leaf: imt.pred_leaf, pred_path: imt.pred_path, pred_index_bits: imt.pred_index_bits,
     nullifier_in: terms.nullifier_in, asset_in: assetIn, amount_in: offer.amount,
     asset_out: assetOut, min_out: request.min_out, output_owner_tag: terms.output_owner_tag,
     cancel_owner_tag: terms.cancel_owner_tag, expiry,
@@ -202,6 +203,7 @@ async function executeCancel(
     low_value: imt.low_value, low_next_value: imt.low_next_value, low_next_index: imt.low_next_index,
     low_path: imt.low_path, low_index_bits: imt.low_index_bits,
     new_path: imt.new_path, new_index_bits: imt.new_index_bits,
+    pred_leaf: imt.pred_leaf, pred_path: imt.pred_path, pred_index_bits: imt.pred_index_bits,
     order_root: op.order_root, order_nullifier: op.consumption_nullifier,
     asset_in: c.asset_in, amount_in: c.amount_in, return_owner_tag,
   })

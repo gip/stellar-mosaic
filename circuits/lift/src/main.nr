@@ -39,6 +39,9 @@ fn main(
     low_index_bits: [Field; TREE_DEPTH],
     new_path: [Field; TREE_DEPTH],
     new_index_bits: [Field; TREE_DEPTH],
+    pred_leaf: Field, // leaf at new_index-1 (append-frontier proof)
+    pred_path: [Field; TREE_DEPTH],
+    pred_index_bits: [Field; TREE_DEPTH],
     // --- public inputs (positional; byte offsets must match the contract's `place_order`) ---
     domain: pub Field, // [0]  must equal LIFT_DOMAIN
     note_root: pub Field, // [1]  consumed-note membership root (contract: root history)
@@ -77,6 +80,9 @@ fn main(
         low_index_bits,
         new_path,
         new_index_bits,
+        pred_leaf,
+        pred_path,
+        pred_index_bits,
     );
     assert(root_out == nullifier_root_out);
 

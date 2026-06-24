@@ -52,6 +52,9 @@ fn main(
     t_low_index_bits: [Field; TREE_DEPTH],
     t_new_path: [Field; TREE_DEPTH],
     t_new_index_bits: [Field; TREE_DEPTH],
+    t_pred_leaf: Field, // leaf at taker new_index-1 (append-frontier proof)
+    t_pred_path: [Field; TREE_DEPTH],
+    t_pred_index_bits: [Field; TREE_DEPTH],
     // --- up to 3 makers (amount_in == 0 => unused slot) ---
     m_asset_in: [Field; N_MAKERS],
     m_amount_in: [Field; N_MAKERS],
@@ -71,6 +74,9 @@ fn main(
     m_low_index_bits: [[Field; TREE_DEPTH]; N_MAKERS],
     m_new_path: [[Field; TREE_DEPTH]; N_MAKERS],
     m_new_index_bits: [[Field; TREE_DEPTH]; N_MAKERS],
+    m_pred_leaf: [Field; N_MAKERS], // leaf at each maker new_index-1 (append-frontier proof; gated)
+    m_pred_path: [[Field; TREE_DEPTH]; N_MAKERS],
+    m_pred_index_bits: [[Field; TREE_DEPTH]; N_MAKERS],
     // --- public inputs ---
     domain: pub Field,
     order_root: pub Field,
@@ -137,6 +143,9 @@ fn main(
         t_low_index_bits,
         t_new_path,
         t_new_index_bits,
+        t_pred_leaf,
+        t_pred_path,
+        t_pred_index_bits,
     );
 
     // --- makers: each fully filled; accumulate proceeds + payment ---
@@ -159,6 +168,11 @@ fn main(
 
         m_amount_in[i].assert_max_bit_size::<AMOUNT_BITS>();
         m_min_out[i].assert_max_bit_size::<AMOUNT_BITS>();
+        // a real maker must demand positive payment. With >=1 real maker this forces total_in_paid
+        // >= 1, so any taker remainder strictly shrinks amount_in -> the re-rested remainder leaf can
+        // never equal the consumed taker leaf (whose nullifier is already spent), which would
+        // otherwise lock the remainder forever.
+        assert(!real | (m_min_out[i] != 0));
 
         let leaf = build_order_leaf(
             m_asset_in[i],
@@ -200,6 +214,9 @@ fn main(
             m_low_index_bits[i],
             m_new_path[i],
             m_new_index_bits[i],
+            m_pred_leaf[i],
+            m_pred_path[i],
+            m_pred_index_bits[i],
         );
 
         // accumulate (gated): taker receives maker.amount_in; pays maker.min_out.
@@ -241,6 +258,9 @@ fn main(
     let remainder = t_amount_in - total_in_paid;
     let rem_real = remainder != 0;
     let rem_real_f = rem_real as Field;
+    // a live remainder partially fills the taker, so it is only allowed if the taker authorized
+    // partial fills (t_partial is pinned by taker_leaf membership, so it cannot be forged).
+    assert(rem_real_f * (t_partial - 1) == 0);
     assert(remainder_live == rem_real_f);
     // when live, the remainder inherits the taker's asset/tags/expiry/flag and carries the leftover
     // amount at the taker's exact limit ratio; when not live every public field is forced to 0.
@@ -264,4 +284,199 @@ fn main(
         rem_partial_allowed,
     );
     assert(remainder_order_leaf == rem_real_f * computed_rem_leaf);
+}
+
+// --- test harness: a full valid 1-taker x 1-maker match, exercised for the P1 negatives ----------
+//
+// Builds a complete, self-consistent witness (order tree with the two leaves, genesis IMT advanced by
+// the taker + maker consumption nullifiers, proceeds + remainder) and calls `main`. The happy case
+// must pass; the two `should_fail` cases flip exactly one term so the FIRST failing constraint is the
+// P1 check under test (the order tree / IMT / proceeds are rebuilt for the flipped term so they still
+// pass). Tree helpers mirror circuits/mosaic/src/lib.nr's IMT tests.
+
+fn z_ladder() -> [Field; TREE_DEPTH] {
+    let mut z = [0; TREE_DEPTH];
+    for i in 1..TREE_DEPTH {
+        z[i] = mosaic::compress(z[i - 1], z[i - 1]);
+    }
+    z
+}
+fn bits_0() -> [Field; TREE_DEPTH] {
+    [0; TREE_DEPTH]
+}
+fn bits_1() -> [Field; TREE_DEPTH] {
+    let mut b = [0; TREE_DEPTH];
+    b[0] = 1;
+    b
+}
+fn bits_2() -> [Field; TREE_DEPTH] {
+    let mut b = [0; TREE_DEPTH];
+    b[1] = 1;
+    b
+}
+// Path for index 0 or 1 (sibling at level 0 is the other leaf; higher levels are zero subtrees).
+fn path_lvl0(sib0: Field, z: [Field; TREE_DEPTH]) -> [Field; TREE_DEPTH] {
+    let mut p = z;
+    p[0] = sib0;
+    p
+}
+// Path for index 2 when indices 0,1 hold leaf0,leaf1 (rest empty): sibling at level 1 is H(leaf0,leaf1).
+fn path_idx2(leaf0: Field, leaf1: Field, z: [Field; TREE_DEPTH]) -> [Field; TREE_DEPTH] {
+    let mut p = z;
+    p[1] = mosaic::compress(leaf0, leaf1);
+    p
+}
+
+struct Ins {
+    low_value: Field,
+    low_next_value: Field,
+    low_next_index: Field,
+    low_path: [Field; TREE_DEPTH],
+    low_bits: [Field; TREE_DEPTH],
+    new_path: [Field; TREE_DEPTH],
+    new_bits: [Field; TREE_DEPTH],
+    pred_leaf: Field,
+    pred_path: [Field; TREE_DEPTH],
+    pred_bits: [Field; TREE_DEPTH],
+}
+
+// Witnesses to consume nf_t then nf_m against a fresh (genesis) IMT. Returns (root_in, root_out, taker
+// insert, maker insert), branching on the two nullifiers' order so the maker's low leaf is correct.
+fn imt_two(nf_t: Field, nf_m: Field) -> (Field, Field, Ins, Ins) {
+    let z = z_ladder();
+    let genesis = ImtLeaf { value: 0, next_value: 0, next_index: 0 };
+    let root_in = fold_root(genesis.hash(), z, bits_0());
+
+    // taker insert at idx 1 (low = genesis at idx 0).
+    let updated_low_t = ImtLeaf { value: 0, next_value: nf_t, next_index: 1 };
+    let leaf_t = ImtLeaf { value: nf_t, next_value: 0, next_index: 0 };
+    let it = Ins {
+        low_value: 0,
+        low_next_value: 0,
+        low_next_index: 0,
+        low_path: z,
+        low_bits: bits_0(),
+        new_path: path_lvl0(updated_low_t.hash(), z),
+        new_bits: bits_1(),
+        pred_leaf: updated_low_t.hash(),
+        pred_path: z,
+        pred_bits: bits_0(),
+    };
+
+    // maker insert at idx 2 against the post-taker root; list {0 -> nf_t -> inf}, leaf0=updated_low_t,
+    // leaf1=leaf_t (the maker witnesses below fold to that intermediate root, which `main` rethreads).
+    let (im, root_out) = if std::field::bn254::lt(nf_t, nf_m) {
+        // nf_m > nf_t: low = leaf1 (current max).
+        let updated_low_m = ImtLeaf { value: nf_t, next_value: nf_m, next_index: 2 };
+        let leaf_m = ImtLeaf { value: nf_m, next_value: 0, next_index: 0 };
+        let new_path_m = path_idx2(updated_low_t.hash(), updated_low_m.hash(), z);
+        let im = Ins {
+            low_value: nf_t,
+            low_next_value: 0,
+            low_next_index: 0,
+            low_path: path_lvl0(updated_low_t.hash(), z),
+            low_bits: bits_1(),
+            new_path: new_path_m,
+            new_bits: bits_2(),
+            pred_leaf: updated_low_m.hash(),
+            pred_path: path_lvl0(updated_low_t.hash(), z),
+            pred_bits: bits_1(),
+        };
+        (im, fold_root(leaf_m.hash(), new_path_m, bits_2()))
+    } else {
+        // nf_m < nf_t: low = leaf0 (genesis, already repointed to nf_t).
+        let updated_low_m = ImtLeaf { value: 0, next_value: nf_m, next_index: 2 };
+        let leaf_m = ImtLeaf { value: nf_m, next_value: nf_t, next_index: 1 };
+        let new_path_m = path_idx2(updated_low_m.hash(), leaf_t.hash(), z);
+        let im = Ins {
+            low_value: 0,
+            low_next_value: nf_t,
+            low_next_index: 1,
+            low_path: path_lvl0(leaf_t.hash(), z),
+            low_bits: bits_0(),
+            new_path: new_path_m,
+            new_bits: bits_2(),
+            pred_leaf: leaf_t.hash(),
+            pred_path: path_lvl0(updated_low_m.hash(), z),
+            pred_bits: bits_1(),
+        };
+        (im, fold_root(leaf_m.hash(), new_path_m, bits_2()))
+    };
+    (root_in, root_out, it, im)
+}
+
+// Run a valid match with the given taker partial flag, maker payment, and (reached only on the happy
+// path) remainder limit. Taker: give 100 a1, want >=40 a2, partial=`t_partial`. Maker0: give 60 a2,
+// want `m0_min_out` a1. Taker receives 60 a2, pays `m0_min_out` a1, re-rests the leftover.
+fn run_match(t_partial: Field, m0_min_out: Field, rem_min_out: Field) {
+    let z = z_ladder();
+    let t_out_tag = 0x44;
+    let t_cancel_tag = 0x55;
+    let t_expiry = 100000;
+    let now = 100;
+    let taker_leaf = build_order_leaf(1, 100, 2, 40, t_out_tag, t_cancel_tag, t_expiry, t_partial);
+
+    let m_out_tag0 = 0x66;
+    let m_cancel_tag0 = 0x77;
+    let maker_leaf = build_order_leaf(2, 60, 1, m0_min_out, m_out_tag0, m_cancel_tag0, t_expiry, 1);
+
+    // Order tree: taker @0, maker @1.
+    let order_root = fold_root(taker_leaf, path_lvl0(maker_leaf, z), bits_0());
+
+    // Consumption nullifiers + their sequential IMT inserts.
+    let nf_t = order_consumption_nullifier(taker_leaf);
+    let nf_m = order_consumption_nullifier(maker_leaf);
+    let (root_in, root_out, it, im) = imt_two(nf_t, nf_m);
+
+    let total_out = 60; // a2 the taker receives = maker.amount_in
+    let total_in_paid = m0_min_out; // a1 the taker pays = maker.min_out
+    let remainder = 100 - total_in_paid;
+    let p0_tag = note_owner_tag(t_out_tag, nonce(taker_leaf, 0));
+    let p1_tag = note_owner_tag(m_out_tag0, nonce(taker_leaf, 1));
+    let rem_leaf = build_order_leaf(1, remainder, 2, rem_min_out, t_out_tag, t_cancel_tag, t_expiry, t_partial);
+
+    let zb = bits_0(); // zero index-bits for disabled maker slots
+    let zeros: [Field; TREE_DEPTH] = [0; TREE_DEPTH];
+
+    main(
+        // taker order
+        1, 100, 2, 40, t_out_tag, t_cancel_tag, t_expiry, t_partial,
+        path_lvl0(maker_leaf, z), bits_0(),
+        it.low_value, it.low_next_value, it.low_next_index, it.low_path, it.low_bits, it.new_path,
+        it.new_bits, it.pred_leaf, it.pred_path, it.pred_bits,
+        // makers (slot 0 real; 1,2 null)
+        [2, 0, 0], [60, 0, 0], [1, 0, 0], [m0_min_out, 0, 0], [m_out_tag0, 0, 0], [m_cancel_tag0, 0, 0],
+        [t_expiry, 0, 0], [1, 0, 0],
+        [path_lvl0(taker_leaf, z), zeros, zeros], [bits_1(), zb, zb],
+        [im.low_value, 0, 0], [im.low_next_value, 0, 0], [im.low_next_index, 0, 0],
+        [im.low_path, zeros, zeros], [im.low_bits, zb, zb],
+        [im.new_path, zeros, zeros], [im.new_bits, zb, zb],
+        [im.pred_leaf, 0, 0], [im.pred_path, zeros, zeros], [im.pred_bits, zb, zb],
+        // public inputs
+        5, order_root, root_in, root_out, now,
+        nf_t, nf_m, 0, 0,
+        1, 2, total_out, p0_tag, // proceeds 0: taker
+        1, 1, total_in_paid, p1_tag, // proceeds 1: maker0
+        0, 0, 0, 0, // proceeds 2
+        0, 0, 0, 0, // proceeds 3
+        1, 1, remainder, 2, rem_min_out, t_out_tag, t_cancel_tag, t_expiry, t_partial, rem_leaf,
+    );
+}
+
+#[test]
+fn match_happy_path_partial_taker() {
+    // partial=1, maker pays 50 -> remainder 50 re-rests at the taker's ratio (rem_min_out 20).
+    run_match(1, 50, 20);
+}
+
+#[test(should_fail)]
+fn match_rejects_partial_when_not_allowed() {
+    // A live remainder partially fills the taker, forbidden when partial_allowed=0 (P1).
+    run_match(0, 50, 20);
+}
+
+#[test(should_fail)]
+fn match_rejects_zero_price_maker() {
+    // A real maker demanding zero payment is rejected (P1) before it can lock the remainder.
+    run_match(1, 0, 40);
 }

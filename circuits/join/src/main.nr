@@ -42,6 +42,9 @@ fn main(
     low1_index_bits: [Field; TREE_DEPTH],
     new1_path: [Field; TREE_DEPTH],
     new1_index_bits: [Field; TREE_DEPTH],
+    pred1_leaf: Field, // leaf at new1_index-1 (append-frontier proof)
+    pred1_path: [Field; TREE_DEPTH],
+    pred1_index_bits: [Field; TREE_DEPTH],
     // --- private witness: input note 2 (optional; amount_2 == 0 => null padding) ---
     sk_2: Field,
     rho_2: Field,
@@ -57,6 +60,9 @@ fn main(
     low2_index_bits: [Field; TREE_DEPTH],
     new2_path: [Field; TREE_DEPTH],
     new2_index_bits: [Field; TREE_DEPTH],
+    pred2_leaf: Field, // leaf at new2_index-1 (append-frontier proof; gated on real_2)
+    pred2_path: [Field; TREE_DEPTH],
+    pred2_index_bits: [Field; TREE_DEPTH],
     // --- public inputs (positional; byte offsets must match the contract's `join`) ---
     domain: pub Field, // [0]  must equal JOIN_DOMAIN
     note_root: pub Field, // [1]  membership root
@@ -100,6 +106,9 @@ fn main(
         low1_index_bits,
         new1_path,
         new1_index_bits,
+        pred1_leaf,
+        pred1_path,
+        pred1_index_bits,
     );
     let low2 =
         ImtLeaf { value: low2_value, next_value: low2_next_value, next_index: low2_next_index };
@@ -112,6 +121,9 @@ fn main(
         low2_index_bits,
         new2_path,
         new2_index_bits,
+        pred2_leaf,
+        pred2_path,
+        pred2_index_bits,
     );
     assert(root_out == nullifier_root_out);
 

@@ -379,6 +379,11 @@ pub struct ImtWitness {
     pub low_next_index: u64,
     pub low_path: MerklePath,
     pub new_path: MerklePath,
+    /// Append-frontier proof: the leaf at `new_index - 1` and its path in the intermediate root
+    /// (after the low-leaf repoint, before the new leaf is written). Pins `new_index` to the append
+    /// frontier so the circuit cannot insert into a gap. `pred_path.index_bits` is `pred_index_bits`.
+    pub pred_leaf: U256,
+    pub pred_path: MerklePath,
     pub root_out: U256,
 }
 
@@ -443,6 +448,12 @@ impl NullifierImt {
         self.leaves[low_idx] = updated_low;
         // the new slot's path in r1 (the empty append slot at new_index).
         let new_path = self.tree.path(new_index);
+        // append-frontier proof: the occupied leaf immediately left of the append slot, in r1. Since
+        // new_index == tree.len(), the predecessor is the last occupied leaf (possibly the just-
+        // repointed low leaf). Both reads are against the current (r1) tree state.
+        let pred_index = new_index - 1;
+        let pred_leaf = imt_leaf_hash(&env, self.tree.hasher(), &self.leaves[pred_index]);
+        let pred_path = self.tree.path(pred_index);
         // write the new leaf, splicing it after the low leaf.
         let new_leaf = ImtLeaf {
             value,
@@ -458,6 +469,8 @@ impl NullifierImt {
             low_next_index: low.next_index,
             low_path,
             new_path,
+            pred_leaf,
+            pred_path,
             root_out: self.tree.root(),
         }
     }

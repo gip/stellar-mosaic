@@ -166,9 +166,11 @@ impl ImtLeaf {
 /// Prove non-membership of `value` against `root_in`, then insert it. Returns `root_out`.
 ///
 /// Witnesses (supplied by the prover against the real tree):
-///   `low`             the predecessor leaf,
+///   `low`             the predecessor leaf (sorted-list low leaf),
 ///   `low_path/_bits`  its membership path,
-///   `new_path/_bits`  the append slot's path (its index encodes `new_index`).
+///   `new_path/_bits`  the append slot's path (its index encodes `new_index`),
+///   `pred_*`          the leaf at `new_index - 1` and its path, pinning `new_index` to the append
+///                     frontier (see `imt_insert_opt`).
 pub fn imt_insert(
     root_in: Field,
     value: Field,
@@ -177,6 +179,9 @@ pub fn imt_insert(
     low_index_bits: [Field; TREE_DEPTH],
     new_path: [Field; TREE_DEPTH],
     new_index_bits: [Field; TREE_DEPTH],
+    pred_leaf: Field,
+    pred_path: [Field; TREE_DEPTH],
+    pred_index_bits: [Field; TREE_DEPTH],
 ) -> Field {
     imt_insert_opt(
         true,
@@ -187,6 +192,9 @@ pub fn imt_insert(
         low_index_bits,
         new_path,
         new_index_bits,
+        pred_leaf,
+        pred_path,
+        pred_index_bits,
     )
 }
 
@@ -202,6 +210,9 @@ pub fn imt_insert_opt(
     low_index_bits: [Field; TREE_DEPTH],
     new_path: [Field; TREE_DEPTH],
     new_index_bits: [Field; TREE_DEPTH],
+    pred_leaf: Field,
+    pred_path: [Field; TREE_DEPTH],
+    pred_index_bits: [Field; TREE_DEPTH],
 ) -> Field {
     let e = enabled as Field;
 
@@ -218,6 +229,17 @@ pub fn imt_insert_opt(
     let updated_low =
         ImtLeaf { value: low.value, next_value: value, next_index: new_index };
     let r1 = fold_root(updated_low.hash(), low_path, low_index_bits);
+
+    // (3b) `new_index` is the APPEND FRONTIER (leftmost-empty slot): the slot to its left is
+    // occupied in r1. The tree is a gap-free prefix by induction (genesis leaf occupies index 0,
+    // and this check preserves the invariant), so "slot new_index empty (step 4) AND slot
+    // new_index-1 occupied" forces new_index == leaf_count. Without this a valid spend could insert
+    // at any empty slot, producing an on-chain root the indexer (which appends at tree.len()) can
+    // never reproduce, bricking the accumulator. "Occupied" == nonzero leaf hash (empty slots are
+    // literal 0; any H3(v,nv,ni), incl. genesis H3(0,0,0), is nonzero).
+    assert(!enabled | (pred_leaf != 0));
+    assert(e * (fold_root(pred_leaf, pred_path, pred_index_bits) - r1) == 0);
+    assert(!enabled | (bits_to_field(pred_index_bits) + 1 == new_index));
 
     // (4) the append slot is empty in r1 (the same path is reused to write it) (gated).
     assert(e * (fold_root(0, new_path, new_index_bits) - r1) == 0);
@@ -291,8 +313,20 @@ fn test_imt_genesis_insert() {
     // low = genesis (idx 0); new leaf goes to idx 1.
     let updated_low = ImtLeaf { value: 0, next_value: v, next_index: 1 };
     let new_path = path_idx1(updated_low.hash(), z);
-    let root_out =
-        imt_insert(root_in, v, genesis, z, bits0(), new_path, bits1());
+    // frontier witness: predecessor is the just-repointed genesis leaf at idx 0 (sibling at idx 1 is
+    // still empty in r1, so its path is the zero ladder).
+    let root_out = imt_insert(
+        root_in,
+        v,
+        genesis,
+        z,
+        bits0(),
+        new_path,
+        bits1(),
+        updated_low.hash(),
+        z,
+        bits0(),
+    );
 
     // Expected: tree with leaf0 = updated_low, leaf1 = {v,0,0}.
     let new_leaf = ImtLeaf { value: v, next_value: 0, next_index: 0 };
@@ -312,8 +346,10 @@ fn test_imt_reinsert_rejected() {
     let low = ImtLeaf { value: 0, next_value: 5, next_index: 1 };
     let leaf1 = ImtLeaf { value: 5, next_value: 0, next_index: 0 };
     let root_in = fold_root(low.hash(), path_idx0(leaf1.hash(), z), bits0());
-    // Attempt to insert 5 again at a fresh slot (idx 1 path is illustrative).
-    let _ = imt_insert(root_in, 5, low, path_idx0(leaf1.hash(), z), bits0(), z, bits1());
+    // Attempt to insert 5 again at a fresh slot (idx 1 path is illustrative). Fails at the range
+    // check before the frontier check, so the pred witnesses are dummies.
+    let _ =
+        imt_insert(root_in, 5, low, path_idx0(leaf1.hash(), z), bits0(), z, bits1(), 1, z, bits0());
 }
 
 #[test]
@@ -322,7 +358,8 @@ fn test_imt_insert_opt_disabled_is_noop() {
     let z = zeros();
     let root_in = 0x1234567890abcdef;
     let dummy_low = ImtLeaf { value: 0, next_value: 0, next_index: 0 };
-    let out = imt_insert_opt(false, root_in, 0, dummy_low, z, bits0(), z, bits0());
+    let out =
+        imt_insert_opt(false, root_in, 0, dummy_low, z, bits0(), z, bits0(), 0, z, bits0());
     assert(out == root_in);
 }
 
@@ -333,5 +370,45 @@ fn test_imt_low_not_member() {
     let real = ImtLeaf { value: 0, next_value: 0, next_index: 0 };
     let root_in = fold_root(real.hash(), z, bits0());
     let fake_low = ImtLeaf { value: 1, next_value: 0, next_index: 0 };
-    let _ = imt_insert(root_in, 9, fake_low, z, bits0(), z, bits1());
+    let _ = imt_insert(root_in, 9, fake_low, z, bits0(), z, bits1(), 1, z, bits0());
+}
+
+#[test(should_fail)]
+fn test_imt_nonfrontier_predecessor_empty() {
+    // Claiming the slot to the left of the append slot is EMPTY (pred_leaf = 0) must fail: that is
+    // exactly the "insert into a gap, not the frontier" attack the frontier check forbids.
+    let z = zeros();
+    let genesis = ImtLeaf { value: 0, next_value: 0, next_index: 0 };
+    let root_in = fold_root(genesis.hash(), z, bits0());
+
+    let v = 5;
+    let updated_low = ImtLeaf { value: 0, next_value: v, next_index: 1 };
+    let new_path = path_idx1(updated_low.hash(), z);
+    // pred_leaf = 0 (lie: predecessor is empty) - range + empty-slot checks pass, frontier fails.
+    let _ = imt_insert(root_in, v, genesis, z, bits0(), new_path, bits1(), 0, z, bits0());
+}
+
+#[test(should_fail)]
+fn test_imt_pred_index_offby_one() {
+    // The predecessor must sit exactly one slot left of the append slot. A pred index that does not
+    // satisfy pred_index + 1 == new_index must fail (here pred claimed at idx 1, append at idx 1).
+    let z = zeros();
+    let genesis = ImtLeaf { value: 0, next_value: 0, next_index: 0 };
+    let root_in = fold_root(genesis.hash(), z, bits0());
+
+    let v = 5;
+    let updated_low = ImtLeaf { value: 0, next_value: v, next_index: 1 };
+    let new_path = path_idx1(updated_low.hash(), z);
+    let _ = imt_insert(
+        root_in,
+        v,
+        genesis,
+        z,
+        bits0(),
+        new_path,
+        bits1(),
+        updated_low.hash(),
+        z,
+        bits1(),
+    );
 }

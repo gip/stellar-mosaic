@@ -36,6 +36,9 @@ fn main(
     low_index_bits: [Field; TREE_DEPTH],
     new_path: [Field; TREE_DEPTH],
     new_index_bits: [Field; TREE_DEPTH],
+    pred_leaf: Field, // leaf at new_index-1 (append-frontier proof)
+    pred_path: [Field; TREE_DEPTH],
+    pred_index_bits: [Field; TREE_DEPTH],
     // --- public inputs ---
     domain: pub Field,
     note_root: pub Field,
@@ -67,6 +70,9 @@ fn main(
         low_index_bits,
         new_path,
         new_index_bits,
+        pred_leaf,
+        pred_path,
+        pred_index_bits,
     );
     assert(root_out == nullifier_root_out);
 

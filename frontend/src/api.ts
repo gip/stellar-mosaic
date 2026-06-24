@@ -133,6 +133,9 @@ export interface ImtWitnessResp {
   low_index_bits: number[]
   new_path: string[]
   new_index_bits: number[]
+  pred_leaf: string
+  pred_path: string[]
+  pred_index_bits: number[]
 }
 
 /** The proceeds note a `settle_match` minted for one of the wallet's orders (`GET

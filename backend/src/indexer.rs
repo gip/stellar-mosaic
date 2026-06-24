@@ -457,6 +457,9 @@ pub struct ImtWitnessOut {
     pub low_index_bits: Vec<u8>,
     pub new_path: Vec<String>,
     pub new_index_bits: Vec<u8>,
+    pub pred_leaf: String,
+    pub pred_path: Vec<String>,
+    pub pred_index_bits: Vec<u8>,
 }
 
 fn imt_witness_inner(spent: &[[u8; 32]], value: &str) -> AppResult<ImtWitnessOut> {
@@ -479,6 +482,9 @@ fn imt_witness_inner(spent: &[[u8; 32]], value: &str) -> AppResult<ImtWitnessOut
         low_index_bits: w.low_path.index_bits.to_vec(),
         new_path: w.new_path.siblings.iter().map(u256_hex).collect(),
         new_index_bits: w.new_path.index_bits.to_vec(),
+        pred_leaf: u256_hex(&w.pred_leaf),
+        pred_path: w.pred_path.siblings.iter().map(u256_hex).collect(),
+        pred_index_bits: w.pred_path.index_bits.to_vec(),
     })
 }
 
@@ -514,6 +520,9 @@ fn imt_witnesses_inner(spent: &[[u8; 32]], values: &[String]) -> AppResult<Vec<I
             low_index_bits: w.low_path.index_bits.to_vec(),
             new_path: w.new_path.siblings.iter().map(u256_hex).collect(),
             new_index_bits: w.new_path.index_bits.to_vec(),
+            pred_leaf: u256_hex(&w.pred_leaf),
+            pred_path: w.pred_path.siblings.iter().map(u256_hex).collect(),
+            pred_index_bits: w.pred_path.index_bits.to_vec(),
         });
         imt.insert(vu); // advance so the next value witnesses against the new root
     }

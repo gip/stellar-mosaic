@@ -68,6 +68,9 @@ export async function executeUnshield(
     low_index_bits: imt.low_index_bits,
     new_path: imt.new_path,
     new_index_bits: imt.new_index_bits,
+    pred_leaf: imt.pred_leaf,
+    pred_path: imt.pred_path,
+    pred_index_bits: imt.pred_index_bits,
     nullifier,
     asset: note.asset_id,
     amount: note.amount,
@@ -92,6 +95,7 @@ const ZERO_IMT = {
   nullifier_root_in: '0', nullifier_root_out: '0', low_value: '0', low_next_value: '0',
   low_next_index: 0, low_path: ZERO_PATH, low_index_bits: ZERO_BITS,
   new_path: ZERO_PATH, new_index_bits: ZERO_BITS,
+  pred_leaf: '0', pred_path: ZERO_PATH, pred_index_bits: ZERO_BITS,
 }
 
 /**

@@ -40,6 +40,9 @@ export interface ImtWitnessFields {
   low_index_bits: number[]
   new_path: string[]
   new_index_bits: number[]
+  pred_leaf: string
+  pred_path: string[]
+  pred_index_bits: number[]
 }
 
 export interface LiftInputs extends ImtWitnessFields {
@@ -80,6 +83,9 @@ function imtFields(w: ImtWitnessFields): Record<string, unknown> {
     low_index_bits: w.low_index_bits.map(String),
     new_path: w.new_path,
     new_index_bits: w.new_index_bits.map(String),
+    pred_leaf: w.pred_leaf,
+    pred_path: w.pred_path,
+    pred_index_bits: w.pred_index_bits.map(String),
   }
 }
 
@@ -164,6 +170,9 @@ function imtFieldsSuffixed(w: ImtWitnessFields, n: 1 | 2): Record<string, unknow
     [`low${n}_index_bits`]: w.low_index_bits.map(String),
     [`new${n}_path`]: w.new_path,
     [`new${n}_index_bits`]: w.new_index_bits.map(String),
+    [`pred${n}_leaf`]: w.pred_leaf,
+    [`pred${n}_path`]: w.pred_path,
+    [`pred${n}_index_bits`]: w.pred_index_bits.map(String),
   }
 }
 
@@ -293,6 +302,7 @@ const M_ZERO_IMT: ImtWitnessFields = {
   nullifier_root_in: '0', nullifier_root_out: '0', low_value: '0', low_next_value: '0',
   low_next_index: 0, low_path: M_ZERO_PATH, low_index_bits: M_ZERO_BITS,
   new_path: M_ZERO_PATH, new_index_bits: M_ZERO_BITS,
+  pred_leaf: '0', pred_path: M_ZERO_PATH, pred_index_bits: M_ZERO_BITS,
 }
 
 /** One order (taker or maker) the match consumes: its public terms, its order-tree membership path,
@@ -356,6 +366,7 @@ function makerRow(w: MatchOrderWitness): {
   path: string[]; index_bits: string[]
   low_value: string; low_next_value: string; low_next_index: string
   low_path: string[]; low_index_bits: string[]; new_path: string[]; new_index_bits: string[]
+  pred_leaf: string; pred_path: string[]; pred_index_bits: string[]
 } {
   return {
     asset_in: String(w.asset_in), amount_in: w.amount_in, asset_out: String(w.asset_out),
@@ -366,6 +377,8 @@ function makerRow(w: MatchOrderWitness): {
     low_next_index: String(w.imt.low_next_index),
     low_path: w.imt.low_path, low_index_bits: w.imt.low_index_bits.map(String),
     new_path: w.imt.new_path, new_index_bits: w.imt.new_index_bits.map(String),
+    pred_leaf: w.imt.pred_leaf, pred_path: w.imt.pred_path,
+    pred_index_bits: w.imt.pred_index_bits.map(String),
   }
 }
 
@@ -400,6 +413,8 @@ export async function proveMatch(input: MatchInputs): Promise<ProofBundle> {
     t_low_next_index: String(input.taker.imt.low_next_index),
     t_low_path: input.taker.imt.low_path, t_low_index_bits: input.taker.imt.low_index_bits.map(String),
     t_new_path: input.taker.imt.new_path, t_new_index_bits: input.taker.imt.new_index_bits.map(String),
+    t_pred_leaf: input.taker.imt.pred_leaf, t_pred_path: input.taker.imt.pred_path,
+    t_pred_index_bits: input.taker.imt.pred_index_bits.map(String),
     // makers private (arrays of 3)
     m_asset_in: col('asset_in'), m_amount_in: col('amount_in'), m_asset_out: col('asset_out'),
     m_min_out: col('min_out'), m_out_tag: col('out_tag'), m_cancel_tag: col('cancel_tag'),
@@ -409,6 +424,8 @@ export async function proveMatch(input: MatchInputs): Promise<ProofBundle> {
     m_low_next_index: col('low_next_index'),
     m_low_path: col('low_path'), m_low_index_bits: col('low_index_bits'),
     m_new_path: col('new_path'), m_new_index_bits: col('new_index_bits'),
+    m_pred_leaf: col('pred_leaf'), m_pred_path: col('pred_path'),
+    m_pred_index_bits: col('pred_index_bits'),
     // public
     domain: '5',
     order_root: input.order_root,
