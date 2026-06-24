@@ -41,8 +41,9 @@ Proof fixtures live in `contracts/settlement/tests/fixtures/ws4/` (regenerate vi
   (1 taker × 3 makers + remainder). Both generate proofs at run time against the live ledger clock
   (WS4 binds `expiry`/`now` to it) and assert each call is within the 400M budget. See `benchmarks.md`.
 - `scripts/10_demo_base_shield_testnet.sh` — Base → Stellar shield (see `base-bridge.md`).
-- `scripts/{03,04}` (WS1 atomic-`settle` custody demos) await WS4 rework; the live cutover path is
-  `scripts/e2e.sh` (see `e2e-testing.md`).
+- `scripts/03_demo_e2e.sh` — local-host WS4 lifecycle (regenerate fixtures + `cargo test --test ws4`);
+  `scripts/04_demo_e2e_testnet.sh` — the authoritative testnet version (shield → place → settle_match
+  → unshield proceeds), driven by `scripts/e2e.sh` (see `e2e-testing.md`).
 
 ### Web app (frontend + backend)
 
@@ -283,8 +284,10 @@ accepted — see `benchmarks.md`. All five entrypoints (`place_order`, `settle_m
 - **Admin surface:** upgradeability + pause; pair relisting/delisting (pairs are currently permanent).
 - **Lot-granularity / tick-size policy** (coprime-priced orders can't partially fill cleanly).
 - **Wrapped assets:** define issuers/bridges before advertising ETH/XRP support.
-- **Testnet hard-cutover** via `scripts/e2e.sh` (fresh deploy; live place/match/cancel); rework the
-  WS1-era `scripts/{03,04}` custody demos.
+
+The WS4 hard-cutover lifecycle (shield → place → settle_match → unshield) was validated live on
+testnet via `scripts/e2e.sh stellar` — the accumulator root advanced, a replayed `settle_match`
+reverted, and the recipient was credited exactly; per-tx CPU in `benchmarks.md`.
 
 None of the open gaps can lose funds. Not hardened: no keeper running (TTL upkeep manual; data safe
 regardless), demo scripts use literal owner tags and map both asset-ids to the native XLM SAC.

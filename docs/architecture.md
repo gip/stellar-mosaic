@@ -167,8 +167,9 @@ end-to-end: circuits, the merged contract, off-chain services, and in-browser pr
 auto-match path) all built; 43 local tests pass. The production-blocking safety items are done —
 storage durability with the **unbounded nullifier-set rent surface now closed** (O(1) accumulator
 root), and the worst-case `settle_match` (1 taker × 3 makers + remainder) measured on testnet at
-~65% of the 400M budget and accepted. The Base → Stellar shield is validated live. Remaining work is
-operational/productionization: the testnet hard-cutover deploy, an admin/pause surface, lot-granularity
-policy, and an MEV/ordering threat-model pass for permissionless matching. **None of the open gaps can
-lose funds.** The full list with rationale is in `implementation.md`; the matching design is in
-`noir-matching.md`.
+~65% of the 400M budget and accepted. The full WS4 lifecycle (shield → place → settle_match →
+unshield) was validated live on testnet — the accumulator root advanced and a replayed match
+reverted — as was the Base → Stellar shield. Remaining work is operational/productionization: an
+admin/pause surface, lot-granularity policy, and an MEV/ordering threat-model pass for permissionless
+matching. **None of the open gaps can lose funds.** The full list with rationale is in
+`implementation.md`; the matching design is in `noir-matching.md`.
