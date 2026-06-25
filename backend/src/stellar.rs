@@ -179,12 +179,12 @@ impl Stellar {
         Ok((pubkey, secret))
     }
 
-    /// Deploy the settlement wasm with the lift VK + admin set in the constructor.
-    /// `source` is a signing source (secret key or identity name). Returns the contract id.
-    /// Deploy the settlement contract. Assets and pairs are now constructor-only (immutable): pass
-    /// them as JSON arrays matching the contract's `Vec<AssetInit>` / `Vec<PairDef>` arg types, e.g.
+    /// Deploy the settlement wasm with the operation VKs + admin set in the constructor. Assets and
+    /// pairs are constructor-only (immutable): pass them as JSON arrays matching the contract's
+    /// `Vec<AssetInit>` / `Vec<PairDef>` arg types, e.g.
     /// `[{"asset_id":1,"token":"C..","kind":"Stellar"}]` and `[{"base_asset":1,"quote_asset":2}]`.
-    /// A `BaseRepresented` asset uses `"token":null`.
+    /// A `BaseRepresented` asset uses `"token":null`. `source` is a signing source (secret key or
+    /// identity name). Returns the contract id.
     #[allow(clippy::too_many_arguments)]
     pub fn deploy(
         &self,
