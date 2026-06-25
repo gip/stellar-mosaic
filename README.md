@@ -1,14 +1,17 @@
 # Stellar Mosaic
 
-In the context of a hackathon, the goal is to explore the Stellar blockchain, specifically smart contracts and the new ZK features.
-
-As AI will be heavily involved in this project, it is important to make sure the implementation goals are clear and well-defined in writing — that will be an input. Opus 4.8 was used for orchestration and documentation, cheaper models for coding.
-
-## What are we building
-
 Mosaic wants to give users better opportunities to trade onchain. Today users can pick from a DEX, a CEX, or OTC desks (like Binance, Coinbase, etc.) if they want some privacy. Trustless OTC trading that ensures privacy while making sure funds may not be lost even when shielded is an exciting opportunity and what we'd like to build on Mosaic. 
 
-The goal in WS1 is to design and implement a simplistic desk on Stellar where users may shield assets and trade. WS2 is about going multichain and supporting shielded assets on Base and swapping to Stellar. WS3 is about a great UI/UX experience. WS4 is trying to move from a simplistic onchain order book to a more advanced offchain order book where trade matching happens in Noir and is verified onchain. WS5 is a moonshot to explore offchain order book matching in a decentralized manner, as that would achieve a fully trustless solution — but it is probably impossible to achieve in the short term, or at all.
+Here is what we're building:
+
+- WS0: AI loop & foundations.
+- WS1: Design and implement a simplistic desk on Stellar.
+- WS2: Go multichain and support shielded assets on Base and swap to Stellar.
+- WS3: Implement a great UI/UX experience.
+- WS4: Move from a simplistic onchain order book to a more advanced offchain order book.
+- WS5: Explore offchain order book matching in a decentralized manner.
+
+A human wrote the spec and the AI devlopment loop. Most of the code was written by AI. Opus 4.8 was used for orchestration and documentation, cheaper models for coding.
 
 ## Workstreams
 
@@ -28,10 +31,11 @@ The goal in WS1 is to design and implement a simplistic desk on Stellar where us
 |------|-------|-------------|:------:|
 | WS1.0 | High-level architecture | Specify the overall desk architecture and components — [architecture.md](docs/architecture.md) | 🟢 |
 | WS1.1 | Private note design | Define the private-note scheme underpinning shielded balances — [note-types.md](docs/note-types.md), [privacy-model.md](docs/privacy-model.md) | 🟢 |
-| WS1.2 | Ability to shield USDC or XLM | Enable users to shield USDC or XLM into private notes — [implementation.md](docs/implementation.md) | 🟢 |
-| WS1.3 | Sponsored transactions | Support sponsored (fee-paid) transactions for smoother UX — [implementation.md](docs/implementation.md) | 🟢 |
-| WS1.4 | Simple UX/UI | Build a minimal interface for shielding and trading — [ui-ux.md](docs/ui-ux.md) | 🟢 |
-| WS1.5 | Benchmark | Measure performance / proving costs of the desk — [benchmarks.md](docs/benchmarks.md) | 🟢 |
+| WS1.2 | Stellar contract creation and testing | Build and test the settlement contract — custody, Merkle tree, nullifier registry, atomic matching — [implementation.md](docs/implementation.md) | 🟢 |
+| WS1.3 | Ability to shield USDC or XLM | Enable users to shield USDC or XLM into private notes — [implementation.md](docs/implementation.md) | 🟢 |
+| WS1.4 | Sponsored transactions | Support sponsored (fee-paid) transactions for smoother UX — [implementation.md](docs/implementation.md) | 🟢 |
+| WS1.5 | Simple UX/UI | Build a minimal interface for shielding and trading — [ui-ux.md](docs/ui-ux.md) | 🟢 |
+| WS1.6 | Benchmark | Measure performance / proving costs of the desk — [benchmarks.md](docs/benchmarks.md) | 🟢 |
 
 ### WS2 — Going multichain (Base → Stellar)
 
