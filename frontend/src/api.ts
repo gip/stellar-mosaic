@@ -1,4 +1,5 @@
 // Typed client for the Rust backend. All paths go through the Vite `/api` proxy in dev.
+import type { Abi, Hex } from 'viem'
 
 export interface Asset {
   asset_id: number
@@ -47,6 +48,31 @@ export interface Desk {
   event_start_ledger: number | null
   assets: Asset[]
   pairs: Pair[]
+  base_deployment: BaseDeployment | null
+}
+
+export interface BaseAssetMapping {
+  asset_id: number
+  symbol: string
+  token: string
+}
+
+export interface BaseDeployment {
+  status: 'awaiting_wallet' | 'verifying' | 'configuring' | 'active' | 'failed'
+  deployer_address: string
+  tx_hash: string | null
+  bridge_address: string | null
+  error: string | null
+  assets: BaseAssetMapping[]
+}
+
+export interface BaseDeploymentConfig {
+  available: boolean
+  chain_id: number
+  network: 'base-sepolia'
+  reason: string | null
+  abi: Abi | null
+  bytecode: Hex | null
 }
 
 export interface BaseShieldConfig {
@@ -120,9 +146,16 @@ export const api = {
   }) => req<Desk>('/desks/import', { method: 'POST', body: JSON.stringify(body) }),
   createDesk: (body: {
     name: string
-    assets: { asset_id: number; symbol: string; token: string; decimals: number }[]
+    assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number }[]
     pairs: { base_asset: number; quote_asset: number }[]
+    base_deployment?: { deployer_address: string }
   }) => req<Desk>('/desks', { method: 'POST', body: JSON.stringify(body) }),
+  getBaseDeploymentConfig: () => req<BaseDeploymentConfig>('/base-deployment-config'),
+  completeBaseDeployment: (id: string, body: { tx_hash: string; bridge_address: string }) =>
+    req<Desk>(`/desks/${id}/base-deployment`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   listCatalogAssets: () => req<CatalogAsset[]>('/assets'),
   proposeAsset: (body: ProposeAssetBody) =>
     req<CatalogAsset>('/assets', { method: 'POST', body: JSON.stringify(body) }),

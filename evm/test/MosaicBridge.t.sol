@@ -33,10 +33,12 @@ contract MosaicBridgeTest is Test {
     event AssetRegistered(uint32 indexed assetId, address indexed token);
 
     function setUp() public {
-        bridge = new MosaicBridge(admin);
         usdc = new MockUSDC();
-        vm.prank(admin);
-        bridge.registerAsset(USDC_ASSET_ID, address(usdc));
+        uint32[] memory assetIds = new uint32[](1);
+        address[] memory tokens = new address[](1);
+        assetIds[0] = USDC_ASSET_ID;
+        tokens[0] = address(usdc);
+        bridge = new MosaicBridge(admin, assetIds, tokens);
 
         usdc.mint(alice, 1_000_000_000); // 1,000 USDC (6 dp)
         vm.prank(alice);
@@ -66,6 +68,47 @@ contract MosaicBridgeTest is Test {
         vm.expectRevert(MosaicBridge.ZeroToken.selector);
         vm.prank(admin);
         bridge.registerAsset(9, address(0));
+    }
+
+    function test_constructor_registersAssetsAtomically() public {
+        MockUSDC second = new MockUSDC();
+        uint32[] memory assetIds = new uint32[](2);
+        address[] memory tokens = new address[](2);
+        assetIds[0] = 7;
+        assetIds[1] = 8;
+        tokens[0] = address(usdc);
+        tokens[1] = address(second);
+
+        MosaicBridge deployed = new MosaicBridge(admin, assetIds, tokens);
+        assertEq(deployed.owner(), admin);
+        assertEq(deployed.assetToken(7), address(usdc));
+        assertEq(deployed.assetToken(8), address(second));
+    }
+
+    function test_constructor_rejectsMismatchedArrays() public {
+        uint32[] memory assetIds = new uint32[](1);
+        address[] memory tokens = new address[](0);
+        vm.expectRevert(MosaicBridge.InvalidAssetArrays.selector);
+        new MosaicBridge(admin, assetIds, tokens);
+    }
+
+    function test_constructor_rejectsDuplicateAssetIds() public {
+        uint32[] memory assetIds = new uint32[](2);
+        address[] memory tokens = new address[](2);
+        assetIds[0] = 7;
+        assetIds[1] = 7;
+        tokens[0] = address(usdc);
+        tokens[1] = address(0xBEEF);
+        vm.expectRevert(abi.encodeWithSelector(MosaicBridge.AssetAlreadyRegistered.selector, uint32(7)));
+        new MosaicBridge(admin, assetIds, tokens);
+    }
+
+    function test_constructor_rejectsZeroToken() public {
+        uint32[] memory assetIds = new uint32[](1);
+        address[] memory tokens = new address[](1);
+        assetIds[0] = 7;
+        vm.expectRevert(MosaicBridge.ZeroToken.selector);
+        new MosaicBridge(admin, assetIds, tokens);
     }
 
     // ---- shield happy path ----

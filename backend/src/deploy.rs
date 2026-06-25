@@ -52,17 +52,15 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, 
         .collect::<AppResult<Vec<_>>>()?;
 
     // 2. deploy
-    let contract_id = st
-        .stellar
-        .deploy(
-            &wasm,
-            &cfg.lift_vk(),
-            &cfg.unshield_vk(),
-            &cfg.cancel_vk(),
-            &cfg.join_vk(),
-            &sponsor_pubkey,
-            &sponsor_secret,
-        )?;
+    let contract_id = st.stellar.deploy(
+        &wasm,
+        &cfg.lift_vk(),
+        &cfg.unshield_vk(),
+        &cfg.cancel_vk(),
+        &cfg.join_vk(),
+        &sponsor_pubkey,
+        &sponsor_secret,
+    )?;
     tracing::info!(%contract_id, "deployed settlement contract");
 
     let inv = |args: Vec<String>| {
@@ -105,6 +103,7 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, 
         event_start_ledger: from_ledger,
         assets,
         pairs,
+        base_deployment: None,
     };
     Ok((desk, sponsor_secret, from_ledger))
 }

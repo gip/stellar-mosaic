@@ -1,16 +1,20 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { connect as fxConnect, currentAddress, network as currentNetwork } from './wallet'
 import { reconcileDirectSubmissions } from './directTransaction'
+import { Networks } from '@stellar/stellar-sdk'
+import { api } from './api'
+import { ensureBackendSession } from './auth'
 
 const DISCONNECTED_KEY = 'stellar-mosaic.wallet-disconnected'
 
 interface WalletState {
   address: string | null
+  ready: boolean
   connecting: boolean
   error: string | null
   networkPassphrase: string | null
   connect: () => Promise<void>
-  disconnect: () => void
+  disconnect: () => Promise<void>
 }
 
 const Ctx = createContext<WalletState | null>(null)
@@ -34,6 +38,7 @@ function storeDisconnected(disconnected: boolean): void {
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [address, setAddress] = useState<string | null>(null)
+  const [ready, setReady] = useState(false)
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [networkPassphrase, setNetworkPassphrase] = useState<string | null>(null)
@@ -44,11 +49,25 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     let active = true
 
     async function refresh() {
-      if (disconnected.current) return
-      const [nextAddress, nextNetwork] = await Promise.all([currentAddress(), currentNetwork()])
-      if (!active || disconnected.current) return
-      setAddress(nextAddress)
-      setNetworkPassphrase(nextNetwork?.networkPassphrase ?? null)
+      if (disconnected.current) {
+        setReady(true)
+        return
+      }
+      try {
+        const [nextAddress, nextNetwork] = await Promise.all([currentAddress(), currentNetwork()])
+        if (!active || disconnected.current) return
+        if (nextAddress && nextNetwork?.networkPassphrase === Networks.TESTNET) {
+          setAddress(nextAddress)
+          setNetworkPassphrase(nextNetwork.networkPassphrase)
+          setError(null)
+        } else {
+          setAddress(null)
+          setNetworkPassphrase(null)
+          if (nextAddress) setError('Switch Freighter to Stellar Testnet to sign in.')
+        }
+      } finally {
+        if (active) setReady(true)
+      }
     }
 
     void refresh()
@@ -64,10 +83,16 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setError(null)
     try {
       const nextAddress = await fxConnect()
+      const nextNetwork = await currentNetwork()
+      if (nextNetwork?.networkPassphrase !== Networks.TESTNET) {
+        throw new Error('Switch Freighter to Stellar Testnet to sign in.')
+      }
+      await ensureBackendSession(nextAddress, nextNetwork.networkPassphrase)
       disconnected.current = false
       storeDisconnected(false)
       setAddress(nextAddress)
-      setNetworkPassphrase((await currentNetwork())?.networkPassphrase ?? null)
+      setNetworkPassphrase(nextNetwork.networkPassphrase)
+      setReady(true)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -75,16 +100,17 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     }
   }
 
-  function disconnect() {
+  async function disconnect() {
     disconnected.current = true
     storeDisconnected(true)
     setAddress(null)
     setNetworkPassphrase(null)
     setError(null)
+    await api.deleteAuthSession().catch(() => {})
   }
 
   return (
-    <Ctx.Provider value={{ address, networkPassphrase, connecting, error, connect, disconnect }}>
+    <Ctx.Provider value={{ address, ready, networkPassphrase, connecting, error, connect, disconnect }}>
       {children}
     </Ctx.Provider>
   )

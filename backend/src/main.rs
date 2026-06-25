@@ -1,4 +1,5 @@
 mod auth;
+mod base_deploy;
 mod base_shield;
 mod catalog;
 mod config;
@@ -72,11 +73,19 @@ async fn main() -> anyhow::Result<()> {
         .merge(operations::routes())
         .merge(catalog::routes())
         .route(
+            "/base-deployment-config",
+            get(base_deploy::deployment_config),
+        )
+        .route(
             "/desks",
             get(handlers::list_desks).post(handlers::create_desk),
         )
         .route("/desks/import", post(handlers::import_desk))
         .route("/desks/:id", get(handlers::get_desk))
+        .route(
+            "/desks/:id/base-deployment",
+            post(base_deploy::complete_deployment),
+        )
         .route("/desks/:id/root", get(handlers::get_root))
         .route("/desks/:id/book", get(handlers::get_book))
         .route("/desks/:id/notes", get(handlers::get_notes))

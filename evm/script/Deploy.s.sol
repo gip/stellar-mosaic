@@ -22,10 +22,13 @@ contract Deploy is Script {
         address admin = vm.addr(pk);
         address usdc = vm.envOr("USDC_ADDRESS", DEFAULT_USDC);
         uint32 assetId = uint32(vm.envOr("USDC_ASSET_ID", uint256(1)));
+        uint32[] memory assetIds = new uint32[](1);
+        address[] memory tokens = new address[](1);
+        assetIds[0] = assetId;
+        tokens[0] = usdc;
 
         vm.startBroadcast(pk);
-        bridge = new MosaicBridge(admin);
-        bridge.registerAsset(assetId, usdc);
+        bridge = new MosaicBridge(admin, assetIds, tokens);
         vm.stopBroadcast();
 
         console2.log("MosaicBridge:", address(bridge));

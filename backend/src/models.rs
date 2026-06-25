@@ -14,6 +14,24 @@ pub struct Desk {
     pub event_start_ledger: Option<u64>,
     pub assets: Vec<Asset>,
     pub pairs: Vec<Pair>,
+    pub base_deployment: Option<BaseDeployment>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BaseAssetMapping {
+    pub asset_id: u32,
+    pub symbol: String,
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BaseDeployment {
+    pub status: String,
+    pub deployer_address: String,
+    pub tx_hash: Option<String>,
+    pub bridge_address: Option<String>,
+    pub error: Option<String>,
+    pub assets: Vec<BaseAssetMapping>,
 }
 
 /// A supported currency on a desk: protocol `asset_id` -> Soroban token contract address.
@@ -66,9 +84,25 @@ pub struct Pair {
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateDesk {
     pub name: String,
-    pub assets: Vec<Asset>,
+    pub assets: Vec<CreateDeskAsset>,
     /// Pairs as (base_asset, quote_asset); `pair_id` is assigned by the contract on register.
     pub pairs: Vec<NewPair>,
+    pub base_deployment: Option<CreateBaseDeployment>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateDeskAsset {
+    pub catalog_id: String,
+    pub asset_id: u32,
+    pub symbol: String,
+    pub token: String,
+    #[serde(default = "default_decimals")]
+    pub decimals: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateBaseDeployment {
+    pub deployer_address: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

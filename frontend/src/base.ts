@@ -5,7 +5,10 @@ import {
   createPublicClient,
   createWalletClient,
   custom,
+  encodeDeployData,
+  formatEther,
   parseEventLogs,
+  type Abi,
   type Address,
   type Hex,
 } from 'viem'
@@ -57,11 +60,20 @@ const bridgeAbi = [
   },
 ] as const
 
-function eth(): { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> } {
-  const e = (window as unknown as { ethereum?: ReturnType<typeof eth> }).ethereum
+export interface InjectedEthereumProvider {
+  request: (args: { method: string; params?: unknown[] }) => Promise<unknown>
+  on?: (event: string, listener: (...args: unknown[]) => void) => void
+  removeListener?: (event: string, listener: (...args: unknown[]) => void) => void
+}
+
+export function ethereumProvider(): InjectedEthereumProvider {
+  const e = (window as unknown as { ethereum?: InjectedEthereumProvider }).ethereum
   if (!e) throw new Error('No EVM wallet found. Install MetaMask (or another injected wallet).')
   return e
 }
+
+// Kept as a local alias so existing transaction helpers remain concise.
+const eth = ethereumProvider
 
 /** Request accounts and switch the wallet to Base Sepolia. Returns the selected address. */
 export async function connectBase(): Promise<Address> {
@@ -75,6 +87,77 @@ export async function connectBase(): Promise<Address> {
     // The user may need to add Base Sepolia manually; the shield call will fail loudly if so.
   }
   return accounts[0]
+}
+
+export async function currentBaseAccount(): Promise<Address | null> {
+  const accounts = (await eth().request({ method: 'eth_accounts' })) as Address[]
+  return accounts?.[0] ?? null
+}
+
+export async function currentChainId(): Promise<number | null> {
+  const value = (await eth().request({ method: 'eth_chainId' })) as string
+  return value ? Number.parseInt(value, 16) : null
+}
+
+export async function baseEthBalance(account: Address): Promise<bigint> {
+  const client = createPublicClient({ chain: baseSepolia, transport: custom(eth()) })
+  return client.getBalance({ address: account })
+}
+
+export function displayEth(value: bigint): string {
+  return Number(formatEther(value)).toLocaleString(undefined, { maximumFractionDigits: 6 })
+}
+
+export interface BridgeDeploymentArtifact {
+  abi: Abi
+  bytecode: Hex
+}
+
+export interface BridgeDeploymentEstimate {
+  gas: bigint
+  maxFee: bigint
+}
+
+export async function estimateBridgeDeployment(opts: {
+  artifact: BridgeDeploymentArtifact
+  account: Address
+  assetIds: number[]
+  tokens: Address[]
+}): Promise<BridgeDeploymentEstimate> {
+  const transport = custom(eth())
+  const pub = createPublicClient({ chain: baseSepolia, transport })
+  const data = encodeDeployData({
+    abi: opts.artifact.abi,
+    bytecode: opts.artifact.bytecode,
+    args: [opts.account, opts.assetIds, opts.tokens],
+  })
+  const gas = await pub.estimateGas({ account: opts.account, data })
+  const fees = await pub.estimateFeesPerGas()
+  // Include a 20% buffer because Base's L1 data component can move between estimate and inclusion.
+  return { gas, maxFee: (gas * fees.maxFeePerGas * 120n) / 100n }
+}
+
+export async function deployBridge(opts: {
+  artifact: BridgeDeploymentArtifact
+  account: Address
+  assetIds: number[]
+  tokens: Address[]
+}): Promise<{ txHash: Hex; bridgeAddress: Address }> {
+  const transport = custom(eth())
+  const wallet = createWalletClient({ account: opts.account, chain: baseSepolia, transport })
+  const pub = createPublicClient({ chain: baseSepolia, transport })
+  const txHash = await wallet.deployContract({
+    abi: opts.artifact.abi,
+    bytecode: opts.artifact.bytecode,
+    args: [opts.account, opts.assetIds, opts.tokens],
+    account: opts.account,
+    chain: baseSepolia,
+  })
+  const receipt = await pub.waitForTransactionReceipt({ hash: txHash })
+  if (receipt.status !== 'success' || !receipt.contractAddress) {
+    throw new Error('The Base bridge deployment transaction failed.')
+  }
+  return { txHash, bridgeAddress: receipt.contractAddress }
 }
 
 export interface BaseShieldResult {

@@ -29,6 +29,10 @@ pub struct Config {
     pub cast_bin: String,
     /// Directory of the `bridge-prover` workspace (must contain the `run-host` launcher).
     pub prover_dir: PathBuf,
+    /// Pinned Stellar verifier and RISC Zero/Steel identifiers used when attaching a Base bridge.
+    pub base_router: String,
+    pub base_image_id: String,
+    pub base_config_id: String,
 }
 
 impl Config {
@@ -63,12 +67,26 @@ impl Config {
                 cwd.join("vks").to_string_lossy().as_ref(),
             )),
             read_identity: env("MOSAIC_READ_IDENTITY", "m0"),
-            base_rpc: std::env::var("MOSAIC_BASE_RPC").ok().filter(|s| !s.is_empty()),
+            base_rpc: std::env::var("MOSAIC_BASE_RPC")
+                .ok()
+                .filter(|s| !s.is_empty()),
             cast_bin: env("MOSAIC_CAST_BIN", "cast"),
             prover_dir: PathBuf::from(env(
                 "MOSAIC_PROVER_DIR",
                 cwd.join("bridge-prover").to_string_lossy().as_ref(),
             )),
+            base_router: env(
+                "MOSAIC_BASE_ROUTER",
+                "CB3ISULTPMQXHUH6BVRO7VQIQE3TTDRGSHWBJ72V7GRO6VF63BMGNWOU",
+            ),
+            base_image_id: env(
+                "MOSAIC_BASE_IMAGE_ID",
+                "69c430391c303a1db21811ee9cc29a9e6997ce2d0dbcd62cdd0539ca5732ca03",
+            ),
+            base_config_id: env(
+                "MOSAIC_BASE_CONFIG_ID",
+                "3519660d6ecbd34367740f5ca18449cba8b389594f69f177bbf21c46e505c61e",
+            ),
         }
     }
 }
@@ -88,6 +106,9 @@ impl Config {
     }
     pub fn join_vk(&self) -> PathBuf {
         self.vks_dir.join("join_vk")
+    }
+    pub fn bridge_artifact(&self) -> PathBuf {
+        self.artifacts_dir.join("MosaicBridge.json")
     }
 }
 

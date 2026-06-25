@@ -22,10 +22,7 @@ use uuid::Uuid;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/assets", get(list_assets).post(propose_asset))
-        .route(
-            "/assets/:id/trust",
-            post(trust_asset).delete(untrust_asset),
-        )
+        .route("/assets/:id/trust", post(trust_asset).delete(untrust_asset))
 }
 
 #[derive(Serialize)]
@@ -81,8 +78,16 @@ async fn propose_asset(
     }
 
     // An asset can be on Stellar, Base, or both, but must be on at least one chain.
-    let stellar_in = body.stellar_token.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let base_in = body.base_token.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let stellar_in = body
+        .stellar_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let base_in = body
+        .base_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if stellar_in.is_none() && base_in.is_none() {
         return Err(AppError::BadRequest(
             "an asset must be on Stellar, Base, or both".into(),
@@ -103,9 +108,9 @@ async fn propose_asset(
     let (base_chain_id, base_token, base_decimals) = match base_in {
         Some(t) => {
             let token = validate_base_token(t)?;
-            let chain = body
-                .base_chain_id
-                .ok_or_else(|| AppError::BadRequest("base_chain_id required for a Base asset".into()))?;
+            let chain = body.base_chain_id.ok_or_else(|| {
+                AppError::BadRequest("base_chain_id required for a Base asset".into())
+            })?;
             let decimals = if token == "native" {
                 body.base_decimals.unwrap_or(18)
             } else {
@@ -201,7 +206,8 @@ fn validate_base_token(token: &str) -> AppResult<String> {
     let t = token.trim();
     if t == "native" {
         Ok("native".to_string())
-    } else if t.len() == 42 && t.starts_with("0x") && t[2..].bytes().all(|b| b.is_ascii_hexdigit()) {
+    } else if t.len() == 42 && t.starts_with("0x") && t[2..].bytes().all(|b| b.is_ascii_hexdigit())
+    {
         Ok(t.to_string())
     } else {
         Err(AppError::BadRequest(

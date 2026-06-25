@@ -14,6 +14,7 @@ import AssetsPage from './pages/AssetsPage'
 import { WalletProvider } from './WalletContext'
 import { RecoveryProvider } from './RecoveryContext'
 import { ActivityProvider } from './ActivityContext'
+import { EthereumWalletProvider } from './EthereumWalletContext'
 
 const router = createBrowserRouter([
   {
@@ -30,11 +31,13 @@ const router = createBrowserRouter([
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <WalletProvider>
-      <RecoveryProvider>
-        <ActivityProvider>
-          <RouterProvider router={router} />
-        </ActivityProvider>
-      </RecoveryProvider>
+      <EthereumWalletProvider>
+        <RecoveryProvider>
+          <ActivityProvider>
+            <RouterProvider router={router} />
+          </ActivityProvider>
+        </RecoveryProvider>
+      </EthereumWalletProvider>
     </WalletProvider>
   </StrictMode>,
 )

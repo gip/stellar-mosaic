@@ -5,8 +5,9 @@ import { toRaw } from '../amount'
 import { randomField, fieldToBytes32 } from '../crypto'
 import { noteTag } from '../noir'
 import { addNote } from '../notes'
-import { baseShield, connectBase } from '../base'
+import { baseShield } from '../base'
 import { useRecovery } from '../RecoveryContext'
+import { useEthereumWallet } from '../EthereumWalletContext'
 
 const STATUS_LABEL: Record<string, string> = {
   proving: 'Proving the deposit (Groth16)…',
@@ -45,6 +46,7 @@ export default function ShieldFromBaseForm({
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<BaseShieldJob | null>(null)
   const recovery = useRecovery()
+  const ethereum = useEthereumWallet()
   const recoveryReady = recovery.unlocked && !recovery.error
 
   useEffect(() => {
@@ -137,8 +139,10 @@ export default function ShieldFromBaseForm({
       if (!asset) throw new Error('Pick an asset that is available on Base.')
       const rawAmount = toRaw(amount, asset.decimals)
 
-      setStatus('Connecting Base wallet…')
-      const account = await connectBase()
+      if (!ethereum.address || !ethereum.connectedToBase) {
+        throw new Error('Connect Ethereum on Base Sepolia in the header first.')
+      }
+      const account = ethereum.address
 
       setStatus('Deriving note…')
       const sk = randomField()
@@ -235,11 +239,14 @@ export default function ShieldFromBaseForm({
               !recoveryReady ||
               !baseSymbols ||
               !!disabledReason ||
+              !ethereum.connectedToBase ||
               !config?.available
             }
           >
             {busy
               ? 'Working…'
+              : !ethereum.connectedToBase
+                ? 'Connect Base Sepolia wallet first'
               : disabledReason
                 ? 'Waiting for contract verification'
                 : !config?.available

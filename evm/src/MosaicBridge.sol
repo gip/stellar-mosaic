@@ -61,14 +61,27 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
     error AssetNotRegistered(uint32 assetId);
     error AssetAlreadyRegistered(uint32 assetId);
     error ZeroToken();
+    error InvalidAssetArrays();
     error InvalidAmount();
     error InvalidOwnerTag();
 
-    constructor(address admin) Ownable(admin) {}
+    /// Deploy a bridge and bind its initial asset registry atomically. This keeps browser-based
+    /// desk creation to one paid transaction and prevents a half-configured bridge from being
+    /// attached to its Stellar settlement contract.
+    constructor(address admin, uint32[] memory assetIds, address[] memory tokens) Ownable(admin) {
+        if (assetIds.length != tokens.length) revert InvalidAssetArrays();
+        for (uint256 i = 0; i < assetIds.length; i++) {
+            _registerAsset(assetIds[i], tokens[i]);
+        }
+    }
 
     /// Bind a protocol asset id to its ERC20 token. Permanent (a rebind would silently change what a
     /// minted note means), matching the Stellar registry's no-rebind rule.
     function registerAsset(uint32 assetId, address token) external onlyOwner {
+        _registerAsset(assetId, token);
+    }
+
+    function _registerAsset(uint32 assetId, address token) internal {
         if (token == address(0)) revert ZeroToken();
         if (assetToken[assetId] != address(0)) revert AssetAlreadyRegistered(assetId);
         assetToken[assetId] = token;

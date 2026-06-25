@@ -91,6 +91,14 @@ signatures, and ZK proving through leased client actions.
 (mirrors `scripts/06`): generate + fund sponsor → deploy wasm with all immutable VKs + admin →
 register assets (`"native"` → XLM SAC) and pairs.
 
+**Dual-wallet and Base deployment.** Freighter on Stellar Testnet remains the login identity;
+MetaMask is an optional Base Sepolia transaction wallet and cannot connect in the app until Stellar
+is connected. A desk creator can opt into a browser-paid `MosaicBridge` deployment. The bridge
+constructor registers every selected Base ERC-20 atomically, then the backend verifies the receipt,
+canonical runtime bytecode, owner, and catalog mappings before its sponsor calls
+`configure_base_bridge`. A rejected or failed MetaMask transaction never rolls back the valid
+Stellar desk, and successful deployment transaction details are retained for configuration retries.
+
 **Trust / privacy boundary.**
 - Plaintext note secrets (`sk`, `rho`) never leave the browser; owner tags, nullifiers, order leaves,
   and proofs are generated in-browser. Freighter `signMessage` deterministically unlocks an

@@ -30,6 +30,12 @@ Base shielding is enabled only when `MOSAIC_BASE_RPC` is set. `MOSAIC_PROVER_DIR
 `bridge-prover` relative to the backend working directory and must contain `run-host`; the
 settlement contract itself must already have a Base bridge configured.
 
+Browser-paid Base bridge deployment also requires `backend/artifacts/MosaicBridge.json` (generated
+by `scripts/08_build_web_artifacts.sh`). The backend verifies the Base Sepolia creation receipt,
+deployed bytecode, owner, and catalog-derived asset mappings before configuring Stellar. The
+testnet verifier pins default to the reviewed deployments and can be overridden with
+`MOSAIC_BASE_ROUTER`, `MOSAIC_BASE_IMAGE_ID`, and `MOSAIC_BASE_CONFIG_ID`.
+
 PostgreSQL is required for horizontally-scaled production deployments. SQLite uses a one-connection
 pool and remains supported for local development and tests. Existing SQLite desk and backup tables
 are migrated in place.
@@ -42,6 +48,7 @@ are migrated in place.
 - `GET /operations/events` — durable SSE stream with `Last-Event-ID` resume
 - `POST /client-actions/next` and leased heartbeat/complete/fail routes
 - `GET  /desks` · `POST /desks` (deploy a new desk) · `POST /desks/import` (register existing)
+- `GET  /base-deployment-config` · `POST /desks/:id/base-deployment` (canonical Base deployment)
 - `GET  /desks/:id` · `GET /desks/:id/root` · `GET /desks/:id/book?pair=&side=`
 - `GET  /desks/:id/base-shield-config` · `GET|POST /desks/:id/base-shields`
 - `GET|PUT /wallet-backups/:backup_id` — opaque AES-GCM wallet snapshots. Updates require a
@@ -54,6 +61,6 @@ Fund mutation routes require both an authenticated wallet session and a currentl
 action. They cannot be called directly to bypass FIFO serialization. Leases last 90 seconds and are
 renewed every 30 seconds while the browser proves or waits for wallet authorization.
 
-Creating a desk generates + friendbot-funds a sponsor account, deploys a fresh settlement
+Creating a desk requires a Stellar wallet session, generates + friendbot-funds a sponsor account, deploys a fresh settlement
 contract, sets the unshield/cancel VKs, and registers the assets + pairs. Sponsor secrets are
 stored in SQLite (testnet only).

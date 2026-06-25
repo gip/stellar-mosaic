@@ -63,6 +63,13 @@ soroban-sdk 25.1.0, so the settlement contract — on 26.0.1 — cross-calls it 
 `env.invoke_contract` instead of linking the crate). Deploy the router separately; configure the
 settlement contract with `configure_base_bridge(router, image_id, config_id, bridge)`.
 
+The web desk-creation flow can deploy this bridge from MetaMask on Base Sepolia. It is an explicit,
+unchecked opt-in because the connected account pays ETH for gas. The Stellar desk is created first;
+the browser then deploys the canonical contract with all selected Base ERC-20 mappings in its
+constructor. Before attaching it, the backend independently checks the deployment receipt, exact
+runtime bytecode, owner, and mappings through `MOSAIC_BASE_RPC`. Failed attachment is retryable and
+reuses the already-paid deployment.
+
 ## Backend automation (WS6-backend)
 
 `backend/src/base_shield.rs` is a durable, crash-resumable worker that automates the validated
