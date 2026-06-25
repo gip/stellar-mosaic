@@ -1,8 +1,18 @@
 # Base → Stellar shield bridge
 
-Let users shield USDC on **Base (Sepolia)** and receive a spendable, owner-anonymous note on
+Let users shield an asset on **Base (Sepolia)** and receive a spendable, owner-anonymous note on
 Stellar — reusing the existing note/tree/settle machinery unchanged. One-way deposit for this phase
-(lock on Base, mint on Stellar); Base-USDC is treated as equivalent to Stellar-USDC.
+(lock on Base, mint on Stellar); the Base asset is treated as equivalent to its Stellar form.
+
+The Base asset can be an **ERC-20** (e.g. USDC, deposited via `MosaicBridge.shield`) or **native
+ETH** (deposited via the payable `MosaicBridge.shieldNative`; the asset is registered under the
+`NATIVE` sentinel address). The deposit struct the guest proves — `{assetId, amount, ownerTag}` — is
+identical either way, so the guest image id is unchanged. On Stellar the asset's `AssetKind` governs
+the route: a **`Dual`** asset (e.g. USDC, real on both chains) accepts both `shield` and
+`shield_from_base`; a **`BaseRepresented`** asset (e.g. ETH, with no real Stellar token) accepts only
+`shield_from_base` and is **trade-only** (it can be traded into a `Stellar`/`Dual` asset and that
+proceeds note unshielded, but the represented note itself is never `unshield`ed). A `Stellar`-only
+asset is rejected by `shield_from_base` (`AssetNotBridgeable`). See `architecture.md` for the table.
 
 ## Flow
 
@@ -63,11 +73,21 @@ soroban-sdk 25.1.0, so the settlement contract — on 26.0.1 — cross-calls it 
 `env.invoke_contract` instead of linking the crate). Deploy the router separately; configure the
 settlement contract with `configure_base_bridge(router, image_id, config_id, bridge)`.
 
+The web desk-creation flow can deploy this bridge from MetaMask on Base Sepolia. It is an explicit,
+unchecked opt-in because the connected account pays ETH for gas. The Stellar desk is created first;
+the browser then deploys the canonical contract with all selected Base ERC-20 mappings in its
+constructor. Before attaching it, the backend independently checks the deployment receipt, exact
+runtime bytecode, owner, and mappings through `MOSAIC_BASE_RPC`. Failed attachment is retryable and
+reuses the already-paid deployment.
+
 ## Backend automation (WS6-backend)
 
 `backend/src/base_shield.rs` is a durable, crash-resumable worker that automates the validated
 script server-side (proving can't run in a browser). Enqueue a job with
-`POST /desks/:id/base-shields {bridge, deposit_id}`; the worker advances a `base_shields` row through
+`GET /desks/:id/base-shield-config` reports whether the desk's on-chain bridge configuration and the
+backend worker are ready. The frontend reads the bridge from this endpoint rather than accepting a
+manual address. `POST /desks/:id/base-shields {expected_bridge, deposit_id}` re-reads the contract,
+rejects configuration drift, and advances a `base_shields` row through
 `proving → awaiting_finality → minting → active|failed`, persisting the proof in SQL so a restart
 resumes. It invokes `MOSAIC_PROVER_DIR/run-host -- --prove` (proving at a recent in-window block),
 polls Base `finalized` via `cast` (prove-then-finalize), then attests + `shield_from_base` via the

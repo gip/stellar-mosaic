@@ -4,6 +4,7 @@ import { api, type Desk } from '../api'
 import { useWallet } from '../WalletContext'
 import CreateDeskForm from '../components/CreateDeskForm'
 import ImportDeskForm from '../components/ImportDeskForm'
+import BaseDeploymentPanel from '../components/BaseDeploymentPanel'
 
 export default function Home() {
   const { address } = useWallet()
@@ -59,6 +60,12 @@ export default function Home() {
               )
             })}
           </div>
+          {d.base_deployment && (
+            <BaseDeploymentPanel
+              desk={d}
+              onUpdated={(updated) => setDesks((current) => current?.map((desk) => desk.id === updated.id ? updated : desk) ?? null)}
+            />
+          )}
         </div>
       ))}
 

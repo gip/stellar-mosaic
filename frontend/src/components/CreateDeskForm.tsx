@@ -1,6 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api, type CatalogAsset } from '../api'
+import { api, type BaseDeploymentConfig, type CatalogAsset, type Desk } from '../api'
+import { useEthereumWallet } from '../EthereumWalletContext'
+import { displayEth, estimateBridgeDeployment } from '../base'
+import type { Address } from 'viem'
+import BaseDeploymentPanel from './BaseDeploymentPanel'
+import { assetKindOf, baseTokenAddress, eligibleBaseAssets, hasEnoughEth } from '../baseDeployment'
 
 interface PairRow {
   base: string
@@ -21,6 +26,11 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
   const [pairs, setPairs] = useState<PairRow[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [deployBase, setDeployBase] = useState(false)
+  const [deploymentConfig, setDeploymentConfig] = useState<BaseDeploymentConfig | null>(null)
+  const [estimatedFee, setEstimatedFee] = useState<bigint | null>(null)
+  const [createdDesk, setCreatedDesk] = useState<Desk | null>(null)
+  const ethereum = useEthereumWallet()
 
   useEffect(() => {
     let active = true
@@ -34,11 +44,28 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
     }
   }, [])
 
+  useEffect(() => {
+    api.getBaseDeploymentConfig().then(setDeploymentConfig).catch(() => setDeploymentConfig(null))
+  }, [])
+
   // Selected catalog entries become desk assets, with asset_id assigned by selection order (1-based).
-  const chosen = selected
+  const chosen = useMemo(() => selected
     .map((id) => catalog?.find((a) => a.id === id))
-    .filter((a): a is CatalogAsset => !!a)
-  const assetIdOf = (catalogId: string) => selected.indexOf(catalogId) + 1
+    .filter((a): a is CatalogAsset => !!a), [selected, catalog])
+  const assetIdOf = useCallback((catalogId: string) => selected.indexOf(catalogId) + 1, [selected])
+  const baseAssets = useMemo(() => eligibleBaseAssets(chosen), [chosen])
+
+  useEffect(() => {
+    if (!deployBase || !ethereum.address || !ethereum.connectedToBase || !deploymentConfig?.available || !deploymentConfig.abi || !deploymentConfig.bytecode || baseAssets.length === 0) {
+      return
+    }
+    estimateBridgeDeployment({
+      artifact: { abi: deploymentConfig.abi, bytecode: deploymentConfig.bytecode },
+      account: ethereum.address,
+      assetIds: baseAssets.map((asset) => assetIdOf(asset.id)),
+      tokens: baseAssets.map((asset) => baseTokenAddress(asset) as Address),
+    }).then((value) => setEstimatedFee(value.maxFee)).catch(() => setEstimatedFee(null))
+  }, [deployBase, ethereum.address, ethereum.connectedToBase, deploymentConfig, baseAssets, assetIdOf])
 
   function toggleAsset(id: string) {
     const removing = selected.includes(id)
@@ -59,10 +86,12 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
     setError(null)
     try {
       const assets = chosen.map((a) => ({
+        catalog_id: a.id,
         asset_id: assetIdOf(a.id),
         symbol: a.symbol,
         token: a.stellar_token ?? 'native',
         decimals: a.stellar_decimals ?? 7,
+        kind: assetKindOf(a),
       }))
       const deskPairs = pairs
         .filter((p) => p.base && p.quote && p.base !== p.quote)
@@ -70,7 +99,24 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
       if (assets.length === 0) throw new Error('Select at least one asset.')
       if (assets.length >= 2 && deskPairs.length === 0)
         throw new Error('Add at least one trading pair (base / quote).')
-      await api.createDesk({ name, assets, pairs: deskPairs })
+      if (deployBase && (!ethereum.address || !ethereum.connectedToBase)) {
+        throw new Error('Connect MetaMask on Base Sepolia first.')
+      }
+      if (deployBase && baseAssets.length === 0) {
+        throw new Error('Select at least one asset with a Base Sepolia ERC-20 mapping.')
+      }
+      if (deployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
+        throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
+      }
+      const desk = await api.createDesk({
+        name,
+        assets,
+        pairs: deskPairs,
+        ...(deployBase && ethereum.address
+          ? { base_deployment: { deployer_address: ethereum.address } }
+          : {}),
+      })
+      setCreatedDesk(desk)
       setName('')
       setSelected([])
       setPairs([])
@@ -82,31 +128,74 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
     }
   }
 
+  if (createdDesk?.base_deployment) {
+    return (
+      <div className="card">
+        <strong>Stellar desk created</strong>
+        <div className="mono muted">{createdDesk.contract_id}</div>
+        <BaseDeploymentPanel
+          desk={createdDesk}
+          autoStart
+          onUpdated={(updated) => {
+            setCreatedDesk(updated)
+            onDone()
+          }}
+        />
+        <p><button type="button" onClick={() => setCreatedDesk(null)}>Create another desk</button></p>
+      </div>
+    )
+  }
+
+  const effectiveEstimatedFee = deployBase && ethereum.connectedToBase ? estimatedFee : null
+
   return (
     <form onSubmit={submit} style={{ maxWidth: 560 }}>
       <label>Name</label>
       <input value={name} onChange={(e) => setName(e.target.value)} required style={{ width: '100%' }} />
 
-      <label>Assets — choose from the assets you trust</label>
+      <label>Assets — tap to select / unselect from the assets you trust</label>
       {catalog === null && <p className="muted">Loading…</p>}
       {catalog?.length === 0 && (
         <p className="muted">
           No trusted assets. Add or trust one on the <Link to="/assets">Assets</Link> page.
         </p>
       )}
-      {catalog?.map((a) => (
-        <label key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0' }}>
-          <input
-            type="checkbox"
-            checked={selected.includes(a.id)}
-            onChange={() => toggleAsset(a.id)}
-          />
-          <span>
-            {a.symbol}
-            {selected.includes(a.id) && <span className="muted"> · asset_id {assetIdOf(a.id)}</span>}
-          </span>
-        </label>
-      ))}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '4px 0 12px' }}>
+        {catalog?.map((a) => {
+          const on = selected.includes(a.id)
+          const kind = assetKindOf(a)
+          const badge = kind === 'BaseRepresented' ? 'Base→Stellar' : kind
+          return (
+            <button
+              type="button"
+              key={a.id}
+              onClick={() => toggleAsset(a.id)}
+              aria-pressed={on}
+              title={
+                kind === 'Stellar'
+                  ? 'Distributed on Stellar — deposit by shielding'
+                  : kind === 'Dual'
+                    ? 'Distributed on Stellar and Base'
+                    : 'Distributed on Base, represented on Stellar (trade-only)'
+              }
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '4px 10px',
+                borderRadius: 999,
+                border: on ? '1px solid #4f8cff' : '1px solid var(--border, #ccc)',
+                background: on ? 'rgba(79,140,255,0.15)' : 'transparent',
+                cursor: 'pointer',
+              }}
+            >
+              <span>{a.symbol}</span>
+              <span className="muted" style={{ fontSize: '0.8em' }}>{badge}</span>
+              {on && <span className="muted" style={{ fontSize: '0.8em' }}>· #{assetIdOf(a.id)}</span>}
+            </button>
+          )
+        })}
+      </div>
 
       {chosen.length >= 2 && (
         <>
@@ -152,9 +241,31 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
         </>
       )}
 
+      {ethereum.address && (
+        <div className="base-deployment">
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={deployBase}
+              disabled={!ethereum.connectedToBase || !deploymentConfig?.available || baseAssets.length === 0}
+              onChange={(event) => setDeployBase(event.target.checked)}
+            />
+            Deploy a MosaicBridge contract on Base Sepolia
+          </label>
+          <p className="warn">
+            Optional and unchecked by default. Your MetaMask account pays Base Sepolia ETH for deployment gas.
+          </p>
+          {!deploymentConfig?.available && <p className="muted">{deploymentConfig?.reason ?? 'Base deployment configuration is unavailable.'}</p>}
+          {baseAssets.length === 0 && <p className="muted">Select an asset with a Base Sepolia ERC-20 mapping to enable deployment.</p>}
+          {baseAssets.length > 0 && <p className="muted">Will register: {baseAssets.map((asset) => `${asset.symbol} (#${assetIdOf(asset.id)})`).join(', ')}</p>}
+          {deployBase && ethereum.balance !== null && <div>Base balance: {displayEth(ethereum.balance)} ETH</div>}
+          {effectiveEstimatedFee !== null && <div>Estimated maximum fee: {displayEth(effectiveEstimatedFee)} ETH</div>}
+        </div>
+      )}
+
       {error && <p className="err">{error}</p>}
       <p>
-        <button type="submit" disabled={busy}>
+        <button type="submit" disabled={busy || (effectiveEstimatedFee !== null && !hasEnoughEth(ethereum.balance, effectiveEstimatedFee))}>
           {busy ? 'Deploying… (~1 min)' : 'Create desk'}
         </button>
       </p>

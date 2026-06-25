@@ -127,7 +127,11 @@ pub async fn get_desk(
     Path(id): Path<String>,
 ) -> AppResult<Json<Desk>> {
     tracing::info!(desk = %id, "get_desk");
-    Ok(Json(st.db.get_desk(&id).await?))
+    let mut desk = st.db.get_desk(&id).await?;
+    if desk.event_start_ledger.is_none() {
+        desk.event_start_ledger = st.stellar.oldest_ledger(&desk.contract_id).ok();
+    }
+    Ok(Json(desk))
 }
 
 /// Import an already-deployed contract as a read-only desk (Phase 1 convenience).
@@ -144,10 +148,19 @@ pub async fn import_desk(
         name: body.name,
         contract_id: body.contract_id,
         sponsor_pubkey: body.sponsor_pubkey,
+        event_start_ledger: None,
         assets: body.assets,
         pairs: body.pairs,
+        base_deployment: None,
     };
-    st.db.insert_desk(&desk, None, None).await?;
+    let event_start_ledger = st.stellar.oldest_ledger(&desk.contract_id).ok();
+    let desk = Desk {
+        event_start_ledger,
+        ..desk
+    };
+    st.db
+        .insert_desk(&desk, None, desk.event_start_ledger, None)
+        .await?;
     tracing::info!(desk = %desk.id, contract_id = %desk.contract_id, "import_desk ok");
     Ok(Json(desk))
 }
@@ -156,8 +169,72 @@ pub async fn import_desk(
 /// The deploy pipeline makes several blocking testnet calls, so it runs on a blocking thread.
 pub async fn create_desk(
     State(st): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<CreateDesk>,
 ) -> AppResult<Json<Desk>> {
+    let session = crate::auth::require_session(&headers, &st).await?;
+    let mut base_assets = Vec::new();
+    for requested in &body.assets {
+        let catalog = st.db.get_catalog_asset(&requested.catalog_id).await?;
+        if catalog.symbol != requested.symbol
+            || catalog.stellar_token.as_deref() != Some(requested.token.as_str())
+            || catalog.stellar_decimals != Some(requested.decimals)
+        {
+            return Err(AppError::BadRequest(format!(
+                "asset {} no longer matches the catalog; refresh and try again",
+                requested.symbol
+            )));
+        }
+        // The asset class is derived from the catalog and must match what the client sent: a
+        // represented (token-less) Stellar side + a Base side = BaseRepresented; a real Stellar side
+        // + a Base side = Dual; a real Stellar side alone = Stellar.
+        let on_base = catalog.base_token.is_some();
+        let represented = catalog.stellar_token.as_deref() == Some("represented");
+        let expected_kind = match (represented, on_base) {
+            (true, true) => crate::models::AssetKind::BaseRepresented,
+            (true, false) => {
+                return Err(AppError::BadRequest(format!(
+                    "asset {} is represented on Stellar but has no Base side",
+                    requested.symbol
+                )))
+            }
+            (false, true) => crate::models::AssetKind::Dual,
+            (false, false) => crate::models::AssetKind::Stellar,
+        };
+        if requested.kind != expected_kind {
+            return Err(AppError::BadRequest(format!(
+                "asset {} class does not match the catalog; refresh and try again",
+                requested.symbol
+            )));
+        }
+        if catalog.base_chain_id == Some(84_532) {
+            if let Some(token) = catalog.base_token.clone() {
+                // Native ETH registers under the MosaicBridge `NATIVE` sentinel; ERC-20s use their
+                // 0x address.
+                let evm = if token == "native" {
+                    crate::stellar::normalize_evm_bridge(crate::models::NATIVE_EVM_SENTINEL)?
+                } else {
+                    crate::stellar::normalize_evm_bridge(&token)?
+                };
+                base_assets.push(crate::models::BaseAssetMapping {
+                    asset_id: requested.asset_id,
+                    symbol: requested.symbol.clone(),
+                    token: evm,
+                });
+            }
+        }
+    }
+    let base_request = body.base_deployment.clone();
+    let deployer = base_request
+        .as_ref()
+        .map(|request| crate::stellar::normalize_evm_bridge(&request.deployer_address))
+        .transpose()?;
+    if deployer.is_some() && base_assets.is_empty() {
+        return Err(AppError::BadRequest(
+            "Base deployment requires at least one selected Base Sepolia asset (ERC-20 or native ETH)"
+                .into(),
+        ));
+    }
     tracing::info!(name = %body.name, assets = body.assets.len(), pairs = body.pairs.len(), "create_desk");
     let st_for_deploy = st.clone();
     let (desk, sponsor_secret, from_ledger) =
@@ -165,10 +242,20 @@ pub async fn create_desk(
             .await
             .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
     st.db
-        .insert_desk(&desk, Some(&sponsor_secret), from_ledger)
+        .insert_desk(
+            &desk,
+            Some(&sponsor_secret),
+            from_ledger,
+            Some(&session.address),
+        )
         .await?;
+    if let Some(deployer) = deployer {
+        st.db
+            .create_base_deployment(&desk.id, &deployer, &base_assets)
+            .await?;
+    }
     tracing::info!(desk = %desk.id, contract_id = %desk.contract_id, "create_desk ok");
-    Ok(Json(desk))
+    Ok(Json(st.db.get_desk(&desk.id).await?))
 }
 
 pub async fn get_root(
@@ -748,29 +835,97 @@ fn decode_strkey_payload(value: &str, version: u8) -> AppResult<[u8; 32]> {
 
 // ---- Base->Stellar shield jobs (WS6) ----
 
-/// Enqueue a Base-shield job for `{bridge, deposit_id}`. The server-side worker proves the deposit,
-/// waits for finality, attests the block, and mints the note. Idempotent per (desk, bridge, deposit).
+#[derive(Debug, Deserialize)]
+pub struct EnqueueBaseShield {
+    pub expected_bridge: String,
+    pub deposit_id: u64,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct BaseShieldConfigResponse {
+    pub available: bool,
+    pub chain_id: u64,
+    pub network: &'static str,
+    pub bridge: Option<String>,
+    pub worker_ready: bool,
+    pub reason: Option<&'static str>,
+}
+
+fn base_shield_response(bridge: Option<String>, worker_ready: bool) -> BaseShieldConfigResponse {
+    let reason = if bridge.is_none() {
+        Some("contract_unconfigured")
+    } else if !worker_ready {
+        Some("worker_disabled")
+    } else {
+        None
+    };
+    BaseShieldConfigResponse {
+        available: reason.is_none(),
+        chain_id: 84_532,
+        network: "base-sepolia",
+        bridge,
+        worker_ready,
+        reason,
+    }
+}
+
+fn require_expected_bridge(expected: &str, configured: &str) -> AppResult<()> {
+    let expected = crate::stellar::normalize_evm_bridge(expected)?;
+    if expected != configured {
+        return Err(AppError::Conflict(
+            "Base bridge configuration changed; refresh before depositing".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Report whether this desk can currently accept Base shields. The bridge address comes only from
+/// the settlement contract; the browser never supplies configuration authority.
+pub async fn get_base_shield_config(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<BaseShieldConfigResponse>> {
+    let desk = st.db.get_desk(&id).await?;
+    let config = st
+        .stellar
+        .base_bridge_config(&desk.contract_id, &read_source(&desk, &st))?;
+    Ok(Json(base_shield_response(
+        config.map(|value| value.bridge),
+        st.config.base_rpc.is_some(),
+    )))
+}
+
+/// Enqueue a Base-shield job for `{expected_bridge, deposit_id}`. The expected address is checked
+/// against fresh on-chain configuration before the trusted address is persisted with the job.
 pub async fn enqueue_base_shield(
     State(st): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(body): Json<Value>,
+    Json(body): Json<EnqueueBaseShield>,
 ) -> AppResult<(axum::http::StatusCode, Json<crate::db::BaseShieldJob>)> {
     // Gated like other desk mutations: enqueuing kicks off backend proving (~minutes of CPU) and a
     // sponsored Stellar tx, so it must not be callable anonymously.
     crate::auth::require_session(&headers, &st).await?;
-    st.db.get_desk(&id).await?;
-    let bridge = body
-        .get("bridge")
-        .and_then(Value::as_str)
-        .filter(|s| s.len() == 42 && s.starts_with("0x") && s[2..].bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or_else(|| AppError::BadRequest("bridge must be a 0x EVM address".into()))?;
-    let deposit_id = body
-        .get("deposit_id")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| AppError::BadRequest("deposit_id required".into()))?;
+    if st.config.base_rpc.is_none() {
+        return Err(AppError::BadRequest(
+            "Base proving worker is disabled".into(),
+        ));
+    }
+    let desk = st.db.get_desk(&id).await?;
+    let configured = st
+        .stellar
+        .base_bridge_config(&desk.contract_id, &read_source(&desk, &st))?
+        .ok_or_else(|| {
+            AppError::BadRequest("Base bridge is not configured for this desk".into())
+        })?;
+    require_expected_bridge(&body.expected_bridge, &configured.bridge)?;
+    let bridge = configured.bridge;
+    let deposit_id = body.deposit_id;
     tracing::info!(desk = %id, %bridge, deposit_id, "enqueue base-shield");
-    let job = st.db.enqueue_base_shield(&id, bridge, deposit_id as i64).await?;
+    let job = st
+        .db
+        .enqueue_base_shield(&id, &bridge, deposit_id as i64)
+        .await?;
     Ok((axum::http::StatusCode::ACCEPTED, Json(job)))
 }
 
@@ -790,5 +945,44 @@ fn read_source(desk: &Desk, st: &AppState) -> String {
         desk.sponsor_pubkey.clone()
     } else {
         st.config.read_identity.clone()
+    }
+}
+
+#[cfg(test)]
+mod base_shield_config_tests {
+    use super::{base_shield_response, require_expected_bridge};
+
+    #[test]
+    fn readiness_distinguishes_contract_and_worker_failures() {
+        let unconfigured = base_shield_response(None, true);
+        assert!(!unconfigured.available);
+        assert_eq!(unconfigured.reason, Some("contract_unconfigured"));
+
+        let disabled = base_shield_response(
+            Some("0xabababababababababababababababababababab".into()),
+            false,
+        );
+        assert!(!disabled.available);
+        assert_eq!(disabled.reason, Some("worker_disabled"));
+
+        let ready = base_shield_response(
+            Some("0xabababababababababababababababababababab".into()),
+            true,
+        );
+        assert!(ready.available);
+        assert_eq!(ready.reason, None);
+    }
+
+    #[test]
+    fn enqueue_bridge_must_match_fresh_contract_configuration() {
+        let configured = "0xabababababababababababababababababababab";
+        assert!(
+            require_expected_bridge("0xABABABABABABABABABABABABABABABABABABABAB", configured)
+                .is_ok()
+        );
+        assert!(
+            require_expected_bridge("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", configured)
+                .is_err()
+        );
     }
 }

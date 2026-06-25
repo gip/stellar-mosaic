@@ -53,8 +53,20 @@ the lift + wallet helper circuits (→ `frontend/public/circuits/`). The backend
 cd contracts/settlement && stellar contract build --optimize   # target wasm32v1-none
 ```
 
-The VK is set once at deploy via the constructor (`--vk_bytes-file-path target/vk`); per-operation
-VKs (`set_vk(op, vk)`) register the unshield (op 2) and cancel VKs alongside the order VK (op 1).
+The constructor validates and installs the order, unshield, cancel, and join VKs **and** the full
+asset/pair set atomically:
+
+```
+__constructor(lift_vk, unshield_vk, cancel_vk, join_vk, admin,
+              assets: Vec<AssetInit>, pairs: Vec<PairDef>)
+```
+
+`AssetInit { asset_id, token: Option<Address>, kind }` declares each supported asset (token `Some`
+for `Stellar`/`Dual`, `None` for `BaseRepresented`); `PairDef { base_asset, quote_asset }` declares
+the canonical markets (pair ids assigned 0,1,… in order). There is **no** post-deployment mutation
+entrypoint for VKs, assets, or pairs — all are immutable from creation. Read-only views:
+`protocol_config()` (pinned VK hashes), `asset(asset_id) -> Option<AssetDef>`, `pair_count()`. The
+backend passes `assets`/`pairs` as JSON to `stellar contract deploy` (see `backend/src/deploy.rs`).
 
 ## Toolchain & version pinning
 
@@ -87,9 +99,20 @@ signatures, and ZK proving through leased client actions.
   durable indexer, membership paths, SSE updates, sponsored relays.
 
 **Desk model.** A *desk* is its own deployed `settlement` contract + a friendbot-funded sponsor
-("main") account + its registered assets and pairs. `POST /desks` runs the full deploy pipeline
-(mirrors `scripts/06`): generate + fund sponsor → deploy wasm with the lift VK + admin → set
-unshield/cancel VKs → register assets (`"native"` → XLM SAC) and pairs.
+("main") account + its (immutable) assets and pairs. `POST /desks` runs the deploy pipeline:
+generate + fund sponsor → deploy wasm with all immutable VKs + admin + the asset set (each with its
+`AssetKind`; `"native"` → XLM SAC, a `BaseRepresented` asset has no Stellar token) + the canonical
+pairs, all as constructor args. There is no longer a post-deploy `register_asset`/`register_pair`
+step — a desk is fully configured by its constructor.
+
+**Dual-wallet and Base deployment.** Freighter on Stellar Testnet remains the login identity;
+MetaMask is an optional Base Sepolia transaction wallet and cannot connect in the app until Stellar
+is connected. A desk creator can opt into a browser-paid `MosaicBridge` deployment. The bridge
+constructor registers every selected Base asset atomically — ERC-20s by address, native ETH under the
+`NATIVE` sentinel (deposited via the payable `shieldNative`) — then the backend verifies the receipt,
+canonical runtime bytecode, owner, and catalog mappings before its sponsor calls
+`configure_base_bridge`. A rejected or failed MetaMask transaction never rolls back the valid
+Stellar desk, and successful deployment transaction details are retained for configuration retries.
 
 **Trust / privacy boundary.**
 - Plaintext note secrets (`sk`, `rho`) never leave the browser; owner tags, nullifiers, order leaves,

@@ -20,6 +20,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEMO="$ROOT/contracts/settlement/tests/fixtures/demo"
 CONTRACT="$ROOT/contracts/settlement"
+VKS="$ROOT/backend/vks"
 NETWORK="${NETWORK:-testnet}"
 IDENTITY="${IDENTITY:-m0}"
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -80,26 +81,24 @@ echo ">>> [build] settlement contract -> wasm"
 ( cd "$CONTRACT" && stellar contract build >/dev/null 2>&1 )
 WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
 
-echo ">>> [deploy] with the order/lift VK + admin"
+echo ">>> [deploy] with the order/lift VK + admin + assets 1,2 -> XLM SAC (Dual, constructor-only)"
+# Assets and pairs are now immutable constructor args (Vec<AssetInit> / Vec<PairDef>) — there is no
+# post-deploy register_asset/register_pair. Both demo assets are Dual (real SAC custody) mapped to
+# the XLM SAC.
+ASSETS_JSON="[{\"asset_id\":1,\"token\":\"$XLM_SAC\",\"kind\":\"Dual\"},{\"asset_id\":2,\"token\":\"$XLM_SAC\",\"kind\":\"Dual\"}]"
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
-  -- --vk_bytes-file-path "$DEMO/vk" --admin "$ADMIN")
+  -- --lift_vk-file-path "$VKS/lift_vk" --unshield_vk-file-path "$VKS/unshield_vk" \
+  --cancel_vk-file-path "$VKS/cancel_vk" --join_vk-file-path "$VKS/join_vk" --admin "$ADMIN" \
+  --assets "$ASSETS_JSON" --pairs '[]')
 echo "    SETTLEMENT CONTRACT: $CID"
 state_set SETTLEMENT_CID "$CID"
 stage "deploy"
 note "settlement contract" "$CID"
 note "order/lift VK"       "$DEMO/vk"
 note "admin"              "$ADMIN"
+note "asset 1 -> token"   "$XLM_SAC (Dual)"
+note "asset 2 -> token"   "$XLM_SAC (Dual)"
 note "explorer"           "https://stellar.expert/explorer/$NETWORK/contract/$CID"
-endstage
-
-echo ">>> [setup] register unshield VK (op 2) + map asset-ids 1,2 -> XLM SAC"
-inv --send yes -- set_vk --op 2 --vk_bytes-file-path "$DEMO/unshield_vk" >/dev/null
-inv --send yes -- register_asset --asset_id 1 --token "$XLM_SAC" >/dev/null
-inv --send yes -- register_asset --asset_id 2 --token "$XLM_SAC" >/dev/null
-stage "setup"
-note "unshield VK (op 2)" "registered"
-note "asset 1 -> token"   "$XLM_SAC"
-note "asset 2 -> token"   "$XLM_SAC"
 endstage
 
 echo ">>> [1. SHIELD] A: 100 of asset1   B: 2000 of asset2  (advances on-chain tree to R2)"

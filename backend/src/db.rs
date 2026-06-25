@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::models::{Asset, CatalogAsset, Desk, Pair};
+use crate::models::{Asset, AssetKind, BaseAssetMapping, BaseDeployment, CatalogAsset, Desk, Pair};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -109,7 +109,8 @@ impl Db {
         };
         let statements = vec![
             "CREATE TABLE IF NOT EXISTS desks (id TEXT PRIMARY KEY, name TEXT NOT NULL, contract_id TEXT NOT NULL, sponsor_pubkey TEXT NOT NULL, sponsor_secret TEXT, from_ledger BIGINT)",
-            "CREATE TABLE IF NOT EXISTS assets (desk_id TEXT NOT NULL, asset_id BIGINT NOT NULL, symbol TEXT NOT NULL, token TEXT NOT NULL, decimals BIGINT NOT NULL DEFAULT 7, PRIMARY KEY (desk_id, asset_id))",
+            "CREATE TABLE IF NOT EXISTS base_deployments (desk_id TEXT PRIMARY KEY, deployer_address TEXT NOT NULL, status TEXT NOT NULL, assets_json TEXT NOT NULL, tx_hash TEXT, bridge_address TEXT, error TEXT, updated_at BIGINT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS assets (desk_id TEXT NOT NULL, asset_id BIGINT NOT NULL, symbol TEXT NOT NULL, token TEXT NOT NULL, decimals BIGINT NOT NULL DEFAULT 7, kind TEXT NOT NULL DEFAULT 'Stellar', PRIMARY KEY (desk_id, asset_id))",
             "CREATE TABLE IF NOT EXISTS pairs (desk_id TEXT NOT NULL, pair_id BIGINT NOT NULL, base_asset BIGINT NOT NULL, quote_asset BIGINT NOT NULL, PRIMARY KEY (desk_id, pair_id))",
             "CREATE TABLE IF NOT EXISTS wallet_backups (backup_id TEXT PRIMARY KEY, write_token_hash TEXT NOT NULL, format_version BIGINT NOT NULL, generation BIGINT NOT NULL, nonce_b64 TEXT NOT NULL, ciphertext_b64 TEXT NOT NULL, updated_at BIGINT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS auth_challenges (id TEXT PRIMARY KEY, address TEXT NOT NULL, message TEXT NOT NULL, expires_at BIGINT NOT NULL, used_at BIGINT)",
@@ -139,9 +140,18 @@ impl Db {
         for statement in statements {
             sqlx::query(statement).execute(&self.pool).await?;
         }
-        // Seed the two built-in defaults: USDC (Base Sepolia <-> Stellar) and Stellar-only XLM.
+        // Seed the built-in defaults: USDC (Base Sepolia <-> Stellar, Dual), Stellar-only XLM, and
+        // ETH (Base-native, represented on Stellar as a trade-only note — trusted by default).
         let now = now_ms();
-        let seeds: [(&str, &str, &str, i64, Option<i64>, Option<&str>, Option<i64>); 2] = [
+        let seeds: [(
+            &str,
+            &str,
+            &str,
+            i64,
+            Option<i64>,
+            Option<&str>,
+            Option<i64>,
+        ); 3] = [
             (
                 "default-usdc",
                 "USDC",
@@ -152,6 +162,7 @@ impl Db {
                 Some(6),
             ),
             ("default-xlm", "XLM", "native", 7, None, None, None),
+            ("default-eth", "ETH", "represented", 18, Some(84532), Some("native"), Some(18)),
         ];
         for (id, symbol, stoken, sdec, bchain, btoken, bdec) in seeds {
             sqlx::query("INSERT INTO catalog_assets (id,symbol,stellar_token,stellar_decimals,base_chain_id,base_token,base_decimals,proposer_address,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,?,NULL,1,?,?) ON CONFLICT(id) DO NOTHING")
@@ -163,6 +174,9 @@ impl Db {
             sqlx::query("ALTER TABLE client_actions ADD COLUMN attempts BIGINT NOT NULL DEFAULT 0")
                 .execute(&self.pool)
                 .await;
+        let _ = sqlx::query("ALTER TABLE desks ADD COLUMN creator_address TEXT")
+            .execute(&self.pool)
+            .await;
         if !self.postgres {
             // The original rusqlite schema stored this digest as a 32-byte BLOB. Normalize it to
             // the portable lowercase hex representation used by both SQL backends.
@@ -181,20 +195,22 @@ impl Db {
         desk: &Desk,
         sponsor_secret: Option<&str>,
         from_ledger: Option<u64>,
+        creator_address: Option<&str>,
     ) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("INSERT INTO desks (id,name,contract_id,sponsor_pubkey,sponsor_secret,from_ledger) VALUES (?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO desks (id,name,contract_id,sponsor_pubkey,sponsor_secret,from_ledger,creator_address) VALUES (?,?,?,?,?,?,?)")
             .bind(&desk.id).bind(&desk.name).bind(&desk.contract_id).bind(&desk.sponsor_pubkey)
-            .bind(sponsor_secret).bind(from_ledger.map(|x| x as i64)).execute(&mut *tx).await?;
+            .bind(sponsor_secret).bind(from_ledger.map(|x| x as i64)).bind(creator_address).execute(&mut *tx).await?;
         for a in &desk.assets {
             sqlx::query(
-                "INSERT INTO assets (desk_id,asset_id,symbol,token,decimals) VALUES (?,?,?,?,?)",
+                "INSERT INTO assets (desk_id,asset_id,symbol,token,decimals,kind) VALUES (?,?,?,?,?,?)",
             )
             .bind(&desk.id)
             .bind(a.asset_id as i64)
             .bind(&a.symbol)
             .bind(&a.token)
             .bind(a.decimals as i64)
+            .bind(a.kind.as_str())
             .execute(&mut *tx)
             .await?;
         }
@@ -225,13 +241,15 @@ impl Db {
     }
 
     pub async fn get_desk(&self, id: &str) -> AppResult<Desk> {
-        let row = sqlx::query("SELECT id,name,contract_id,sponsor_pubkey FROM desks WHERE id=?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("desk {id}")))?;
+        let row = sqlx::query(
+            "SELECT id,name,contract_id,sponsor_pubkey,from_ledger FROM desks WHERE id=?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("desk {id}")))?;
         let assets = sqlx::query(
-            "SELECT asset_id,symbol,token,decimals FROM assets WHERE desk_id=? ORDER BY asset_id",
+            "SELECT asset_id,symbol,token,decimals,kind FROM assets WHERE desk_id=? ORDER BY asset_id",
         )
         .bind(id)
         .fetch_all(&self.pool)
@@ -243,6 +261,7 @@ impl Db {
                 symbol: r.try_get(1)?,
                 token: r.try_get(2)?,
                 decimals: r.try_get::<i64, _>(3)? as u32,
+                kind: AssetKind::from_db(&r.try_get::<String, _>(4)?),
             })
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;
@@ -266,9 +285,77 @@ impl Db {
             name: row.try_get(1)?,
             contract_id: row.try_get(2)?,
             sponsor_pubkey: row.try_get(3)?,
+            event_start_ledger: row.try_get::<Option<i64>, _>(4)?.map(|x| x as u64),
             assets,
             pairs,
+            base_deployment: self.get_base_deployment(id).await?,
         })
+    }
+
+    pub async fn desk_creator(&self, id: &str) -> AppResult<Option<String>> {
+        let row = sqlx::query("SELECT creator_address FROM desks WHERE id=?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("desk {id}")))?;
+        Ok(row.try_get(0)?)
+    }
+
+    pub async fn create_base_deployment(
+        &self,
+        desk_id: &str,
+        deployer_address: &str,
+        assets: &[BaseAssetMapping],
+    ) -> AppResult<()> {
+        sqlx::query("INSERT INTO base_deployments (desk_id,deployer_address,status,assets_json,updated_at) VALUES (?,?,?,?,?)")
+            .bind(desk_id)
+            .bind(deployer_address)
+            .bind("awaiting_wallet")
+            .bind(serde_json::to_string(assets).map_err(|e| AppError::Other(e.into()))?)
+            .bind(now_ms())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_base_deployment(&self, desk_id: &str) -> AppResult<Option<BaseDeployment>> {
+        let Some(row) = sqlx::query("SELECT deployer_address,status,assets_json,tx_hash,bridge_address,error FROM base_deployments WHERE desk_id=?")
+            .bind(desk_id)
+            .fetch_optional(&self.pool)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let assets_json: String = row.try_get(2)?;
+        Ok(Some(BaseDeployment {
+            deployer_address: row.try_get(0)?,
+            status: row.try_get(1)?,
+            assets: serde_json::from_str::<Vec<BaseAssetMapping>>(&assets_json)
+                .map_err(|e| AppError::Other(e.into()))?,
+            tx_hash: row.try_get(3)?,
+            bridge_address: row.try_get(4)?,
+            error: row.try_get(5)?,
+        }))
+    }
+
+    pub async fn update_base_deployment(
+        &self,
+        desk_id: &str,
+        status: &str,
+        tx_hash: Option<&str>,
+        bridge_address: Option<&str>,
+        error: Option<&str>,
+    ) -> AppResult<()> {
+        sqlx::query("UPDATE base_deployments SET status=?,tx_hash=COALESCE(?,tx_hash),bridge_address=COALESCE(?,bridge_address),error=?,updated_at=? WHERE desk_id=?")
+            .bind(status)
+            .bind(tx_hash)
+            .bind(bridge_address)
+            .bind(error)
+            .bind(now_ms())
+            .bind(desk_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     pub async fn desk_from_ledger(&self, id: &str) -> AppResult<Option<u64>> {
@@ -448,18 +535,21 @@ impl Db {
         .fetch_all(&self.pool)
         .await?;
         let mut counts = std::collections::HashMap::new();
-        for r in sqlx::query("SELECT catalog_asset_id, COUNT(*) FROM asset_trusts GROUP BY catalog_asset_id")
-            .fetch_all(&self.pool)
-            .await?
+        for r in sqlx::query(
+            "SELECT catalog_asset_id, COUNT(*) FROM asset_trusts GROUP BY catalog_asset_id",
+        )
+        .fetch_all(&self.pool)
+        .await?
         {
             counts.insert(r.try_get::<String, _>(0)?, r.try_get::<i64, _>(1)?);
         }
         let mut mine = std::collections::HashSet::new();
         if let Some(v) = viewer {
-            for r in sqlx::query("SELECT catalog_asset_id FROM asset_trusts WHERE trusting_address=?")
-                .bind(v)
-                .fetch_all(&self.pool)
-                .await?
+            for r in
+                sqlx::query("SELECT catalog_asset_id FROM asset_trusts WHERE trusting_address=?")
+                    .bind(v)
+                    .fetch_all(&self.pool)
+                    .await?
             {
                 mine.insert(r.try_get::<String, _>(0)?);
             }
@@ -480,6 +570,18 @@ impl Db {
             .fetch_optional(&self.pool)
             .await?
             .is_some())
+    }
+
+    pub async fn get_catalog_asset(&self, id: &str) -> AppResult<CatalogAsset> {
+        let row = sqlx::query(&format!(
+            "SELECT {} FROM catalog_assets WHERE id=?",
+            Self::CATALOG_COLS
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("catalog asset {id}")))?;
+        Self::catalog_from_row(&row)
     }
 
     /// Whether a catalog entry already links this exact (stellar_token, base_token) pair.
@@ -1058,6 +1160,7 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::Db;
+    use crate::models::BaseAssetMapping;
     use serde_json::json;
 
     async fn db() -> Db {
@@ -1070,13 +1173,21 @@ mod tests {
         let job = db.enqueue_base_shield("desk1", "0xabc", 0).await.unwrap();
         assert_eq!(job.status, "proving");
         // idempotent per (desk, bridge, deposit_id)
-        assert_eq!(db.enqueue_base_shield("desk1", "0xabc", 0).await.unwrap().id, job.id);
+        assert_eq!(
+            db.enqueue_base_shield("desk1", "0xabc", 0)
+                .await
+                .unwrap()
+                .id,
+            job.id
+        );
 
         // the worker claims the oldest actionable job
         assert_eq!(db.next_base_shield().await.unwrap().unwrap().id, job.id);
 
         // prove -> awaiting_finality, with the proof persisted
-        db.base_shield_proved(&job.id, 100, "ab", "deadbeef", "cafe").await.unwrap();
+        db.base_shield_proved(&job.id, 100, "ab", "deadbeef", "cafe")
+            .await
+            .unwrap();
         let n = db.next_base_shield().await.unwrap().unwrap();
         assert_eq!(n.status, "awaiting_finality");
         assert_eq!(n.block_number, Some(100));
@@ -1086,7 +1197,10 @@ mod tests {
         // minting -> active is terminal (not re-claimed)
         db.base_shield_status(&job.id, "minting").await.unwrap();
         db.base_shield_status(&job.id, "active").await.unwrap();
-        assert!(db.next_base_shield().await.unwrap().is_none(), "active is terminal");
+        assert!(
+            db.next_base_shield().await.unwrap().is_none(),
+            "active is terminal"
+        );
 
         let list = db.list_base_shields("desk1").await.unwrap();
         assert_eq!(list.len(), 1);
@@ -1095,8 +1209,76 @@ mod tests {
         // a failed job is also terminal
         let j2 = db.enqueue_base_shield("desk1", "0xabc", 1).await.unwrap();
         db.base_shield_failed(&j2.id, "boom").await.unwrap();
-        assert!(db.next_base_shield().await.unwrap().is_none(), "failed is terminal");
-        assert_eq!(db.get_base_shield(&j2.id).await.unwrap().error.as_deref(), Some("boom"));
+        assert!(
+            db.next_base_shield().await.unwrap().is_none(),
+            "failed is terminal"
+        );
+        assert_eq!(
+            db.get_base_shield(&j2.id).await.unwrap().error.as_deref(),
+            Some("boom")
+        );
+    }
+
+    #[tokio::test]
+    async fn base_deployment_state_is_durable_and_retryable() {
+        let db = db().await;
+        sqlx::query("INSERT INTO desks (id,name,contract_id,sponsor_pubkey,creator_address) VALUES (?,?,?,?,?)")
+            .bind("desk-base")
+            .bind("Base desk")
+            .bind("CSETTLEMENT")
+            .bind("GSPONSOR")
+            .bind("GCREATOR")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        let assets = vec![BaseAssetMapping {
+            asset_id: 1,
+            symbol: "USDC".into(),
+            token: "0x036cbd53842c5426634e7929541ec2318f3dcf7e".into(),
+        }];
+        db.create_base_deployment(
+            "desk-base",
+            "0xabababababababababababababababababababab",
+            &assets,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.desk_creator("desk-base").await.unwrap().as_deref(),
+            Some("GCREATOR")
+        );
+        assert_eq!(
+            db.get_base_deployment("desk-base")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "awaiting_wallet"
+        );
+
+        let tx = format!("0x{}", "12".repeat(32));
+        let bridge = "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+        db.update_base_deployment(
+            "desk-base",
+            "failed",
+            Some(&tx),
+            Some(bridge),
+            Some("retry me"),
+        )
+        .await
+        .unwrap();
+        let failed = db.get_base_deployment("desk-base").await.unwrap().unwrap();
+        assert_eq!(failed.tx_hash.as_deref(), Some(tx.as_str()));
+        assert_eq!(failed.bridge_address.as_deref(), Some(bridge));
+        assert_eq!(failed.error.as_deref(), Some("retry me"));
+
+        db.update_base_deployment("desk-base", "active", None, None, None)
+            .await
+            .unwrap();
+        let active = db.get_base_deployment("desk-base").await.unwrap().unwrap();
+        assert_eq!(active.status, "active");
+        assert_eq!(active.bridge_address.as_deref(), Some(bridge));
+        assert!(active.error.is_none());
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WB="$ROOT/contracts/settlement/tests/fixtures/book_worst"
 CONTRACT="$ROOT/contracts/settlement"
+VKS="$ROOT/backend/vks"
 NETWORK="${NETWORK:-testnet}"; IDENTITY="${IDENTITY:-m0}"; BUDGET=400000000; N=64
 export PATH="$HOME/.cargo/bin:$PATH"
 inv() { stellar contract invoke --id "$CID" --source "$IDENTITY" --network "$NETWORK" "$@"; }
@@ -20,12 +21,13 @@ ADMIN=$(stellar keys address "$IDENTITY")
 XLM_SAC=$(stellar contract id asset --asset native --network "$NETWORK")
 ( cd "$CONTRACT" && stellar contract build >/dev/null 2>&1 )
 WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
+# Assets/pairs are constructor-only (immutable): assets 1,2 as Dual (XLM SAC) + canonical pair id 0.
+ASSETS_JSON="[{\"asset_id\":1,\"token\":\"$XLM_SAC\",\"kind\":\"Dual\"},{\"asset_id\":2,\"token\":\"$XLM_SAC\",\"kind\":\"Dual\"}]"
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
-  -- --vk_bytes-file-path "$WB/vk" --admin "$ADMIN")
+  -- --lift_vk-file-path "$VKS/lift_vk" --unshield_vk-file-path "$VKS/unshield_vk" \
+  --cancel_vk-file-path "$VKS/cancel_vk" --join_vk-file-path "$VKS/join_vk" --admin "$ADMIN" \
+  --assets "$ASSETS_JSON" --pairs '[{"base_asset":1,"quote_asset":2}]')
 echo "    CONTRACT: $CID"
-inv --send yes -- register_asset --asset_id 1 --token "$XLM_SAC" >/dev/null
-inv --send yes -- register_asset --asset_id 2 --token "$XLM_SAC" >/dev/null
-inv --send yes -- register_pair --base_asset 1 --quote_asset 2 >/dev/null
 
 echo ">>> [shield] 64 maker notes (10 a1 each) + taker note (2400 a2)  -> 65-leaf tree"
 for i in $(seq 0 $((N-1))); do

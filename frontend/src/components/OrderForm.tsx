@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import type { Desk, Pair } from '../api'
-import { api } from '../api'
+import { ordersFor, type BookIndexSnapshot } from '../bookIndexer'
 import type { Note } from '../notes'
 import { toRaw, formatAmount, computeMinOutAtPrice, parseRatio } from '../amount'
 import { maxIn, planAssembly } from '../orderPlan'
@@ -50,13 +50,6 @@ function crosses(aIn: bigint, aMinOut: bigint, bIn: bigint, bMinOut: bigint): bo
   return aMinOut * bMinOut <= aIn * bIn
 }
 
-interface BookEntry {
-  amount_in: string | number
-  min_out: string | number
-  remaining_in: string | number
-  expiry: string | number
-}
-
 /**
  * Place a resting limit order. The user picks a pair/side, an amount of the offered (in) asset, and
  * a limit price quoted as quote-per-base (the same number for both sides); min_out is computed from
@@ -69,10 +62,12 @@ interface BookEntry {
 export default function OrderForm({
   desk,
   notes,
+  bookIndex,
   onDone,
 }: {
   desk: Desk
   notes: Note[]
+  bookIndex: BookIndexSnapshot
   onDone: () => void
 }) {
   const [pairId, setPairId] = useState(desk.pairs[0]?.pair_id ?? 0)
@@ -117,32 +112,18 @@ export default function OrderForm({
   // Will this order cross a resting opposing order and execute immediately (rather than rest)? We
   // mirror the contract's match logic against the live opposing book so we can warn before placing.
   // SELL crosses resting bids (side 0); BUY crosses resting asks (side 1).
-  const [willCross, setWillCross] = useState(false)
-  useEffect(() => {
-    let alive = true
-    const aIn = amountInRaw
-    const aMinOut = minOutRaw
-    const oppSide = side === 'SELL' ? 0 : 1
-    // Only query the opposing book when inputs are well-formed; otherwise the answer is just "no".
-    const probe =
-      aIn != null && aMinOut != null && aIn > 0n && aMinOut > 0n
-        ? api.getBook(desk.id, pairId, oppSide).then((r) => {
-            const now = nowSeconds()
-            const entries = (r.orders as BookEntry[]) ?? []
-            return entries.some(
-              (o) =>
-                Number(o.expiry) > now &&
-                BigInt(o.remaining_in) > 0n &&
-                crosses(aIn, aMinOut, BigInt(o.amount_in), BigInt(o.min_out)),
-            )
-          })
-        : Promise.resolve(false)
-    probe.then((cross) => alive && setWillCross(cross)).catch(() => alive && setWillCross(false))
-    return () => {
-      alive = false
-    }
-    // amountInRaw/minOutRaw are bigints, compared by value via Object.is in the dep array.
-  }, [desk.id, pairId, side, amountInRaw, minOutRaw])
+  const opposing = ordersFor(bookIndex, pairId, side === 'SELL' ? 0 : 1)
+  const willCross =
+    amountInRaw != null &&
+    minOutRaw != null &&
+    amountInRaw > 0n &&
+    minOutRaw > 0n &&
+    opposing.some(
+      (o) =>
+        Number(o.expiry) > nowSeconds() &&
+        BigInt(o.remaining_in) > 0n &&
+        crosses(amountInRaw, minOutRaw, BigInt(o.amount_in), BigInt(o.min_out)),
+    )
 
   // Human-readable preview of what placing the order will do.
   const preview = (() => {

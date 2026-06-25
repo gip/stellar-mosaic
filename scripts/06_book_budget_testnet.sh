@@ -26,6 +26,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BOOK="$ROOT/contracts/settlement/tests/fixtures/book"
+VKS="$ROOT/backend/vks"
 CONTRACT="$ROOT/contracts/settlement"
 NETWORK="${NETWORK:-testnet}"
 IDENTITY="${IDENTITY:-m0}"
@@ -74,16 +75,14 @@ echo ">>> [build] settlement contract -> wasm"
 ( cd "$CONTRACT" && stellar contract build >/dev/null 2>&1 )
 WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
 
-echo ">>> [deploy] with the order/lift VK + admin"
+echo ">>> [deploy] order/lift VK + admin + assets 1,2 (Dual -> XLM SAC) + canonical pair (id 0)"
+# Assets/pairs are constructor-only (immutable); there is no post-deploy register_asset/register_pair.
+ASSETS_JSON="[{\"asset_id\":1,\"token\":\"$XLM_SAC\",\"kind\":\"Dual\"},{\"asset_id\":2,\"token\":\"$XLM_SAC\",\"kind\":\"Dual\"}]"
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
-  -- --vk_bytes-file-path "$BOOK/vk" --admin "$ADMIN")
+  -- --lift_vk-file-path "$VKS/lift_vk" --unshield_vk-file-path "$VKS/unshield_vk" \
+  --cancel_vk-file-path "$VKS/cancel_vk" --join_vk-file-path "$VKS/join_vk" --admin "$ADMIN" \
+  --assets "$ASSETS_JSON" --pairs '[{"base_asset":1,"quote_asset":2}]')
 echo "    SETTLEMENT CONTRACT: $CID"
-
-echo ">>> [setup] cancel VK (op 3) + assets 1,2 -> XLM SAC + canonical pair (id 0)"
-inv --send yes -- set_vk --op 3 --vk_bytes-file-path "$BOOK/cancel_vk" >/dev/null
-inv --send yes -- register_asset --asset_id 1 --token "$XLM_SAC" >/dev/null
-inv --send yes -- register_asset --asset_id 2 --token "$XLM_SAC" >/dev/null
-inv --send yes -- register_pair --base_asset 1 --quote_asset 2 >/dev/null
 
 echo ">>> [shield] S1=100 a1, S2=100 a1, B1=2400 a2, S3=50 a1  (reproduces proofs' root R4)"
 inv --send yes -- shield --from "$ADMIN" --asset_id 1 --amount 100  --owner_tag "$OT_S1" >/dev/null

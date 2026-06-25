@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { bytesToHex } from 'viem'
-import { api, type BaseShieldJob, type Desk } from '../api'
+import { api, type BaseShieldConfig, type BaseShieldJob, type Desk } from '../api'
 import { toRaw } from '../amount'
 import { randomField, fieldToBytes32 } from '../crypto'
 import { noteTag } from '../noir'
 import { addNote } from '../notes'
-import { baseShield, connectBase } from '../base'
+import { baseShield } from '../base'
 import { useRecovery } from '../RecoveryContext'
-
-const BRIDGE_KEY = 'mosaic.baseBridge'
+import { useEthereumWallet } from '../EthereumWalletContext'
 
 const STATUS_LABEL: Record<string, string> = {
   proving: 'Proving the deposit (Groth16)…',
@@ -27,24 +26,50 @@ const STATUS_LABEL: Record<string, string> = {
 export default function ShieldFromBaseForm({
   desk,
   userPubkey,
+  disabledReason,
   onDone,
 }: {
   desk: Desk
   userPubkey: string | null
+  disabledReason?: string | null
   onDone: () => void
 }) {
-  const [bridge, setBridge] = useState(() => localStorage.getItem(BRIDGE_KEY) ?? '')
   const [assetId, setAssetId] = useState(desk.assets[0]?.asset_id ?? 1)
   const [amount, setAmount] = useState('1')
   // Symbols of catalog assets that have a Base side; only these can be shielded from Base.
   const [baseSymbols, setBaseSymbols] = useState<Set<string> | null>(null)
+  const [config, setConfig] = useState<BaseShieldConfig | null>(null)
+  const [configError, setConfigError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [jobId, setJobId] = useState<string | null>(null)
   const [job, setJob] = useState<BaseShieldJob | null>(null)
   const recovery = useRecovery()
+  const ethereum = useEthereumWallet()
   const recoveryReady = recovery.unlocked && !recovery.error
+
+  useEffect(() => {
+    if (disabledReason) {
+      return
+    }
+    let active = true
+    api
+      .getBaseShieldConfig(desk.id)
+      .then((value) => {
+        if (!active) return
+        setConfig(value)
+        setConfigError(null)
+      })
+      .catch((cause) => {
+        if (!active) return
+        setConfig(null)
+        setConfigError(cause instanceof Error ? cause.message : String(cause))
+      })
+    return () => {
+      active = false
+    }
+  }, [desk.id, disabledReason])
 
   // Load which assets exist on Base (per the catalog) and restrict the picker to those.
   useEffect(() => {
@@ -68,12 +93,11 @@ export default function ShieldFromBaseForm({
     [baseSymbols, desk.assets],
   )
 
-  // Keep the selection on a Base-eligible asset once the catalog has loaded.
-  useEffect(() => {
-    if (baseSymbols && !baseAssets.some((a) => a.asset_id === assetId)) {
-      setAssetId(baseAssets[0]?.asset_id ?? -1)
-    }
-  }, [baseSymbols, baseAssets, assetId])
+  // Derive a valid selection after the catalog loads instead of synchronizing derived state in an
+  // effect. The explicit selection remains stable whenever it is still eligible.
+  const selectedAssetId = baseAssets.some((a) => a.asset_id === assetId)
+    ? assetId
+    : (baseAssets[0]?.asset_id ?? -1)
 
   // Poll the backend job until it reaches a terminal state.
   useEffect(() => {
@@ -106,15 +130,19 @@ export default function ShieldFromBaseForm({
     setJob(null)
     setJobId(null)
     try {
-      const addr = bridge.trim()
-      if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) throw new Error('Enter the Base MosaicBridge address (0x…).')
-      localStorage.setItem(BRIDGE_KEY, addr)
-      const asset = baseAssets.find((a) => a.asset_id === assetId)
+      if (disabledReason) throw new Error(disabledReason)
+      if (!config?.available || !config.bridge) {
+        throw new Error('Base shielding is not available for this desk.')
+      }
+      const addr = config.bridge
+      const asset = baseAssets.find((a) => a.asset_id === selectedAssetId)
       if (!asset) throw new Error('Pick an asset that is available on Base.')
       const rawAmount = toRaw(amount, asset.decimals)
 
-      setStatus('Connecting Base wallet…')
-      const account = await connectBase()
+      if (!ethereum.address || !ethereum.connectedToBase) {
+        throw new Error('Connect Ethereum on Base Sepolia in the header first.')
+      }
+      const account = ethereum.address
 
       setStatus('Deriving note…')
       const sk = randomField()
@@ -125,7 +153,7 @@ export default function ShieldFromBaseForm({
       setStatus('Approve + shield on Base (sign in your wallet)…')
       const { depositId } = await baseShield({
         bridge: addr as `0x${string}`,
-        assetId,
+        assetId: selectedAssetId,
         amount: BigInt(rawAmount),
         ownerTag: ownerTagHex,
         account,
@@ -137,7 +165,7 @@ export default function ShieldFromBaseForm({
         id: crypto.randomUUID(),
         deskId: desk.id,
         role: 'asset',
-        asset_id: assetId,
+        asset_id: selectedAssetId,
         symbol: asset.symbol,
         amount: rawAmount,
         sk,
@@ -150,7 +178,10 @@ export default function ShieldFromBaseForm({
       })
 
       setStatus(`Queued deposit #${depositId} — proving + minting on the backend…`)
-      const created = await api.enqueueBaseShield(desk.id, { bridge: addr, deposit_id: depositId })
+      const created = await api.enqueueBaseShield(desk.id, {
+        expected_bridge: addr,
+        deposit_id: depositId,
+      })
       setJobId(created.id)
       setJob(created)
       onDone()
@@ -168,22 +199,28 @@ export default function ShieldFromBaseForm({
         Lock an asset on Base Sepolia and mint the matching private note on Stellar via a zero-knowledge
         proof. Proving + finality (~10–15 min) run on the backend; the note appears here once minted.
       </p>
-      <div>
-        <label>Base bridge address</label>
-        <input
-          value={bridge}
-          onChange={(e) => setBridge(e.target.value)}
-          placeholder="0x… (deployed MosaicBridge on Base Sepolia)"
-          spellCheck={false}
-        />
+      <div className="muted">
+        Network: <strong>Base Sepolia</strong>
+        {config?.bridge && (
+          <>
+            {' '}· Verified bridge: <span className="mono">{config.bridge}</span>
+          </>
+        )}
       </div>
+      {config?.reason === 'contract_unconfigured' && (
+        <span className="err">This desk has no Base bridge configured on Stellar.</span>
+      )}
+      {config?.reason === 'worker_disabled' && (
+        <span className="err">The Base proving service is not available.</span>
+      )}
+      {configError && <span className="err">Could not verify Base configuration: {configError}</span>}
       {baseSymbols && baseAssets.length === 0 ? (
         <span className="muted">None of this desk’s assets are available on Base.</span>
       ) : (
         <div className="row" style={{ alignItems: 'flex-end' }}>
           <div>
             <label>Asset</label>
-            <select value={assetId} onChange={(e) => setAssetId(Number(e.target.value))}>
+            <select value={selectedAssetId} onChange={(e) => setAssetId(Number(e.target.value))}>
               {baseAssets.map((a) => (
                 <option key={a.asset_id} value={a.asset_id}>
                   {a.symbol}
@@ -192,11 +229,31 @@ export default function ShieldFromBaseForm({
             </select>
           </div>
           <div>
-            <label>Amount ({baseAssets.find((a) => a.asset_id === assetId)?.symbol ?? ''})</label>
+            <label>Amount ({baseAssets.find((a) => a.asset_id === selectedAssetId)?.symbol ?? ''})</label>
             <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
           </div>
-          <button type="submit" disabled={busy || !recoveryReady || !baseSymbols}>
-            {busy ? 'Working…' : recoveryReady ? 'Shield from Base' : 'Enable / repair recovery first'}
+          <button
+            type="submit"
+            disabled={
+              busy ||
+              !recoveryReady ||
+              !baseSymbols ||
+              !!disabledReason ||
+              !ethereum.connectedToBase ||
+              !config?.available
+            }
+          >
+            {busy
+              ? 'Working…'
+              : !ethereum.connectedToBase
+                ? 'Connect Base Sepolia wallet first'
+              : disabledReason
+                ? 'Waiting for contract verification'
+                : !config?.available
+                  ? 'Base shielding unavailable'
+                  : recoveryReady
+                    ? 'Shield from Base'
+                    : 'Enable / repair recovery first'}
           </button>
         </div>
       )}

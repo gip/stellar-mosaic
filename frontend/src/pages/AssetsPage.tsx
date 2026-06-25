@@ -20,8 +20,22 @@ export default function AssetsPage() {
 
   // Reload when the wallet connects/disconnects so `trusted_by_me` reflects the current user.
   useEffect(() => {
-    void load()
-  }, [load, address])
+    let active = true
+    api
+      .listCatalogAssets()
+      .then((next) => {
+        if (active) {
+          setAssets(next)
+          setError(null)
+        }
+      })
+      .catch((e) => {
+        if (active) setError(e instanceof Error ? e.message : String(e))
+      })
+    return () => {
+      active = false
+    }
+  }, [address])
 
   return (
     <>

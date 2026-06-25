@@ -3,7 +3,7 @@ import { api } from '../api'
 
 const BASE_SEPOLIA_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e'
 
-type StellarType = 'native' | 'issued' | 'contract'
+type StellarType = 'native' | 'issued' | 'contract' | 'represented'
 type BaseType = 'native' | 'erc20'
 
 /**
@@ -45,10 +45,19 @@ export default function AddAssetForm({ onDone }: { onDone: () => void }) {
     setError(null)
     try {
       if (!onStellar && !onBase) throw new Error('Add the asset on Stellar, Base, or both.')
+      if (onStellar && stellarType === 'represented' && !onBase) {
+        throw new Error('A represented Stellar asset must also be on Base (it is Base-backed).')
+      }
       const body: Parameters<typeof api.proposeAsset>[0] = { symbol: effectiveSymbol }
       if (onStellar) {
-        body.stellar_token = stellarType === 'native' ? 'native' : stellarToken
-        body.stellar_decimals = stellarType === 'native' ? 7 : Number(stellarDecimals)
+        body.stellar_token =
+          stellarType === 'native'
+            ? 'native'
+            : stellarType === 'represented'
+              ? 'represented'
+              : stellarToken
+        body.stellar_decimals =
+          stellarType === 'native' ? 7 : Number(stellarDecimals)
       }
       if (onBase) {
         body.base_chain_id = Number(baseChainId)
@@ -95,8 +104,15 @@ export default function AddAssetForm({ onDone }: { onDone: () => void }) {
             <option value="native">Native (XLM)</option>
             <option value="issued">Classic asset (CODE:ISSUER)</option>
             <option value="contract">Contract (C…)</option>
+            <option value="represented">Represented (Base-backed, trade-only)</option>
           </select>
-          {stellarType !== 'native' && (
+          {stellarType === 'represented' && (
+            <p className="muted">
+              No Stellar token: this asset lives on Base and exists on Stellar only as a trade-only
+              note. Requires a Base side below.
+            </p>
+          )}
+          {(stellarType === 'issued' || stellarType === 'contract') && (
             <>
               <label>{stellarType === 'issued' ? 'CODE:ISSUER' : 'Contract id (C…)'}</label>
               <input

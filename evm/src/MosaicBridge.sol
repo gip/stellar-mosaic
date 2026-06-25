@@ -29,7 +29,14 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
     /// Stellar note amounts are `i128`; reject deposits that could not be represented there.
     uint256 internal constant MAX_AMOUNT = uint256(uint128(type(int128).max));
 
-    /// Protocol asset id (identical to the Stellar `register_asset` id) -> ERC20 token on Base.
+    /// Sentinel `assetToken` value marking an asset whose Base side is NATIVE ETH (deposited via
+    /// `shieldNative`, not an ERC20). The canonical "mock ETH" pseudo-address; chosen because it is
+    /// non-zero (so it is distinguishable from an unregistered id, whose map default is `address(0)`)
+    /// and cannot be a real deployed token. On Stellar this maps to a `BaseRepresented` asset.
+    address internal constant NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
+
+    /// Protocol asset id (identical to the Stellar `register_asset` id) -> token on Base. The value
+    /// is an ERC20 address, or the `NATIVE` sentinel for native ETH. `address(0)` = unregistered.
     mapping(uint32 assetId => address token) public assetToken;
 
     /// Monotonic deposit counter. `depositId` is the single-use replay key consumed on Stellar
@@ -61,14 +68,30 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
     error AssetNotRegistered(uint32 assetId);
     error AssetAlreadyRegistered(uint32 assetId);
     error ZeroToken();
+    error InvalidAssetArrays();
     error InvalidAmount();
     error InvalidOwnerTag();
+    /// Wrong deposit route for the asset's Base side: ERC20 `shield` on a native asset, or
+    /// `shieldNative` on an ERC20 asset.
+    error WrongDepositRoute(uint32 assetId);
 
-    constructor(address admin) Ownable(admin) {}
+    /// Deploy a bridge and bind its initial asset registry atomically. This keeps browser-based
+    /// desk creation to one paid transaction and prevents a half-configured bridge from being
+    /// attached to its Stellar settlement contract.
+    constructor(address admin, uint32[] memory assetIds, address[] memory tokens) Ownable(admin) {
+        if (assetIds.length != tokens.length) revert InvalidAssetArrays();
+        for (uint256 i = 0; i < assetIds.length; i++) {
+            _registerAsset(assetIds[i], tokens[i]);
+        }
+    }
 
     /// Bind a protocol asset id to its ERC20 token. Permanent (a rebind would silently change what a
     /// minted note means), matching the Stellar registry's no-rebind rule.
     function registerAsset(uint32 assetId, address token) external onlyOwner {
+        _registerAsset(assetId, token);
+    }
+
+    function _registerAsset(uint32 assetId, address token) internal {
         if (token == address(0)) revert ZeroToken();
         if (assetToken[assetId] != address(0)) revert AssetAlreadyRegistered(assetId);
         assetToken[assetId] = token;
@@ -88,6 +111,7 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
     {
         address token = assetToken[assetId];
         if (token == address(0)) revert AssetNotRegistered(assetId);
+        if (token == NATIVE) revert WrongDepositRoute(assetId); // native ETH -> use shieldNative
         if (amount == 0 || amount > MAX_AMOUNT) revert InvalidAmount();
         if (uint256(ownerTag) >= BN254_SCALAR_FIELD) revert InvalidOwnerTag();
 
@@ -102,6 +126,30 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
         // Record the note in state so the OP-compatible Steel proof can read it via eth_getProof.
         deposits[depositId] = Deposit({assetId: assetId, amount: received, ownerTag: ownerTag});
         emit Shielded(depositId, assetId, received, ownerTag, token, msg.sender);
+    }
+
+    /// Shield native ETH (`msg.value`) into custody and emit the note descriptor. The Base-side
+    /// counterpart of `shield` for an asset whose Base form is native ETH (its Stellar form is a
+    /// `BaseRepresented` note). The deposit struct/journal the bridge guest proves is identical to an
+    /// ERC20 shield — only the funds source differs — so the guest image id is unchanged.
+    function shieldNative(uint32 assetId, bytes32 ownerTag)
+        external
+        payable
+        nonReentrant
+        whenNotPaused
+        returns (uint64 depositId)
+    {
+        address token = assetToken[assetId];
+        if (token == address(0)) revert AssetNotRegistered(assetId);
+        if (token != NATIVE) revert WrongDepositRoute(assetId); // ERC20 asset -> use shield
+        uint256 amount = msg.value;
+        if (amount == 0 || amount > MAX_AMOUNT) revert InvalidAmount();
+        if (uint256(ownerTag) >= BN254_SCALAR_FIELD) revert InvalidOwnerTag();
+
+        // ETH is already in custody (the contract holds `msg.value`); there is no transfer to measure.
+        depositId = depositCount++;
+        deposits[depositId] = Deposit({assetId: assetId, amount: amount, ownerTag: ownerTag});
+        emit Shielded(depositId, assetId, amount, ownerTag, NATIVE, msg.sender);
     }
 
     function pause() external onlyOwner {

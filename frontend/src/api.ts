@@ -1,10 +1,16 @@
 // Typed client for the Rust backend. All paths go through the Vite `/api` proxy in dev.
+import type { Abi, Hex } from 'viem'
+
+/** Asset class, mirroring the contract `AssetKind`. Fixes the legal deposit routes:
+ *  Stellar = shield only; Dual = shield + bridge; BaseRepresented = bridge only, trade-only. */
+export type AssetKind = 'Stellar' | 'Dual' | 'BaseRepresented'
 
 export interface Asset {
   asset_id: number
   symbol: string
   token: string
   decimals: number
+  kind: AssetKind
 }
 
 export interface Pair {
@@ -44,8 +50,43 @@ export interface Desk {
   name: string
   contract_id: string
   sponsor_pubkey: string
+  event_start_ledger: number | null
   assets: Asset[]
   pairs: Pair[]
+  base_deployment: BaseDeployment | null
+}
+
+export interface BaseAssetMapping {
+  asset_id: number
+  symbol: string
+  token: string
+}
+
+export interface BaseDeployment {
+  status: 'awaiting_wallet' | 'verifying' | 'configuring' | 'active' | 'failed'
+  deployer_address: string
+  tx_hash: string | null
+  bridge_address: string | null
+  error: string | null
+  assets: BaseAssetMapping[]
+}
+
+export interface BaseDeploymentConfig {
+  available: boolean
+  chain_id: number
+  network: 'base-sepolia'
+  reason: string | null
+  abi: Abi | null
+  bytecode: Hex | null
+}
+
+export interface BaseShieldConfig {
+  available: boolean
+  chain_id: number
+  network: 'base-sepolia'
+  bridge: string | null
+  worker_ready: boolean
+  reason: 'contract_unconfigured' | 'worker_disabled' | null
 }
 
 const BASE = '/api'
@@ -101,10 +142,6 @@ export const api = {
   listDesks: () => req<Desk[]>('/desks'),
   getDesk: (id: string) => req<Desk>(`/desks/${id}`),
   getRoot: (id: string) => req<{ root: string }>(`/desks/${id}/root`),
-  getBook: (id: string, pair: number, side: number) =>
-    req<{ pair: number; side: number; orders: unknown }>(
-      `/desks/${id}/book?pair=${pair}&side=${side}`,
-    ),
   importDesk: (body: {
     name: string
     contract_id: string
@@ -114,9 +151,16 @@ export const api = {
   }) => req<Desk>('/desks/import', { method: 'POST', body: JSON.stringify(body) }),
   createDesk: (body: {
     name: string
-    assets: { asset_id: number; symbol: string; token: string; decimals: number }[]
+    assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
+    base_deployment?: { deployer_address: string }
   }) => req<Desk>('/desks', { method: 'POST', body: JSON.stringify(body) }),
+  getBaseDeploymentConfig: () => req<BaseDeploymentConfig>('/base-deployment-config'),
+  completeBaseDeployment: (id: string, body: { tx_hash: string; bridge_address: string }) =>
+    req<Desk>(`/desks/${id}/base-deployment`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   listCatalogAssets: () => req<CatalogAsset[]>('/assets'),
   proposeAsset: (body: ProposeAssetBody) =>
     req<CatalogAsset>('/assets', { method: 'POST', body: JSON.stringify(body) }),
@@ -126,7 +170,9 @@ export const api = {
     req<{ ok: boolean }>(`/assets/${id}/trust`, { method: 'DELETE' }),
   getNotes: (id: string) => req<{ notes: ChainNote[] }>(`/desks/${id}/notes`),
   getFills: (id: string) => req<{ fills: Fill[] }>(`/desks/${id}/fills`),
-  enqueueBaseShield: (id: string, body: { bridge: string; deposit_id: number }) =>
+  getBaseShieldConfig: (id: string) =>
+    req<BaseShieldConfig>(`/desks/${id}/base-shield-config`),
+  enqueueBaseShield: (id: string, body: { expected_bridge: string; deposit_id: number }) =>
     req<BaseShieldJob>(`/desks/${id}/base-shields`, {
       method: 'POST',
       body: JSON.stringify(body),
