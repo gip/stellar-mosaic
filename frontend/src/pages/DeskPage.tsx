@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { api, type Desk } from '../api'
+import { api, type Asset, type Desk } from '../api'
+import { NATIVE_EVM_SENTINEL } from '../baseDeployment'
 import { useWallet } from '../WalletContext'
 import BookView from '../components/BookView'
 import OrderForm from '../components/OrderForm'
@@ -17,6 +18,21 @@ import { setSubmissionMode, submissionMode } from '../directTransaction'
 /** Canonical 32-byte hex tag for comparison: drop any `0x`, lowercase, left-pad to 64. */
 function normTag(h: string): string {
   return h.replace(/^0x/i, '').toLowerCase().padStart(64, '0')
+}
+
+/** Token address cell for an asset, kind-aware. `Stellar`/`Dual` show the real Soroban SAC. A
+ * `BaseRepresented` asset has no Stellar token (the on-chain `assetreg` event carries the contract's
+ * own address as a placeholder), so show its Base token from the Base deployment instead. */
+function assetTokenCell(a: Asset, desk: Desk) {
+  if (a.kind !== 'BaseRepresented') return a.token
+  const base = desk.base_deployment?.assets.find((m) => m.asset_id === a.asset_id)
+  // Native ETH has no ERC-20 contract; the Base side registers under the NATIVE sentinel, which is
+  // not a real address — show "Represented" rather than the meaningless 0xEeee… string.
+  if (base && base.token.toLowerCase() === NATIVE_EVM_SENTINEL.toLowerCase()) {
+    return <span className="muted">Represented (native ETH)</span>
+  }
+  if (base) return `${base.token} (Base)`
+  return <span className="muted">Represented — no Stellar token</span>
 }
 
 export default function DeskPage() {
@@ -147,6 +163,7 @@ export default function DeskPage() {
       token: chain.token,
       symbol: display?.symbol ?? `#${chain.asset_id}`,
       decimals: display?.decimals ?? 7,
+      kind: chain.kind, // authoritative: the on-chain AssetKind from the assetreg event
     }
   })
   const authoritativePairs = bookIndex.pairs
@@ -178,8 +195,22 @@ export default function DeskPage() {
       <table>
         <tbody>
           <tr>
-            <th>Contract</th>
+            <th>Stellar contract</th>
             <td className="mono">{desk.contract_id}</td>
+          </tr>
+          <tr>
+            <th>Base bridge</th>
+            <td className="mono">
+              {desk.base_deployment?.bridge_address ? (
+                desk.base_deployment.bridge_address
+              ) : (
+                <span className="muted">
+                  {desk.base_deployment
+                    ? `not deployed (${desk.base_deployment.status})`
+                    : 'not deployed'}
+                </span>
+              )}
+            </td>
           </tr>
           <tr>
             <th>Sponsor (main)</th>
@@ -218,7 +249,7 @@ export default function DeskPage() {
               <th>
                 {a.symbol} (id {a.asset_id})
               </th>
-              <td className="mono">{a.token}</td>
+              <td className="mono">{assetTokenCell(a, desk)}</td>
             </tr>
           ))}
         </tbody>
