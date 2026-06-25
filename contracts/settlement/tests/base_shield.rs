@@ -7,11 +7,11 @@
 //! independently of a live verifier. The journal layout is built word-by-word and cross-checked
 //! against the exact bytes alloy's `abi_encode` produced (see bridge-prover fixture printer).
 
-use settlement::{DataKey, Error, Settlement, SettlementClient};
+use settlement::{AssetInit, AssetKind, DataKey, Error, Settlement, SettlementClient};
 use soroban_sdk::{
     contract, contracterror, contractimpl,
     testutils::{storage::Persistent as _, Address as _, Events, Ledger},
-    Address, Bytes, BytesN, Env,
+    vec, Address, Bytes, BytesN, Env, Vec,
 };
 
 // ---- mock RISC Zero verifier router ----
@@ -74,6 +74,10 @@ fn test_env() -> Env {
 }
 
 fn deploy(env: &Env) -> (Address, Address) {
+    deploy_cfg(env, Vec::new(env))
+}
+
+fn deploy_cfg(env: &Env, assets: Vec<AssetInit>) -> (Address, Address) {
     let admin = Address::generate(env);
     let id = env.register(
         Settlement,
@@ -83,9 +87,21 @@ fn deploy(env: &Env) -> (Address, Address) {
             Bytes::from_slice(env, VK),
             Bytes::from_slice(env, VK),
             admin.clone(),
+            assets,
+            Vec::<settlement::PairDef>::new(env),
         ),
     );
     (id, admin)
+}
+
+/// A bridgeable asset entry for the constructor. `Dual` carries a real SAC token; `BaseRepresented`
+/// carries none. `Stellar` (also via this helper, for the not-bridgeable negative) carries a SAC.
+fn bridge_asset(env: &Env, asset_id: u32, kind: AssetKind) -> AssetInit {
+    let token = match kind {
+        AssetKind::BaseRepresented => None,
+        _ => Some(env.register_stellar_asset_contract_v2(Address::generate(env)).address()),
+    };
+    AssetInit { asset_id, token, kind }
 }
 
 /// Build the 8-word (256-byte) ABI journal exactly as the guest commits it.
@@ -118,14 +134,10 @@ fn fixture_journal() -> [u8; 256] {
     )
 }
 
-fn register_asset(env: &Env, id: &Address, asset_id: u32) {
-    let sac = env.register_stellar_asset_contract_v2(Address::generate(env));
-    SettlementClient::new(env, id).register_asset(&asset_id, &sac.address());
-}
-
-/// Deploy settlement + mock router, configure the bridge, attest the fixture block, register asset.
-fn setup(env: &Env) -> (Address, Address) {
-    let (id, _admin) = deploy(env);
+/// Deploy settlement (with the bridged asset as `kind`) + mock router, configure the bridge, attest
+/// the fixture block. Returns (id, router).
+fn setup_kind(env: &Env, kind: AssetKind) -> (Address, Address) {
+    let (id, _admin) = deploy_cfg(env, vec![env, bridge_asset(env, ASSET_ID, kind)]);
     let router = env.register(MockRouter, ());
     let client = SettlementClient::new(env, &id);
     client.configure_base_bridge(
@@ -135,8 +147,12 @@ fn setup(env: &Env) -> (Address, Address) {
         &BytesN::from_array(env, &BRIDGE20),
     );
     client.attest_base_block(&BLOCK_NUMBER, &BytesN::from_array(env, &BLOCK_HASH));
-    register_asset(env, &id, ASSET_ID);
     (id, router)
+}
+
+/// The common case: the bridged asset is `Dual` (real SAC custody + Base side).
+fn setup(env: &Env) -> (Address, Address) {
+    setup_kind(env, AssetKind::Dual)
 }
 
 fn good_seal(env: &Env) -> Bytes {
@@ -303,6 +319,29 @@ fn shield_from_base_rejects_unregistered_asset() {
     assert_eq!(err as u32, Error::AssetNotRegistered as u32);
 }
 
+#[test]
+fn shield_from_base_rejects_stellar_only_asset() {
+    // A Stellar-only asset has no Base side: a bridged mint for it must be rejected even though it is
+    // a registered, valid asset and the proof/config all check out.
+    let env = test_env();
+    let (id, _router) = setup_kind(&env, AssetKind::Stellar);
+    let err = call(&env, &id, good_seal(&env), journal_bytes(&env, &fixture_journal()))
+        .expect_err("stellar-only asset bridged");
+    assert_eq!(err as u32, Error::AssetNotBridgeable as u32);
+}
+
+#[test]
+fn shield_from_base_mints_represented_asset() {
+    // A BaseRepresented asset (no Stellar token) enters only via the bridge: the mint inserts a note
+    // and advances the tree, exactly like a Dual mint.
+    let env = test_env();
+    let (id, _router) = setup_kind(&env, AssetKind::BaseRepresented);
+    let client = SettlementClient::new(&env, &id);
+    let root_before = client.root();
+    client.shield_from_base(&good_seal(&env), &journal_bytes(&env, &fixture_journal()));
+    assert_ne!(client.root(), root_before, "represented note minted into the tree");
+}
+
 // ---- WS5: a bridged note is discoverable + spendable via the off-chain indexer ----
 // `shield_from_base` emits the same `shielded(asset_id, amount, owner_tag)` event and inserts the
 // same `Poseidon(asset_id, amount, owner_tag)` leaf as a native shield, so the existing indexer
@@ -345,7 +384,13 @@ fn base_and_native_notes_coexist_in_one_tree() {
     use soroban_sdk::token::StellarAssetClient;
 
     let env = test_env();
-    let (id, _admin) = deploy(&env);
+    // Asset is Dual (real SAC custody + Base side) so it accepts BOTH a native shield and a bridge
+    // mint. Create the SAC first, then configure it at construction.
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    let (id, _admin) = deploy_cfg(
+        &env,
+        vec![&env, AssetInit { asset_id: ASSET_ID, token: Some(sac.address()), kind: AssetKind::Dual }],
+    );
     let router = env.register(MockRouter, ());
     let client = SettlementClient::new(&env, &id);
     client.configure_base_bridge(
@@ -356,9 +401,7 @@ fn base_and_native_notes_coexist_in_one_tree() {
     );
     client.attest_base_block(&BLOCK_NUMBER, &BytesN::from_array(&env, &BLOCK_HASH));
 
-    // Register asset 1 to a real SAC and fund a holder so we can do a NATIVE shield too.
-    let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
-    client.register_asset(&ASSET_ID, &sac.address());
+    // Fund a holder so we can do a NATIVE shield too.
     let holder = Address::generate(&env);
     let native_amount: i128 = 50;
     let native_tag = [0x22u8; 32]; // a valid (< r) field element

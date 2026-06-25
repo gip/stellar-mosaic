@@ -68,8 +68,10 @@ cargo test --test integration   # full custody loop on the local host: real veri
 cargo test -p settlement        # all tests incl. e2e_demo (needs fixtures from scripts/03 first)
 stellar contract build --optimize   # target wasm32v1-none; output target/wasm32v1-none/release/settlement.wasm
 ```
-The integration test (14 tests) exercises shield → atomic settle (two crossing proofs) → unshield
-plus negatives (unpublished root, replay, tampered field, incompatible orders, wrong recipient).
+The integration test exercises shield → atomic settle (two crossing proofs) → unshield plus
+negatives (unpublished root, replay, tampered field, incompatible orders, wrong recipient) and the
+static-config / asset-class checks (constructor rejects bad asset/pair config; `shield` rejects a
+`BaseRepresented` asset; `shield_from_base` rejects a `Stellar`-only asset — see `tests/base_shield.rs`).
 Proof fixtures live in `contracts/settlement/tests/fixtures/` (regenerate via its `regen.sh`).
 
 **Backend** (needs `stellar` CLI on PATH, `artifacts/settlement.wasm`, and `vks/{lift,unshield,cancel}_vk`):
@@ -132,13 +134,20 @@ deployed contracts/addresses to `.e2e/state.env`. See `docs/e2e-testing.md`.
 
 ## Conventions worth knowing
 
-- **Trading pairs are canonical:** `register_pair(base, quote)` fixes orientation (e.g. `XLM/USDC`,
-  never the reverse). SELL = give base / want quote, BUY = give quote / want base. Registering the
-  reverse of an existing pair is rejected.
+- **Trading pairs are canonical:** pairs are declared at construction (`PairDef { base, quote }`,
+  e.g. `XLM/USDC`, never the reverse). SELL = give base / want quote, BUY = give quote / want base.
+  The reverse orientation of an existing pair is rejected.
+- **Asset classes are static + gate the deposit route.** Every asset is declared in the constructor
+  with an immutable `AssetKind`: `Stellar` (real SAC; `shield` ✓, bridge ✗), `Dual` (real on both;
+  both ✓), `BaseRepresented` (Base-distributed, Stellar note-only; bridge ✓, `shield` ✗, `unshield`
+  ✗ — trade-only). `shield`/`shield_from_base`/`unshield` each enforce this (`AssetNotShieldable` /
+  `AssetNotBridgeable` / `AssetNotUnshieldable`). `AssetDef.token` is `None` for `BaseRepresented`.
+  On Base, native ETH uses `MosaicBridge.shieldNative` (the `NATIVE` sentinel); ERC-20s use `shield`.
 - **`circuits/lift` naming is historical** — it is the order proof, not a `lift` entrypoint. All 12
   of its public inputs are used on-chain (`settle` uses `[0..8]`; the book uses `order_leaf`,
   `cancel_owner_tag`, `expiry`, `partial_allowed`).
-- **Immutable per-operation VKs:** order, unshield, cancel, and join VKs are all installed by the
-  constructor and cannot be changed after deployment.
+- **Immutable config from the constructor:** the per-operation VKs (order, unshield, cancel, join)
+  *and* the asset/pair set are all installed by `__constructor` and cannot be changed afterward —
+  there is no `register_asset`/`register_pair` mutator.
 - **Partial fills** exist only in the on-chain order book (exact integer "lots" of the maker's price
   ratio — no change note); `settle`/`settle_exact` are full-fill.

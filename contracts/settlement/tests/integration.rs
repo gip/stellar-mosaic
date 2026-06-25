@@ -10,11 +10,11 @@
 //!   - unshield: shield asset 1 amount 100 (owner_tag_u) at index 0 -> root R_U; proof against R_U.
 //! Regenerate with tests/fixtures/regen.sh.
 
-use settlement::{Error, Settlement, SettlementClient};
+use settlement::{AssetInit, AssetKind, Error, PairDef, Settlement, SettlementClient};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::{StellarAssetClient, TokenClient},
-    Address, Bytes, BytesN, Env, String,
+    vec, Address, Bytes, BytesN, Env, String, Vec,
 };
 
 const VK: &[u8] = include_bytes!("fixtures/vk");
@@ -57,7 +57,13 @@ fn test_env() -> Env {
     env
 }
 
+/// Deploy with no assets/pairs (assets and pairs are now constructor-only).
 fn deploy(env: &Env) -> (Address, Address) {
+    deploy_cfg(env, Vec::new(env), Vec::new(env))
+}
+
+/// Deploy with an explicit, immutable asset/pair config supplied to the constructor.
+fn deploy_cfg(env: &Env, assets: Vec<AssetInit>, pairs: Vec<PairDef>) -> (Address, Address) {
     let admin = Address::generate(env);
     let id = env.register(
         Settlement,
@@ -67,6 +73,8 @@ fn deploy(env: &Env) -> (Address, Address) {
             bytes(env, VK),
             bytes(env, VK),
             admin.clone(),
+            assets,
+            pairs,
         ),
     );
     (id, admin)
@@ -80,15 +88,32 @@ fn tag(env: &Env, b: &[u8]) -> BytesN<32> {
     BytesN::from_array(env, &b.try_into().unwrap())
 }
 
-/// Register a Stellar Asset Contract for `asset_id`, mint `amount` to a fresh holder, and return it.
-fn register_funded_asset(env: &Env, id: &Address, asset_id: u32, amount: i128) -> (Address, Address) {
+/// Create a Stellar Asset Contract for `asset_id`, mint `amount` to a fresh holder, and return the
+/// constructor entry (as a `Dual` asset, the common case) plus the token and holder. Pass the
+/// returned `AssetInit` to `deploy_cfg` — assets are registered at construction now.
+fn funded_asset(env: &Env, asset_id: u32, amount: i128) -> (AssetInit, Address, Address) {
     let token_admin = Address::generate(env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
     let token = sac.address();
     let holder = Address::generate(env);
     StellarAssetClient::new(env, &token).mint(&holder, &amount);
-    SettlementClient::new(env, id).register_asset(&asset_id, &token);
-    (token, holder)
+    (
+        AssetInit { asset_id, token: Some(token.clone()), kind: AssetKind::Dual },
+        token,
+        holder,
+    )
+}
+
+/// Convenience for the common two-asset desk (ASSET_1 + ASSET_2 as `Dual`, funded holders). Returns
+/// (id, holder_1, holder_2, token_1, token_2). `pairs` is passed straight to the constructor.
+fn deploy_two(
+    env: &Env,
+    pairs: Vec<PairDef>,
+) -> (Address, Address, Address, Address, Address) {
+    let (a1, t1, h1) = funded_asset(env, ASSET_1, AMOUNT_A);
+    let (a2, t2, h2) = funded_asset(env, ASSET_2, AMOUNT_B);
+    let (id, _admin) = deploy_cfg(env, vec![env, a1, a2], pairs);
+    (id, h1, h2, t1, t2)
 }
 
 // ===========================================================================
@@ -98,13 +123,10 @@ fn register_funded_asset(env: &Env, id: &Address, asset_id: u32, amount: i128) -
 #[test]
 fn settle_two_crossing_orders() {
     let env = test_env();
-    let (id, _admin) = deploy(&env);
-    let client = SettlementClient::new(&env, &id);
-
     // Shield the two input notes -> the on-chain tree advances to root R2, which both order proofs
     // were made against. No admin push_root: the root is produced by the inserts themselves.
-    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
-    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
+    let (id, h1, h2, _t1, _t2) = deploy_two(&env, Vec::new(&env));
+    let client = SettlementClient::new(&env, &id);
     client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
     client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
 
@@ -202,10 +224,8 @@ fn settle_rejects_incompatible_orders() {
     // Order A against itself does not cross. Shield both notes so R2 is accepted and the crossing
     // check is what rejects (not the root check).
     let env = test_env();
-    let (id, _admin) = deploy(&env);
+    let (id, h1, h2, _t1, _t2) = deploy_two(&env, Vec::new(&env));
     let client = SettlementClient::new(&env, &id);
-    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
-    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
     client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
     client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
 
@@ -228,56 +248,78 @@ fn settle_rejects_incompatible_orders() {
 // ===========================================================================
 
 #[test]
-fn register_pair_assigns_ids_and_rejects_noncanonical() {
+fn constructor_assigns_pair_ids_for_canonical_pairs() {
+    // Pairs are now constructor-only; the first declared pair gets id 0.
     let env = test_env();
-    let (id, _admin) = deploy(&env);
-    let client = SettlementClient::new(&env, &id);
-    register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
-    register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
-
-    // First pair gets id 0.
-    assert_eq!(client.register_pair(&ASSET_1, &ASSET_2), 0);
-
-    // The reverse orientation is the SAME market and is rejected.
-    let err = env
-        .as_contract(&id, || Settlement::register_pair(env.clone(), ASSET_2, ASSET_1))
-        .expect_err("reverse orientation");
-    assert_eq!(err as u32, Error::PairAlreadyRegistered as u32);
-
-    // Re-registering the same orientation is rejected too.
-    let err = env
-        .as_contract(&id, || Settlement::register_pair(env.clone(), ASSET_1, ASSET_2))
-        .expect_err("duplicate pair");
-    assert_eq!(err as u32, Error::PairAlreadyRegistered as u32);
+    let (a1, _t1, _h1) = funded_asset(&env, ASSET_1, AMOUNT_A);
+    let (a2, _t2, _h2) = funded_asset(&env, ASSET_2, AMOUNT_B);
+    let (id, _admin) = deploy_cfg(
+        &env,
+        vec![&env, a1, a2],
+        vec![&env, PairDef { base_asset: ASSET_1, quote_asset: ASSET_2 }],
+    );
+    assert_eq!(SettlementClient::new(&env, &id).pair_count(), 1);
 }
 
 #[test]
-fn register_pair_rejects_unregistered_asset_and_self_pair() {
+#[should_panic]
+fn constructor_rejects_noncanonical_duplicate_pair() {
+    // The reverse orientation is the SAME market: declaring both must abort the deploy.
     let env = test_env();
-    let (id, _admin) = deploy(&env);
-    register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+    let (a1, _t1, _h1) = funded_asset(&env, ASSET_1, AMOUNT_A);
+    let (a2, _t2, _h2) = funded_asset(&env, ASSET_2, AMOUNT_B);
+    deploy_cfg(
+        &env,
+        vec![&env, a1, a2],
+        vec![
+            &env,
+            PairDef { base_asset: ASSET_1, quote_asset: ASSET_2 },
+            PairDef { base_asset: ASSET_2, quote_asset: ASSET_1 },
+        ],
+    );
+}
 
-    // ASSET_2 not registered.
-    let err = env
-        .as_contract(&id, || Settlement::register_pair(env.clone(), ASSET_1, ASSET_2))
-        .expect_err("unregistered quote asset");
-    assert_eq!(err as u32, Error::AssetNotRegistered as u32);
+#[test]
+#[should_panic]
+fn constructor_rejects_pair_with_unregistered_asset() {
+    // ASSET_2 is referenced by the pair but never declared as an asset.
+    let env = test_env();
+    let (a1, _t1, _h1) = funded_asset(&env, ASSET_1, AMOUNT_A);
+    deploy_cfg(
+        &env,
+        vec![&env, a1],
+        vec![&env, PairDef { base_asset: ASSET_1, quote_asset: ASSET_2 }],
+    );
+}
 
-    // base == quote is not a pair.
-    let err = env
-        .as_contract(&id, || Settlement::register_pair(env.clone(), ASSET_1, ASSET_1))
-        .expect_err("self pair");
-    assert_eq!(err as u32, Error::PairNotRegistered as u32);
+#[test]
+#[should_panic]
+fn constructor_rejects_self_pair() {
+    let env = test_env();
+    let (a1, _t1, _h1) = funded_asset(&env, ASSET_1, AMOUNT_A);
+    deploy_cfg(
+        &env,
+        vec![&env, a1],
+        vec![&env, PairDef { base_asset: ASSET_1, quote_asset: ASSET_1 }],
+    );
+}
+
+#[test]
+#[should_panic]
+fn constructor_rejects_duplicate_asset_id() {
+    let env = test_env();
+    let (a1, _t1, _h1) = funded_asset(&env, ASSET_1, AMOUNT_A);
+    let (mut a2, _t2, _h2) = funded_asset(&env, ASSET_2, AMOUNT_B);
+    a2.asset_id = ASSET_1; // collide with a1
+    deploy_cfg(&env, vec![&env, a1, a2], Vec::new(&env));
 }
 
 #[test]
 fn settle_exact_rejects_unregistered_pair() {
     // Existing crossing proofs, both notes shielded (root accepted), but no pair registered.
     let env = test_env();
-    let (id, _admin) = deploy(&env);
+    let (id, h1, h2, _t1, _t2) = deploy_two(&env, Vec::new(&env));
     let client = SettlementClient::new(&env, &id);
-    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
-    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
     client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
     client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
 
@@ -300,13 +342,11 @@ fn settle_exact_accepts_exact_reverse() {
     // A and B are exact reverses: A gives 100 asset1 / wants 2000 asset2; B gives 2000 asset2 /
     // wants 100 asset1. Both proofs are made against the root produced by shielding the two notes.
     let env = test_env();
-    let (id, _admin) = deploy(&env);
+    let (id, h1, h2, _t1, _t2) =
+        deploy_two(&env, vec![&env, PairDef { base_asset: ASSET_1, quote_asset: ASSET_2 }]);
     let client = SettlementClient::new(&env, &id);
-    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
-    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
     client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_EXA));
     client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_EXB));
-    client.register_pair(&ASSET_1, &ASSET_2);
 
     client.settle_exact(
         &bytes(&env, PROOF_EXA),
@@ -336,13 +376,11 @@ fn settle_exact_rejects_inexact_reverse() {
     // The committed fixtures cross (A wants >=1500 for 100; B wants >=50 for 2000) but are NOT exact
     // reverses, so settle_exact rejects them with NotCompatible even though both proofs verify.
     let env = test_env();
-    let (id, _admin) = deploy(&env);
+    let (id, h1, h2, _t1, _t2) =
+        deploy_two(&env, vec![&env, PairDef { base_asset: ASSET_1, quote_asset: ASSET_2 }]);
     let client = SettlementClient::new(&env, &id);
-    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
-    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
     client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
     client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
-    client.register_pair(&ASSET_1, &ASSET_2);
 
     let err = env
         .as_contract(&id, || {
@@ -365,9 +403,9 @@ fn settle_exact_rejects_inexact_reverse() {
 #[test]
 fn shield_moves_tokens_into_custody_and_advances_root() {
     let env = test_env();
-    let (id, _admin) = deploy(&env);
+    let (a1, token, holder) = funded_asset(&env, ASSET_1, AMOUNT_A);
+    let (id, _admin) = deploy_cfg(&env, vec![&env, a1], Vec::new(&env));
     let client = SettlementClient::new(&env, &id);
-    let (token, holder) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
 
     let root_before = client.root();
     client.shield(&holder, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
@@ -399,8 +437,8 @@ fn shield_rejects_unregistered_asset() {
 #[test]
 fn shield_rejects_nonpositive_amount() {
     let env = test_env();
-    let (id, _admin) = deploy(&env);
-    let (_t, holder) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
+    let (a1, _t, holder) = funded_asset(&env, ASSET_1, AMOUNT_A);
+    let (id, _admin) = deploy_cfg(&env, vec![&env, a1], Vec::new(&env));
     let err = env
         .as_contract(&id, || {
             Settlement::shield(env.clone(), holder.clone(), ASSET_1, 0, tag(&env, OTAG_A))
@@ -409,39 +447,59 @@ fn shield_rejects_nonpositive_amount() {
     assert_eq!(err as u32, Error::InvalidAmount as u32);
 }
 
+// ===========================================================================
+// Asset-class deposit-path checks: a deposit route is gated by the asset's AssetKind.
+// ===========================================================================
+
 #[test]
-fn register_asset_rejects_rebind() {
+fn shield_rejects_base_represented_asset() {
+    // A BaseRepresented asset has no Stellar deposit route — it can only enter via the bridge.
     let env = test_env();
-    let (id, _admin) = deploy(&env);
-    let (_t, _h) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
-    let other = Address::generate(&env);
+    let user = Address::generate(&env);
+    let (id, _admin) = deploy_cfg(
+        &env,
+        vec![&env, AssetInit { asset_id: ASSET_1, token: None, kind: AssetKind::BaseRepresented }],
+        Vec::new(&env),
+    );
     let err = env
         .as_contract(&id, || {
-            Settlement::register_asset(env.clone(), ASSET_1, other.clone())
+            Settlement::shield(env.clone(), user.clone(), ASSET_1, 100, tag(&env, OTAG_A))
         })
-        .expect_err("rebind");
-    assert_eq!(err as u32, Error::AssetAlreadyRegistered as u32);
+        .expect_err("shield of represented asset");
+    assert_eq!(err as u32, Error::AssetNotShieldable as u32);
+}
+
+#[test]
+#[should_panic]
+fn constructor_rejects_stellar_asset_without_token() {
+    // A Stellar/Dual asset must carry a real token; omitting it aborts the deploy.
+    let env = test_env();
+    deploy_cfg(
+        &env,
+        vec![&env, AssetInit { asset_id: ASSET_1, token: None, kind: AssetKind::Stellar }],
+        Vec::new(&env),
+    );
 }
 
 // ===========================================================================
 // Unshield: shield a note (advancing the tree), then spend it to the bound recipient.
 // ===========================================================================
 
-/// Deploy, register the unshield VK, shield the unshield note (funds custody + advances the tree to
-/// R_U, the root the proof was made against), and return (token, bound recipient).
-fn setup_unshield(env: &Env, id: &Address) -> (Address, Address) {
-    let (token, holder) = register_funded_asset(env, id, ASSET_1, AMOUNT_U);
-    let client = SettlementClient::new(env, id);
+/// Deploy with ASSET_1 (Dual) funded, shield the unshield note (funds custody + advances the tree to
+/// R_U, the root the proof was made against), and return (id, token, bound recipient).
+fn setup_unshield(env: &Env) -> (Address, Address, Address) {
+    let (a1, token, holder) = funded_asset(env, ASSET_1, AMOUNT_U);
+    let (id, _admin) = deploy_cfg(env, vec![env, a1], Vec::new(env));
+    let client = SettlementClient::new(env, &id);
     client.shield(&holder, &ASSET_1, &AMOUNT_U, &tag(env, OTAG_U));
     let to = Address::from_string(&String::from_str(env, UNSHIELD_TO));
-    (token, to)
+    (id, token, to)
 }
 
 #[test]
 fn unshield_pays_bound_recipient() {
     let env = test_env();
-    let (id, _admin) = deploy(&env);
-    let (token, to) = setup_unshield(&env, &id);
+    let (id, token, to) = setup_unshield(&env);
 
     SettlementClient::new(&env, &id).unshield(
         &to,
@@ -470,8 +528,7 @@ fn unshield_pays_bound_recipient() {
 #[test]
 fn unshield_rejects_wrong_recipient() {
     let env = test_env();
-    let (id, _admin) = deploy(&env);
-    let (_token, _to) = setup_unshield(&env, &id);
+    let (id, _token, _to) = setup_unshield(&env);
     let attacker = Address::generate(&env);
 
     let err = env
@@ -534,12 +591,9 @@ fn indexer_reproduces_onchain_root_and_serves_valid_paths() {
     use mosaic_indexer::{u256_to_word, NoteTree};
 
     let env = test_env();
-    let (id, _admin) = deploy(&env);
-    let client = SettlementClient::new(&env, &id);
-
     // Shield the two input notes on the REAL contract -> the on-chain tree advances to R2.
-    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
-    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
+    let (id, h1, h2, _t1, _t2) = deploy_two(&env, Vec::new(&env));
+    let client = SettlementClient::new(&env, &id);
     client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
     client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
     let onchain_root = client.root().to_array();
@@ -582,8 +636,7 @@ fn indexer_reproduces_unshield_root() {
     use mosaic_indexer::{u256_to_word, NoteTree};
 
     let env = test_env();
-    let (id, _admin) = deploy(&env);
-    let (_token, _to) = setup_unshield(&env, &id);
+    let (id, _token, _to) = setup_unshield(&env);
     let onchain_root = SettlementClient::new(&env, &id).root().to_array();
 
     // The unshield note is a single shield of asset 1 / amount 100 / owner_tag_u at index 0.
@@ -609,10 +662,8 @@ fn indexer_reproduces_unshield_root() {
 #[test]
 fn settle_fits_cpu_budget() {
     let env = test_env();
-    let (id, _admin) = deploy(&env);
+    let (id, h1, h2, _t1, _t2) = deploy_two(&env, Vec::new(&env));
     let client = SettlementClient::new(&env, &id);
-    let (_t1, h1) = register_funded_asset(&env, &id, ASSET_1, AMOUNT_A);
-    let (_t2, h2) = register_funded_asset(&env, &id, ASSET_2, AMOUNT_B);
     client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
     client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
 

@@ -6,12 +6,15 @@
 //! B1 crosses S1 (full) then S2 (partial 56), rests with 4 a2; S3 untouched. Then we cancel S2 and
 //! prune the (expired) S3.
 
-use settlement::{DataKey, Error, OrderEntry, Settlement, SettlementClient};
+use settlement::{
+    AssetInit, AssetKind, DataKey, Error, OrderEntry, PairDef, Settlement, SettlementClient,
+};
 use soroban_sdk::{
     testutils::{storage::Persistent as _, Address as _, Events, Ledger},
     token::StellarAssetClient,
+    vec,
     xdr::{ContractEventBody, Int128Parts, ScVal},
-    Address, Bytes, BytesN, Env,
+    Address, Bytes, BytesN, Env, Vec,
 };
 
 const VK: &[u8] = include_bytes!("fixtures/book/vk");
@@ -47,7 +50,7 @@ fn test_env() -> Env {
     env
 }
 
-fn deploy(env: &Env) -> Address {
+fn deploy(env: &Env, assets: Vec<AssetInit>, pairs: Vec<PairDef>) -> Address {
     let admin = Address::generate(env);
     env.register(
         Settlement,
@@ -57,6 +60,8 @@ fn deploy(env: &Env) -> Address {
             bytes(env, CANCEL_VK),
             bytes(env, VK),
             admin,
+            assets,
+            pairs,
         ),
     )
 }
@@ -68,34 +73,48 @@ fn tag(env: &Env, b: &[u8]) -> BytesN<32> {
     BytesN::from_array(env, &b.try_into().unwrap())
 }
 
-/// Register a SAC for `asset_id`, mint `amount` to a fresh holder, register it, return the holder.
-fn fund(env: &Env, id: &Address, asset_id: u32, amount: i128) -> Address {
+/// Create a SAC for `asset_id`, mint `amount` to a fresh holder, and return the constructor entry
+/// (`Dual`) plus the holder. Pass the `AssetInit` to `deploy` (assets are constructor-only now).
+fn fund(env: &Env, asset_id: u32, amount: i128) -> (AssetInit, Address) {
     let sac = env.register_stellar_asset_contract_v2(Address::generate(env));
     let holder = Address::generate(env);
     StellarAssetClient::new(env, &sac.address()).mint(&holder, &amount);
-    SettlementClient::new(env, id).register_asset(&asset_id, &sac.address());
-    holder
+    (
+        AssetInit { asset_id, token: Some(sac.address()), kind: AssetKind::Dual },
+        holder,
+    )
+}
+
+/// The two funded assets used by the book scenario, as constructor `AssetInit`s plus their holders.
+fn book_assets(env: &Env) -> (Vec<AssetInit>, Address, Address) {
+    let (a1, h1) = fund(env, A1, 250); // S1(100) + S2(100) + S3(50)
+    let (a2, h2) = fund(env, A2, 2400); // B1(2400)
+    (vec![env, a1, a2], h1, h2)
 }
 
 /// Shield the four input notes in the fixture order (leaves 0..3) so the tree reaches R4, the root
-/// the four order proofs were generated against; register the canonical pair (id 0).
-fn setup_book(env: &Env, id: &Address) {
+/// the four order proofs were generated against.
+fn shield_book_notes(env: &Env, id: &Address, h1: &Address, h2: &Address) {
     let client = SettlementClient::new(env, id);
-    let h1 = fund(env, id, A1, 250); // S1(100) + S2(100) + S3(50)
-    let h2 = fund(env, id, A2, 2400); // B1(2400)
-    client.shield(&h1, &A1, &100, &tag(env, OT_S1));
-    client.shield(&h1, &A1, &100, &tag(env, OT_S2));
-    client.shield(&h2, &A2, &2400, &tag(env, OT_B1));
-    client.shield(&h1, &A1, &50, &tag(env, OT_S3));
-    client.register_pair(&A1, &A2);
+    client.shield(h1, &A1, &100, &tag(env, OT_S1));
+    client.shield(h1, &A1, &100, &tag(env, OT_S2));
+    client.shield(h2, &A2, &2400, &tag(env, OT_B1));
+    client.shield(h1, &A1, &50, &tag(env, OT_S3));
+}
+
+/// Deploy with the book's two assets + canonical pair (id 0), shield the four notes, return the id.
+fn setup_book(env: &Env) -> Address {
+    let (assets, h1, h2) = book_assets(env);
+    let id = deploy(env, assets, vec![env, PairDef { base_asset: A1, quote_asset: A2 }]);
+    shield_book_notes(env, &id, &h1, &h2);
+    id
 }
 
 #[test]
 fn book_lifecycle_rest_partial_fill_cancel_prune() {
     let env = test_env();
-    let id = deploy(&env);
+    let id = setup_book(&env);
     let client = SettlementClient::new(&env, &id);
-    setup_book(&env, &id);
 
     // Three sells rest (book empty -> no cross), price-sorted ascending S1(15), S2(16), S3(20).
     client.submit_order(&bytes(&env, P_S1), &bytes(&env, PI_S1));
@@ -193,9 +212,8 @@ fn filled_events(env: &Env) -> std::vec::Vec<(u32, i128, u32, i128)> {
 #[test]
 fn crossing_order_emits_filled_event_with_amounts_and_currencies() {
     let env = test_env();
-    let id = deploy(&env);
+    let id = setup_book(&env);
     let client = SettlementClient::new(&env, &id);
-    setup_book(&env, &id);
 
     // Three sells rest (book empty -> no cross): no `filled` event for resting orders.
     client.submit_order(&bytes(&env, P_S1), &bytes(&env, PI_S1));
@@ -216,9 +234,8 @@ fn submit_order_fits_cpu_budget() {
     // Worst-ish case for one submit: verify (~80M) + two fills (4 proceeds inserts). Local-host
     // metering under-counts vs on-chain, so this is a regression guard, not the on-chain figure.
     let env = test_env();
-    let id = deploy(&env);
+    let id = setup_book(&env);
     let client = SettlementClient::new(&env, &id);
-    setup_book(&env, &id);
     client.submit_order(&bytes(&env, P_S1), &bytes(&env, PI_S1));
     client.submit_order(&bytes(&env, P_S2), &bytes(&env, PI_S2));
 
@@ -242,9 +259,8 @@ fn indexer_reproduces_book_root_after_fills() {
     use mosaic_indexer::{u256_to_word, NoteTree};
 
     let env = test_env();
-    let id = deploy(&env);
+    let id = setup_book(&env);
     let client = SettlementClient::new(&env, &id);
-    setup_book(&env, &id);
     client.submit_order(&bytes(&env, P_S1), &bytes(&env, PI_S1));
     client.submit_order(&bytes(&env, P_S2), &bytes(&env, PI_S2));
     client.submit_order(&bytes(&env, P_S3), &bytes(&env, PI_S3));
@@ -307,8 +323,7 @@ fn submit_order_cost_vs_book_depth() {
     // (a) depth only: 64 non-crossing asks priced at 25 (> B1's limit of 24).
     {
         let env = test_env();
-        let id = deploy(&env);
-        setup_book(&env, &id);
+        let id = setup_book(&env);
         fill_sell_book(&env, &id, 100, 2500);
         env.cost_estimate().budget().reset_unlimited();
         SettlementClient::new(&env, &id).submit_order(&bytes(&env, P_B1), &bytes(&env, PI_B1));
@@ -319,8 +334,7 @@ fn submit_order_cost_vs_book_depth() {
 
     // (b) worst case: 64 small crossing asks (10 a1 @150, price 15) -> B1 fills the MAX_FILLS cap, rests.
     let env = test_env();
-    let id = deploy(&env);
-    setup_book(&env, &id);
+    let id = setup_book(&env);
     fill_sell_book(&env, &id, 10, 150);
     let client = SettlementClient::new(&env, &id);
     env.cost_estimate().budget().reset_unlimited();
@@ -340,8 +354,7 @@ fn critical_state_ttl_is_extended_and_kept_alive() {
     // permissionless keep_alive heartbeat must re-extend it after ledgers pass — so nothing archives
     // in practice (and even if it did, persistent entries are restorable, never lost).
     let env = test_env();
-    let id = deploy(&env);
-    setup_book(&env, &id); // shields (tree writes) + register_pair
+    let id = setup_book(&env);
     let client = SettlementClient::new(&env, &id);
     client.submit_order(&bytes(&env, P_S1), &bytes(&env, PI_S1)); // writes Book + nullifier
 
@@ -404,8 +417,7 @@ fn pi_word_nf(pi: &[u8]) -> [u8; 32] {
 fn submit_rejects_expired_order() {
     // Same shields (so S3's proof root R4 is published), but the ledger is already past S3's expiry.
     let env = test_env();
-    let id = deploy(&env);
-    setup_book(&env, &id);
+    let id = setup_book(&env);
     env.ledger().set_timestamp(6000); // > S3 expiry (5000)
 
     let err = env
@@ -418,16 +430,11 @@ fn submit_rejects_expired_order() {
 
 #[test]
 fn submit_rejects_unregistered_pair() {
-    // Shield the notes but never register the pair.
+    // Shield the notes but never register the pair (deploy with assets only, no pairs).
     let env = test_env();
-    let id = deploy(&env);
-    let client = SettlementClient::new(&env, &id);
-    let h1 = fund(&env, &id, A1, 250);
-    let h2 = fund(&env, &id, A2, 2400);
-    client.shield(&h1, &A1, &100, &tag(&env, OT_S1));
-    client.shield(&h1, &A1, &100, &tag(&env, OT_S2));
-    client.shield(&h2, &A2, &2400, &tag(&env, OT_B1));
-    client.shield(&h1, &A1, &50, &tag(&env, OT_S3));
+    let (assets, h1, h2) = book_assets(&env);
+    let id = deploy(&env, assets, Vec::new(&env));
+    shield_book_notes(&env, &id, &h1, &h2);
 
     let err = env
         .as_contract(&id, || {

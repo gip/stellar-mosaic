@@ -1,8 +1,18 @@
 # Base → Stellar shield bridge
 
-Let users shield USDC on **Base (Sepolia)** and receive a spendable, owner-anonymous note on
+Let users shield an asset on **Base (Sepolia)** and receive a spendable, owner-anonymous note on
 Stellar — reusing the existing note/tree/settle machinery unchanged. One-way deposit for this phase
-(lock on Base, mint on Stellar); Base-USDC is treated as equivalent to Stellar-USDC.
+(lock on Base, mint on Stellar); the Base asset is treated as equivalent to its Stellar form.
+
+The Base asset can be an **ERC-20** (e.g. USDC, deposited via `MosaicBridge.shield`) or **native
+ETH** (deposited via the payable `MosaicBridge.shieldNative`; the asset is registered under the
+`NATIVE` sentinel address). The deposit struct the guest proves — `{assetId, amount, ownerTag}` — is
+identical either way, so the guest image id is unchanged. On Stellar the asset's `AssetKind` governs
+the route: a **`Dual`** asset (e.g. USDC, real on both chains) accepts both `shield` and
+`shield_from_base`; a **`BaseRepresented`** asset (e.g. ETH, with no real Stellar token) accepts only
+`shield_from_base` and is **trade-only** (it can be traded into a `Stellar`/`Dual` asset and that
+proceeds note unshielded, but the represented note itself is never `unshield`ed). A `Stellar`-only
+asset is rejected by `shield_from_base` (`AssetNotBridgeable`). See `architecture.md` for the table.
 
 ## Flow
 

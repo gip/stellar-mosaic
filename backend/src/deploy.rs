@@ -1,15 +1,16 @@
 use crate::error::{AppError, AppResult};
-use crate::models::{Asset, CreateDesk, Desk, Pair};
+use crate::models::{Asset, AssetKind, CreateDesk, Desk, Pair};
 use crate::AppState;
+use serde_json::json;
 use uuid::Uuid;
 
-/// Deploy a fresh settlement contract for a new desk and register its assets + pairs.
+/// Deploy a fresh settlement contract for a new desk. Assets and pairs are now CONSTRUCTOR-ONLY
+/// (immutable): they are passed to `__constructor` as JSON, so a desk can never be half-configured.
 ///
-/// Pipeline (mirrors `scripts/06_book_budget_testnet.sh`):
+/// Pipeline:
 ///   1. generate + friendbot-fund a sponsor ("main") keypair
-///   2. deploy settlement.wasm with all immutable operation VKs + admin = sponsor
-///   3. register_asset for each currency (see `resolve_token` for how `token` is resolved to a SAC)
-///   4. register_pair for each pair (pair_id assigned sequentially from 0)
+///   2. deploy settlement.wasm with all immutable operation VKs + admin = sponsor + the asset set
+///      (each with its `AssetKind`) + the canonical pairs (pair_id assigned in array order from 0)
 ///
 /// This makes blocking CLI calls; run it via `spawn_blocking`.
 pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, Option<u64>)> {
@@ -38,20 +39,52 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, 
     let (sponsor_pubkey, sponsor_secret) = st.stellar.generate_funded_key(&key_name)?;
     tracing::info!(%sponsor_pubkey, "funded sponsor account");
 
+    // Resolve each desk asset: a Stellar/Dual asset gets its real SAC token; a BaseRepresented asset
+    // has no Stellar token (it only lives as a note). The on-chain `AssetDef.token` is the SAC for
+    // the former and `None` for the latter.
     let assets: Vec<Asset> = body
         .assets
         .iter()
         .map(|a| {
+            let token = if a.kind == AssetKind::BaseRepresented {
+                // Kept as a display sentinel off-chain; never used for a transfer.
+                "represented".to_string()
+            } else {
+                resolve_token(st, &a.token, &xlm_sac, &sponsor_secret)?
+            };
             Ok(Asset {
                 asset_id: a.asset_id,
                 symbol: a.symbol.clone(),
-                token: resolve_token(st, &a.token, &xlm_sac, &sponsor_secret)?,
+                token,
                 decimals: a.decimals,
+                kind: a.kind,
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
 
-    // 2. deploy
+    // Constructor JSON: Vec<AssetInit> ({asset_id, token: Option<Address>, kind}) and Vec<PairDef>.
+    let assets_json = json!(assets
+        .iter()
+        .map(|a| json!({
+            "asset_id": a.asset_id,
+            "token": if a.kind == AssetKind::BaseRepresented { serde_json::Value::Null } else { json!(a.token) },
+            "kind": a.kind.as_str(),
+        }))
+        .collect::<Vec<_>>())
+    .to_string();
+    let pairs: Vec<Pair> = body
+        .pairs
+        .iter()
+        .enumerate()
+        .map(|(i, p)| Pair { pair_id: i as u32, base_asset: p.base_asset, quote_asset: p.quote_asset })
+        .collect();
+    let pairs_json = json!(pairs
+        .iter()
+        .map(|p| json!({ "base_asset": p.base_asset, "quote_asset": p.quote_asset }))
+        .collect::<Vec<_>>())
+    .to_string();
+
+    // 2. deploy with the full, immutable asset/pair config baked into the constructor.
     let contract_id = st.stellar.deploy(
         &wasm,
         &cfg.lift_vk(),
@@ -59,41 +92,11 @@ pub fn create_desk(st: &AppState, body: CreateDesk) -> AppResult<(Desk, String, 
         &cfg.cancel_vk(),
         &cfg.join_vk(),
         &sponsor_pubkey,
+        &assets_json,
+        &pairs_json,
         &sponsor_secret,
     )?;
     tracing::info!(%contract_id, "deployed settlement contract");
-
-    let inv = |args: Vec<String>| {
-        st.stellar
-            .invoke_write(&contract_id, &sponsor_secret, &args)
-    };
-    // 3. assets
-    for a in &assets {
-        inv(svec(&[
-            "register_asset",
-            "--asset_id",
-            &a.asset_id.to_string(),
-            "--token",
-            &a.token,
-        ]))?;
-    }
-
-    // 4. pairs (pair_id is assigned sequentially from 0 in registration order)
-    let mut pairs = Vec::new();
-    for (i, p) in body.pairs.iter().enumerate() {
-        inv(svec(&[
-            "register_pair",
-            "--base_asset",
-            &p.base_asset.to_string(),
-            "--quote_asset",
-            &p.quote_asset.to_string(),
-        ]))?;
-        pairs.push(Pair {
-            pair_id: i as u32,
-            base_asset: p.base_asset,
-            quote_asset: p.quote_asset,
-        });
-    }
 
     let desk = Desk {
         id: desk_id,
@@ -129,8 +132,4 @@ fn resolve_token(st: &AppState, token: &str, xlm_sac: &str, source: &str) -> App
     } else {
         Ok(token.to_string())
     }
-}
-
-fn svec(s: &[&str]) -> Vec<String> {
-    s.iter().map(|x| x.to_string()).collect()
 }

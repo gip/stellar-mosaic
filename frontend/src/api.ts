@@ -1,11 +1,16 @@
 // Typed client for the Rust backend. All paths go through the Vite `/api` proxy in dev.
 import type { Abi, Hex } from 'viem'
 
+/** Asset class, mirroring the contract `AssetKind`. Fixes the legal deposit routes:
+ *  Stellar = shield only; Dual = shield + bridge; BaseRepresented = bridge only, trade-only. */
+export type AssetKind = 'Stellar' | 'Dual' | 'BaseRepresented'
+
 export interface Asset {
   asset_id: number
   symbol: string
   token: string
   decimals: number
+  kind: AssetKind
 }
 
 export interface Pair {
@@ -146,7 +151,7 @@ export const api = {
   }) => req<Desk>('/desks/import', { method: 'POST', body: JSON.stringify(body) }),
   createDesk: (body: {
     name: string
-    assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number }[]
+    assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
     base_deployment?: { deployer_address: string }
   }) => req<Desk>('/desks', { method: 'POST', body: JSON.stringify(body) }),

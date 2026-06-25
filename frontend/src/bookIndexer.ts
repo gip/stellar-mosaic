@@ -1,6 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import { BASE_FEE, Contract, Networks, TransactionBuilder, rpc, scValToNative } from '@stellar/stellar-sdk'
-import type { Desk } from './api'
+import type { AssetKind, Desk } from './api'
 import { Buffer } from 'buffer'
 
 export const SOROBAN_RPC_URL =
@@ -30,6 +30,12 @@ export interface IndexedAsset {
   scope: string
   asset_id: number
   token: string
+  kind: AssetKind
+}
+
+/** Map the on-chain `assetreg` numeric `kind` (0/1/2 from the contract's `kind_to_u32`) to its name. */
+function assetKindFromU32(n: number): AssetKind {
+  return n === 2 ? 'BaseRepresented' : n === 1 ? 'Dual' : 'Stellar'
 }
 
 export interface IndexedPair {
@@ -234,13 +240,14 @@ export async function applyBookEventPage(
       meta.vk_hashes = hashes
     } else if (name === 'assetreg') {
       if (!meta.initialized) throw new Error('assetreg before bookinit')
-      const f = fields(native, 2)
+      const f = fields(native, 3)
       const assetId = number(f[0], 'asset id')
       const token = String(f[1])
+      const kind = assetKindFromU32(number(f[2], 'asset kind'))
       const id = `${scope}\u0000${assetId}`
       const existing = await tx.objectStore('assets').get(id)
       if (existing && existing.token !== token) throw new Error(`conflicting asset ${assetId}`)
-      await tx.objectStore('assets').put({ id, scope, asset_id: assetId, token })
+      await tx.objectStore('assets').put({ id, scope, asset_id: assetId, token, kind })
     } else if (name === 'pairreg') {
       if (!meta.initialized) throw new Error('pairreg before bookinit')
       const f = fields(native, 3)

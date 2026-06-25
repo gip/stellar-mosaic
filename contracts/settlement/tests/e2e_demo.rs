@@ -12,11 +12,11 @@
 //! circuits or scenario change. To watch the narration: `cargo test --test e2e_demo -- --nocapture`.
 
 use mosaic_indexer::{u256_to_word, NoteTree};
-use settlement::{Settlement, SettlementClient};
+use settlement::{AssetInit, AssetKind, Settlement, SettlementClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{StellarAssetClient, TokenClient},
-    Address, Bytes, BytesN, Env, String,
+    vec, Address, Bytes, BytesN, Env, String, Vec,
 };
 
 // Demo fixtures (see scripts/03_demo_e2e.sh for the scenario + secrets).
@@ -45,15 +45,19 @@ fn tag(env: &Env, b: &[u8]) -> BytesN<32> {
     BytesN::from_array(env, &b.try_into().unwrap())
 }
 
-/// Register a Stellar Asset Contract for `asset_id`, mint `amount` to a fresh holder, return both.
-fn register_funded_asset(env: &Env, id: &Address, asset_id: u32, amount: i128) -> (Address, Address) {
+/// Create a Stellar Asset Contract for `asset_id`, mint `amount` to a fresh holder, and return the
+/// constructor entry (`Dual`) plus token and holder. Pass the `AssetInit` to the constructor.
+fn funded_asset(env: &Env, asset_id: u32, amount: i128) -> (AssetInit, Address, Address) {
     let token_admin = Address::generate(env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
     let token = sac.address();
     let holder = Address::generate(env);
     StellarAssetClient::new(env, &token).mint(&holder, &amount);
-    SettlementClient::new(env, id).register_asset(&asset_id, &token);
-    (token, holder)
+    (
+        AssetInit { asset_id, token: Some(token.clone()), kind: AssetKind::Dual },
+        token,
+        holder,
+    )
 }
 
 #[test]
@@ -63,7 +67,11 @@ fn full_lifecycle_shield_order_settle_unshield() {
     env.cost_estimate().budget().reset_unlimited();
     env.mock_all_auths();
 
-    // Deploy the merged contract with the order/lift VK; register the unshield VK.
+    // Custody-backing tokens: A is funded 100 of asset 1, B is funded 2000 of asset 2.
+    let (a1, token1, holder_a) = funded_asset(&env, ASSET_1, AMT_A);
+    let (a2, token2, holder_b) = funded_asset(&env, ASSET_2, AMT_B);
+
+    // Deploy the merged contract with the order/lift + unshield VKs and the two assets (constructor).
     let admin = Address::generate(&env);
     let id = env.register(
         Settlement,
@@ -73,13 +81,12 @@ fn full_lifecycle_shield_order_settle_unshield() {
             bytes(&env, LIFT_VK),
             bytes(&env, LIFT_VK),
             admin.clone(),
+            vec![&env, a1, a2],
+            Vec::<settlement::PairDef>::new(&env),
         ),
     );
     let client = SettlementClient::new(&env, &id);
 
-    // Custody-backing tokens: A is funded 100 of asset 1, B is funded 2000 of asset 2.
-    let (token1, holder_a) = register_funded_asset(&env, &id, ASSET_1, AMT_A);
-    let (token2, holder_b) = register_funded_asset(&env, &id, ASSET_2, AMT_B);
     let tc1 = TokenClient::new(&env, &token1);
     let tc2 = TokenClient::new(&env, &token2);
 

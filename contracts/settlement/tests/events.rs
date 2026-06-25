@@ -133,9 +133,9 @@ fn book_initialization_and_registry_wire_format() {
     let token = Address::generate(&env);
     assert_wire(
         &env,
-        &AssetRegistered { asset_id: 7, token: token.clone() },
+        &AssetRegistered { asset_id: 7, token: token.clone(), kind: 1 },
         symbol_short!("assetreg"),
-        (7u32, token).into_val(&env),
+        (7u32, token, 1u32).into_val(&env),
     );
     assert_wire(
         &env,

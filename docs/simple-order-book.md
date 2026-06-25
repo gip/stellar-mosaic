@@ -11,10 +11,10 @@ See `architecture.md` for where this sits, `implementation.md` for the (12-field
 
 ## Model
 
-- **Pairs** are admin-registered in a canonical orientation, `register_pair(base, quote)` (e.g.
-  `XLM/USDC`, never `USDC/XLM`). An order's side is derived from its `(asset_in, asset_out)` against
-  the pair, never from how the user phrased it. SELL = give base / want quote; BUY = give quote / want
-  base.
+- **Pairs** are registered once at construction in a canonical orientation (`PairDef { base, quote }`,
+  e.g. `XLM/USDC`, never `USDC/XLM`); they are immutable (no post-deploy mutator). An order's side is
+  derived from its `(asset_in, asset_out)` against the pair, never from how the user phrased it.
+  SELL = give base / want quote; BUY = give quote / want base.
 - **Orders are price+quantity limit orders.** The canonical integer terms the order proof binds
   (`amount_in`, `min_out`) define an exact limit price *ratio* — no floating point, no global price
   scale. Each order also binds `expiry` (unix seconds) and `partial_allowed` (0/1).

@@ -8,11 +8,11 @@
 //! The join proof's membership root (public input [1]) is exactly R2, the root the two shields
 //! produce on-chain.
 
-use settlement::{Error, Settlement, SettlementClient};
+use settlement::{AssetInit, AssetKind, Error, Settlement, SettlementClient};
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
     token::StellarAssetClient,
-    Address, Bytes, BytesN, Env,
+    vec, Address, Bytes, BytesN, Env, Vec,
 };
 
 // Lift VK only used to satisfy the constructor (a different circuit); join uses its own VK below.
@@ -38,7 +38,7 @@ fn test_env() -> Env {
     env
 }
 
-fn deploy(env: &Env) -> Address {
+fn deploy(env: &Env, assets: Vec<AssetInit>) -> Address {
     let admin = Address::generate(env);
     env.register(
         Settlement,
@@ -48,6 +48,8 @@ fn deploy(env: &Env) -> Address {
             bytes(env, LIFT_VK),
             bytes(env, JOIN_VK),
             admin,
+            assets,
+            Vec::<settlement::PairDef>::new(env),
         ),
     )
 }
@@ -65,18 +67,20 @@ fn pi_word(pi: &[u8], w: usize) -> i128 {
     i128::from_be_bytes(bytes)
 }
 
-/// Deploy, register the join VK, register asset 1, and shield BOTH input notes (advancing the tree
-/// to R2, the root the join proof was made against). Returns the contract id.
+/// Deploy with asset 1 (Dual) configured, then shield BOTH input notes (advancing the tree to R2,
+/// the root the join proof was made against). Returns the contract id.
 fn setup(env: &Env) -> Address {
-    let id = deploy(env);
-    let client = SettlementClient::new(env, &id);
-
     let token_admin = Address::generate(env);
     let sac = env.register_stellar_asset_contract_v2(token_admin);
     let token = sac.address();
     let holder = Address::generate(env);
     StellarAssetClient::new(env, &token).mint(&holder, &(AMOUNT_A + AMOUNT_B));
-    client.register_asset(&ASSET_1, &token);
+
+    let id = deploy(
+        env,
+        vec![env, AssetInit { asset_id: ASSET_1, token: Some(token), kind: AssetKind::Dual }],
+    );
+    let client = SettlementClient::new(env, &id);
 
     client.shield(&holder, &ASSET_1, &AMOUNT_A, &tag(env, OTAG_A));
     client.shield(&holder, &ASSET_1, &AMOUNT_B, &tag(env, OTAG_B));
@@ -128,7 +132,7 @@ fn join_rejects_unknown_root() {
     // Register the VK but never shield, so R2 was never produced on-chain. The proof still verifies,
     // but its membership root is not in the published history.
     let env = test_env();
-    let id = deploy(&env);
+    let id = deploy(&env, Vec::new(&env));
 
     let err = env
         .as_contract(&id, || {

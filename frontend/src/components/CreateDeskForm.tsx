@@ -5,7 +5,7 @@ import { useEthereumWallet } from '../EthereumWalletContext'
 import { displayEth, estimateBridgeDeployment } from '../base'
 import type { Address } from 'viem'
 import BaseDeploymentPanel from './BaseDeploymentPanel'
-import { eligibleBaseAssets, hasEnoughEth } from '../baseDeployment'
+import { assetKindOf, baseTokenAddress, eligibleBaseAssets, hasEnoughEth } from '../baseDeployment'
 
 interface PairRow {
   base: string
@@ -63,7 +63,7 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
       artifact: { abi: deploymentConfig.abi, bytecode: deploymentConfig.bytecode },
       account: ethereum.address,
       assetIds: baseAssets.map((asset) => assetIdOf(asset.id)),
-      tokens: baseAssets.map((asset) => asset.base_token as Address),
+      tokens: baseAssets.map((asset) => baseTokenAddress(asset) as Address),
     }).then((value) => setEstimatedFee(value.maxFee)).catch(() => setEstimatedFee(null))
   }, [deployBase, ethereum.address, ethereum.connectedToBase, deploymentConfig, baseAssets, assetIdOf])
 
@@ -91,6 +91,7 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
         symbol: a.symbol,
         token: a.stellar_token ?? 'native',
         decimals: a.stellar_decimals ?? 7,
+        kind: assetKindOf(a),
       }))
       const deskPairs = pairs
         .filter((p) => p.base && p.quote && p.base !== p.quote)
@@ -152,26 +153,49 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
       <label>Name</label>
       <input value={name} onChange={(e) => setName(e.target.value)} required style={{ width: '100%' }} />
 
-      <label>Assets — choose from the assets you trust</label>
+      <label>Assets — tap to select / unselect from the assets you trust</label>
       {catalog === null && <p className="muted">Loading…</p>}
       {catalog?.length === 0 && (
         <p className="muted">
           No trusted assets. Add or trust one on the <Link to="/assets">Assets</Link> page.
         </p>
       )}
-      {catalog?.map((a) => (
-        <label key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '4px 0' }}>
-          <input
-            type="checkbox"
-            checked={selected.includes(a.id)}
-            onChange={() => toggleAsset(a.id)}
-          />
-          <span>
-            {a.symbol}
-            {selected.includes(a.id) && <span className="muted"> · asset_id {assetIdOf(a.id)}</span>}
-          </span>
-        </label>
-      ))}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '4px 0 12px' }}>
+        {catalog?.map((a) => {
+          const on = selected.includes(a.id)
+          const kind = assetKindOf(a)
+          const badge = kind === 'BaseRepresented' ? 'Base→Stellar' : kind
+          return (
+            <button
+              type="button"
+              key={a.id}
+              onClick={() => toggleAsset(a.id)}
+              aria-pressed={on}
+              title={
+                kind === 'Stellar'
+                  ? 'Distributed on Stellar — deposit by shielding'
+                  : kind === 'Dual'
+                    ? 'Distributed on Stellar and Base'
+                    : 'Distributed on Base, represented on Stellar (trade-only)'
+              }
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '4px 10px',
+                borderRadius: 999,
+                border: on ? '1px solid #4f8cff' : '1px solid var(--border, #ccc)',
+                background: on ? 'rgba(79,140,255,0.15)' : 'transparent',
+                cursor: 'pointer',
+              }}
+            >
+              <span>{a.symbol}</span>
+              <span className="muted" style={{ fontSize: '0.8em' }}>{badge}</span>
+              {on && <span className="muted" style={{ fontSize: '0.8em' }}>· #{assetIdOf(a.id)}</span>}
+            </button>
+          )
+        })}
+      </div>
 
       {chosen.length >= 2 && (
         <>

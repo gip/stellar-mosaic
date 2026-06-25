@@ -181,6 +181,11 @@ impl Stellar {
 
     /// Deploy the settlement wasm with the lift VK + admin set in the constructor.
     /// `source` is a signing source (secret key or identity name). Returns the contract id.
+    /// Deploy the settlement contract. Assets and pairs are now constructor-only (immutable): pass
+    /// them as JSON arrays matching the contract's `Vec<AssetInit>` / `Vec<PairDef>` arg types, e.g.
+    /// `[{"asset_id":1,"token":"C..","kind":"Stellar"}]` and `[{"base_asset":1,"quote_asset":2}]`.
+    /// A `BaseRepresented` asset uses `"token":null`.
+    #[allow(clippy::too_many_arguments)]
     pub fn deploy(
         &self,
         wasm: &Path,
@@ -189,6 +194,8 @@ impl Stellar {
         cancel_vk: &Path,
         join_vk: &Path,
         admin: &str,
+        assets_json: &str,
+        pairs_json: &str,
         source: &str,
     ) -> AppResult<String> {
         let out = self.run(&[
@@ -211,6 +218,10 @@ impl Stellar {
             join_vk.to_string_lossy().into(),
             "--admin".into(),
             admin.into(),
+            "--assets".into(),
+            assets_json.into(),
+            "--pairs".into(),
+            pairs_json.into(),
         ])?;
         // stdout may carry a few log lines; the contract id is the C... token.
         out.split_whitespace()

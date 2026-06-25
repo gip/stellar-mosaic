@@ -47,19 +47,36 @@ One merged contract, `contracts/settlement`, owns custody, the nullifier registr
 matching, settlement, and the order book (a split Assets/Desk design would add a cross-contract call
 and is not needed). Roles:
 
-- **Custody:** holds real Soroban tokens (`shield`/`unshield`), keyed by an admin-registered
-  asset-id → token map; maintains the canonical nullifier registry and the on-chain note tree.
+- **Custody:** holds real Soroban tokens (`shield`/`unshield`), keyed by a constructor-fixed
+  asset-id → `AssetDef` map; maintains the canonical nullifier registry and the on-chain note tree.
 - **Desk:** atomic matching/settlement (`settle`/`settle_exact`) and the resting order book.
 
-Supported assets are admin-gated. USDC and XLM can be native Stellar/Soroban assets; ETH and XRP
-require wrapped issuers or bridge integrations (the Base bridge shields Base-USDC; see
-`base-bridge.md`).
+### Asset classes (configured statically at creation)
 
-**Trading pairs** are admin-registered in a canonical orientation via `register_pair(base, quote)`
-(e.g. `XLM/USDC`, never `USDC/XLM`). The orientation is fixed by the pair definition, so an order's
+Every supported asset is declared once, in the constructor, with an immutable `AssetKind` that fixes
+which deposit routes it may legally use. There is **no post-deploy `register_asset`/`register_pair`**
+— a desk's asset/pair set is baked in at deploy (mirroring how `MosaicBridge.sol` registers its
+assets in its constructor), so a desk can never be half-configured or silently rebound.
+
+| Class | Example | Stellar side | `shield` | `shield_from_base` | `unshield` |
+|-------|---------|--------------|:--------:|:------------------:|:----------:|
+| `Stellar`         | XLM  | distributed (real SAC)        | ✅ | ❌ | ✅ |
+| `Dual`            | USDC | distributed (real SAC)        | ✅ | ✅ | ✅ |
+| `BaseRepresented` | ETH  | represented only (note-space) | ❌ | ✅ | ❌ (trade-only) |
+
+`AssetDef { token: Option<Address>, kind }` carries the real Soroban token for `Stellar`/`Dual`
+(transferred by `shield`/`unshield`) and `None` for `BaseRepresented` (which only ever exists as a
+tree note and is moved by trading, never by a Stellar transfer). The deposit-path checks live in
+`shield` (rejects `BaseRepresented` → `AssetNotShieldable`), `shield_from_base` (rejects `Stellar` →
+`AssetNotBridgeable`), and `unshield` (rejects `BaseRepresented` → `AssetNotUnshieldable`). On Base,
+a native-ETH asset is deposited via `MosaicBridge.shieldNative` (the `NATIVE` sentinel); ERC-20s use
+`shield`. See `base-bridge.md`.
+
+**Trading pairs** are constructor-registered in a canonical orientation (`PairDef { base, quote }`,
+e.g. `XLM/USDC`, never `USDC/XLM`). The orientation is fixed by the pair definition, so an order's
 side is well-defined regardless of how the user phrased its assets: SELL = give base / want quote, BUY
 = give quote / want base. Registering the reverse orientation of an existing pair is rejected (same
-market). Pair ids are assigned sequentially from 0.
+market). Pair ids are assigned sequentially from 0 in declaration order.
 
 ## The note commitment tree (on-chain)
 

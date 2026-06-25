@@ -16,10 +16,24 @@ import { RecoveryProvider } from './RecoveryContext'
 import { ActivityProvider } from './ActivityContext'
 import { EthereumWalletProvider } from './EthereumWalletContext'
 
+function AppRoute() {
+  return (
+    <WalletProvider>
+      <EthereumWalletProvider>
+        <RecoveryProvider>
+          <ActivityProvider>
+            <App />
+          </ActivityProvider>
+        </RecoveryProvider>
+      </EthereumWalletProvider>
+    </WalletProvider>
+  )
+}
+
 const router = createBrowserRouter([
   {
     path: '/',
-    element: <App />,
+    element: <AppRoute />,
     children: [
       { index: true, element: <Home /> },
       { path: 'assets', element: <AssetsPage /> },
@@ -30,14 +44,6 @@ const router = createBrowserRouter([
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <WalletProvider>
-      <EthereumWalletProvider>
-        <RecoveryProvider>
-          <ActivityProvider>
-            <RouterProvider router={router} />
-          </ActivityProvider>
-        </RecoveryProvider>
-      </EthereumWalletProvider>
-    </WalletProvider>
+    <RouterProvider router={router} />
   </StrictMode>,
 )

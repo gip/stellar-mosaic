@@ -19,13 +19,13 @@ const asset = (overrides: Partial<CatalogAsset>): CatalogAsset => ({
   ...overrides,
 })
 
-test('only Base Sepolia ERC-20 assets are deployment eligible', () => {
+test('Base Sepolia ERC-20 and native assets are deployment eligible', () => {
   const eligible = eligibleBaseAssets([
     asset({ id: 'usdc' }),
     asset({ id: 'eth', base_token: 'native' }),
     asset({ id: 'mainnet', base_chain_id: 8453 }),
   ])
-  assert.deepEqual(eligible.map((value) => value.id), ['usdc'])
+  assert.deepEqual(eligible.map((value) => value.id), ['usdc', 'eth'])
 })
 
 test('deployment requires a known balance covering the buffered estimate', () => {

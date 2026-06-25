@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::models::{Asset, BaseAssetMapping, BaseDeployment, CatalogAsset, Desk, Pair};
+use crate::models::{Asset, AssetKind, BaseAssetMapping, BaseDeployment, CatalogAsset, Desk, Pair};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -110,7 +110,7 @@ impl Db {
         let statements = vec![
             "CREATE TABLE IF NOT EXISTS desks (id TEXT PRIMARY KEY, name TEXT NOT NULL, contract_id TEXT NOT NULL, sponsor_pubkey TEXT NOT NULL, sponsor_secret TEXT, from_ledger BIGINT)",
             "CREATE TABLE IF NOT EXISTS base_deployments (desk_id TEXT PRIMARY KEY, deployer_address TEXT NOT NULL, status TEXT NOT NULL, assets_json TEXT NOT NULL, tx_hash TEXT, bridge_address TEXT, error TEXT, updated_at BIGINT NOT NULL)",
-            "CREATE TABLE IF NOT EXISTS assets (desk_id TEXT NOT NULL, asset_id BIGINT NOT NULL, symbol TEXT NOT NULL, token TEXT NOT NULL, decimals BIGINT NOT NULL DEFAULT 7, PRIMARY KEY (desk_id, asset_id))",
+            "CREATE TABLE IF NOT EXISTS assets (desk_id TEXT NOT NULL, asset_id BIGINT NOT NULL, symbol TEXT NOT NULL, token TEXT NOT NULL, decimals BIGINT NOT NULL DEFAULT 7, kind TEXT NOT NULL DEFAULT 'Stellar', PRIMARY KEY (desk_id, asset_id))",
             "CREATE TABLE IF NOT EXISTS pairs (desk_id TEXT NOT NULL, pair_id BIGINT NOT NULL, base_asset BIGINT NOT NULL, quote_asset BIGINT NOT NULL, PRIMARY KEY (desk_id, pair_id))",
             "CREATE TABLE IF NOT EXISTS wallet_backups (backup_id TEXT PRIMARY KEY, write_token_hash TEXT NOT NULL, format_version BIGINT NOT NULL, generation BIGINT NOT NULL, nonce_b64 TEXT NOT NULL, ciphertext_b64 TEXT NOT NULL, updated_at BIGINT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS auth_challenges (id TEXT PRIMARY KEY, address TEXT NOT NULL, message TEXT NOT NULL, expires_at BIGINT NOT NULL, used_at BIGINT)",
@@ -140,7 +140,8 @@ impl Db {
         for statement in statements {
             sqlx::query(statement).execute(&self.pool).await?;
         }
-        // Seed the two built-in defaults: USDC (Base Sepolia <-> Stellar) and Stellar-only XLM.
+        // Seed the built-in defaults: USDC (Base Sepolia <-> Stellar, Dual), Stellar-only XLM, and
+        // ETH (Base-native, represented on Stellar as a trade-only note — trusted by default).
         let now = now_ms();
         let seeds: [(
             &str,
@@ -150,7 +151,7 @@ impl Db {
             Option<i64>,
             Option<&str>,
             Option<i64>,
-        ); 2] = [
+        ); 3] = [
             (
                 "default-usdc",
                 "USDC",
@@ -161,6 +162,7 @@ impl Db {
                 Some(6),
             ),
             ("default-xlm", "XLM", "native", 7, None, None, None),
+            ("default-eth", "ETH", "represented", 18, Some(84532), Some("native"), Some(18)),
         ];
         for (id, symbol, stoken, sdec, bchain, btoken, bdec) in seeds {
             sqlx::query("INSERT INTO catalog_assets (id,symbol,stellar_token,stellar_decimals,base_chain_id,base_token,base_decimals,proposer_address,is_default,created_at,updated_at) VALUES (?,?,?,?,?,?,?,NULL,1,?,?) ON CONFLICT(id) DO NOTHING")
@@ -201,13 +203,14 @@ impl Db {
             .bind(sponsor_secret).bind(from_ledger.map(|x| x as i64)).bind(creator_address).execute(&mut *tx).await?;
         for a in &desk.assets {
             sqlx::query(
-                "INSERT INTO assets (desk_id,asset_id,symbol,token,decimals) VALUES (?,?,?,?,?)",
+                "INSERT INTO assets (desk_id,asset_id,symbol,token,decimals,kind) VALUES (?,?,?,?,?,?)",
             )
             .bind(&desk.id)
             .bind(a.asset_id as i64)
             .bind(&a.symbol)
             .bind(&a.token)
             .bind(a.decimals as i64)
+            .bind(a.kind.as_str())
             .execute(&mut *tx)
             .await?;
         }
@@ -246,7 +249,7 @@ impl Db {
         .await?
         .ok_or_else(|| AppError::NotFound(format!("desk {id}")))?;
         let assets = sqlx::query(
-            "SELECT asset_id,symbol,token,decimals FROM assets WHERE desk_id=? ORDER BY asset_id",
+            "SELECT asset_id,symbol,token,decimals,kind FROM assets WHERE desk_id=? ORDER BY asset_id",
         )
         .bind(id)
         .fetch_all(&self.pool)
@@ -258,6 +261,7 @@ impl Db {
                 symbol: r.try_get(1)?,
                 token: r.try_get(2)?,
                 decimals: r.try_get::<i64, _>(3)? as u32,
+                kind: AssetKind::from_db(&r.try_get::<String, _>(4)?),
             })
         })
         .collect::<Result<Vec<_>, sqlx::Error>>()?;

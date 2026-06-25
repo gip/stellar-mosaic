@@ -55,6 +55,11 @@ OWNER_TAG="${OWNER_TAG:-0x111111111111111111111111111111111111111111111111111111
 IMAGE_ID_PIN="$PROVER/image-id.hex"
 IMAGE_ID="${IMAGE_ID:-$(bridge_image_id_read_pin "$IMAGE_ID_PIN")}"
 CONFIG_ID="${CONFIG_ID:-3519660d6ecbd34367740f5ca18449cba8b389594f69f177bbf21c46e505c61e}"
+# Some Base Sepolia RPC providers reject rapid delegated-account broadcasts even when explicit
+# nonces are correct. Retry the exact same transaction nonce on that provider-side throttle.
+BASE_TX_MAX_ATTEMPTS="${BASE_TX_MAX_ATTEMPTS:-8}"
+BASE_TX_RETRY_DELAY="${BASE_TX_RETRY_DELAY:-15}"
+BASE_TX_SETTLE_DELAY="${BASE_TX_SETTLE_DELAY:-3}"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "ERROR: '$1' not found on PATH"; exit 1; }; }
 need forge; need cast; need stellar; need jq; need xxd
@@ -67,7 +72,75 @@ BUILT_IMAGE_ID=$(cd "$PROVER" && ./run-host -- --print-image-id)
 bridge_image_id_check "$IMAGE_ID" "$BUILT_IMAGE_ID" "$IMAGE_ID_PIN"
 echo "    guest image id = $IMAGE_ID"
 
-casts() { cast send --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" "$@"; }
+base_tx_settle_delay() {
+  [ "$BASE_TX_SETTLE_DELAY" = "0" ] || sleep "$BASE_TX_SETTLE_DELAY"
+}
+
+is_base_inflight_limit() {
+  printf '%s\n' "$1" | grep -qi 'in-flight transaction limit'
+}
+
+base_retry_notice() {
+  local attempt=$1
+  echo "    Base RPC in-flight transaction limit; retry $attempt/$BASE_TX_MAX_ATTEMPTS in ${BASE_TX_RETRY_DELAY}s" >&2
+}
+
+base_create() {
+  local out err err_text combined rc attempt
+  for attempt in $(seq 1 "$BASE_TX_MAX_ATTEMPTS"); do
+    err=$(mktemp)
+    set +e
+    out=$(cd "$EVM" && forge create \
+      --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --broadcast --json "$@" 2>"$err")
+    rc=$?
+    set -e
+    err_text=$(cat "$err")
+    rm -f "$err"
+    if [ "$rc" -eq 0 ]; then
+      [ -z "$err_text" ] || printf '%s\n' "$err_text" >&2
+      printf '%s\n' "$out"
+      base_tx_settle_delay
+      return 0
+    fi
+    combined="$out
+$err_text"
+    if is_base_inflight_limit "$combined" && [ "$attempt" -lt "$BASE_TX_MAX_ATTEMPTS" ]; then
+      base_retry_notice "$attempt"
+      sleep "$BASE_TX_RETRY_DELAY"
+      continue
+    fi
+    printf '%s\n' "$combined" >&2
+    return "$rc"
+  done
+}
+
+casts() {
+  local out err err_text combined rc attempt
+  for attempt in $(seq 1 "$BASE_TX_MAX_ATTEMPTS"); do
+    err=$(mktemp)
+    set +e
+    out=$(cast send --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" "$@" 2>"$err")
+    rc=$?
+    set -e
+    err_text=$(cat "$err")
+    rm -f "$err"
+    if [ "$rc" -eq 0 ]; then
+      [ -z "$err_text" ] || printf '%s\n' "$err_text" >&2
+      printf '%s\n' "$out"
+      base_tx_settle_delay
+      return 0
+    fi
+    combined="$out
+$err_text"
+    if is_base_inflight_limit "$combined" && [ "$attempt" -lt "$BASE_TX_MAX_ATTEMPTS" ]; then
+      base_retry_notice "$attempt"
+      sleep "$BASE_TX_RETRY_DELAY"
+      continue
+    fi
+    printf '%s\n' "$combined" >&2
+    return "$rc"
+  done
+}
 
 run_begin "Base"
 echo "==> 0. context"
@@ -87,12 +160,12 @@ endstage
 # Manage nonces explicitly: public RPCs lag on pending-nonce, which makes rapid back-to-back txs
 # collide ("replacement transaction underpriced"). We assign sequential nonces ourselves.
 NONCE=$(cast nonce "$ADMIN_EVM" --rpc-url "$BASE_RPC")
-echo "==> 1. deploy MockUSDC + MosaicBridge on Base Sepolia, register + mint (nonce base $NONCE)"
-USDC=$(cd "$EVM" && forge create test/mocks/MockUSDC.sol:MockUSDC \
-  --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --broadcast --json --nonce "$NONCE" | jq -r .deployedTo); NONCE=$((NONCE+1))
-BRIDGE=$(cd "$EVM" && forge create src/MosaicBridge.sol:MosaicBridge \
-  --rpc-url "$BASE_RPC" --private-key "$PRIVATE_KEY" --broadcast --json \
-  --nonce "$NONCE" --constructor-args "$ADMIN_EVM" | jq -r .deployedTo); NONCE=$((NONCE+1))   # --constructor-args last
+echo "==> 1. deploy MockUSDC + MosaicBridge on Base Sepolia, mint (nonce base $NONCE)"
+USDC_JSON=$(base_create test/mocks/MockUSDC.sol:MockUSDC --nonce "$NONCE")
+USDC=$(printf '%s\n' "$USDC_JSON" | jq -r .deployedTo); NONCE=$((NONCE+1))
+BRIDGE_JSON=$(base_create src/MosaicBridge.sol:MosaicBridge \
+  --nonce "$NONCE" --constructor-args "$ADMIN_EVM" "[$ASSET_ID]" "[$USDC]")
+BRIDGE=$(printf '%s\n' "$BRIDGE_JSON" | jq -r .deployedTo); NONCE=$((NONCE+1))   # --constructor-args last
 echo "    usdc = $USDC   bridge = $BRIDGE"
 state_set BASE_DEPOSITOR "$ADMIN_EVM"
 state_set BASE_USDC "$USDC"
@@ -100,12 +173,11 @@ state_set BASE_BRIDGE "$BRIDGE"
 state_set BASE_RPC "$BASE_RPC"
 state_set ROUTER_ID "$ROUTER_ID"
 casts --nonce "$NONCE" "$USDC" 'mint(address,uint256)' "$ADMIN_EVM" "$AMOUNT" >/dev/null; NONCE=$((NONCE+1))
-casts --nonce "$NONCE" "$BRIDGE" 'registerAsset(uint32,address)' "$ASSET_ID" "$USDC" >/dev/null; NONCE=$((NONCE+1))
 stage "deploy (Base)"
 note "MockUSDC"     "$USDC"
 note "MosaicBridge" "$BRIDGE"
 note "minted"       "$AMOUNT to $ADMIN_EVM"
-note "registered"  "asset $ASSET_ID -> $USDC"
+note "registered"  "asset $ASSET_ID -> $USDC (constructor)"
 note "explorer"    "https://sepolia.basescan.org/address/$BRIDGE"
 endstage
 
@@ -175,13 +247,16 @@ inv() {
   done
   return 1
 }
+# The bridged asset is Dual (real Stellar custody via the XLM SAC stand-in + a Base side). Assets
+# are constructor-only (immutable) now — no post-deploy register_asset.
+ASSETS_JSON="[{\"asset_id\":$ASSET_ID,\"token\":\"$XLM_SAC\",\"kind\":\"Dual\"}]"
 CID=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NETWORK" \
   -- --lift_vk-file-path "$VKS/lift_vk" --unshield_vk-file-path "$VKS/unshield_vk" \
-  --cancel_vk-file-path "$VKS/cancel_vk" --join_vk-file-path "$VKS/join_vk" --admin "$STELLAR_ADDR")
+  --cancel_vk-file-path "$VKS/cancel_vk" --join_vk-file-path "$VKS/join_vk" --admin "$STELLAR_ADDR" \
+  --assets "$ASSETS_JSON" --pairs '[]')
 echo "    settlement = $CID"
 state_set BASE_SETTLEMENT_CID "$CID"
 state_set BASE_DEPOSIT_BLOCK "$BLOCK"
-inv --send yes -- register_asset --asset_id "$ASSET_ID" --token "$XLM_SAC" >/dev/null
 inv --send yes -- configure_base_bridge \
   --router "$ROUTER_ID" --image_id "$IMAGE_ID" --config_id "$CONFIG_ID" --bridge "${BRIDGE#0x}" >/dev/null
 # The trust anchor: the relayer attests the Base block hash (the one the proof committed to).

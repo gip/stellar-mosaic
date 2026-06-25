@@ -19,6 +19,8 @@ contract MosaicBridgeTest is Test {
     address alice = makeAddr("alice");
 
     uint32 constant USDC_ASSET_ID = 1;
+    uint32 constant ETH_ASSET_ID = 2;
+    address constant NATIVE = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
     bytes32 constant OWNER_TAG = bytes32(uint256(0x1234)); // a small, valid Fr element
 
     // mirror of the contract event for expectEmit
@@ -199,6 +201,70 @@ contract MosaicBridgeTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
         vm.prank(alice);
         bridge.pause();
+    }
+
+    // ---- native ETH (shieldNative) ----
+
+    function _registerNative() internal {
+        vm.prank(admin);
+        bridge.registerAsset(ETH_ASSET_ID, NATIVE);
+    }
+
+    function test_registerAsset_acceptsNativeSentinel() public {
+        _registerNative();
+        assertEq(bridge.assetToken(ETH_ASSET_ID), NATIVE);
+    }
+
+    function test_shieldNative_locksEthAndEmits() public {
+        _registerNative();
+        uint256 amount = 1 ether;
+        vm.deal(alice, amount);
+
+        vm.expectEmit(true, true, true, true);
+        emit Shielded(0, ETH_ASSET_ID, amount, OWNER_TAG, NATIVE, alice);
+
+        vm.prank(alice);
+        uint64 id = bridge.shieldNative{value: amount}(ETH_ASSET_ID, OWNER_TAG);
+
+        assertEq(id, 0);
+        assertEq(address(bridge).balance, amount);
+        (uint32 assetId, uint256 amt, bytes32 ownerTag) = bridge.deposits(0);
+        assertEq(assetId, ETH_ASSET_ID);
+        assertEq(amt, amount);
+        assertEq(ownerTag, OWNER_TAG);
+    }
+
+    function test_shieldNative_revertsZeroValue() public {
+        _registerNative();
+        vm.expectRevert(MosaicBridge.InvalidAmount.selector);
+        vm.prank(alice);
+        bridge.shieldNative{value: 0}(ETH_ASSET_ID, OWNER_TAG);
+    }
+
+    function test_shieldNative_revertsOnErc20Asset() public {
+        // USDC is an ERC20 asset; depositing it as native must be rejected.
+        vm.deal(alice, 1 ether);
+        vm.expectRevert(abi.encodeWithSelector(MosaicBridge.WrongDepositRoute.selector, USDC_ASSET_ID));
+        vm.prank(alice);
+        bridge.shieldNative{value: 1 ether}(USDC_ASSET_ID, OWNER_TAG);
+    }
+
+    function test_shield_revertsOnNativeAsset() public {
+        // ETH is a native asset; depositing it as an ERC20 must be rejected.
+        _registerNative();
+        vm.expectRevert(abi.encodeWithSelector(MosaicBridge.WrongDepositRoute.selector, ETH_ASSET_ID));
+        vm.prank(alice);
+        bridge.shield(ETH_ASSET_ID, 1_000_000, OWNER_TAG);
+    }
+
+    function test_shieldNative_revertsWhenPaused() public {
+        _registerNative();
+        vm.prank(admin);
+        bridge.pause();
+        vm.deal(alice, 1 ether);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(alice);
+        bridge.shieldNative{value: 1 ether}(ETH_ASSET_ID, OWNER_TAG);
     }
 
     // ---- fee-on-transfer: emitted amount must equal RECEIVED, not requested ----

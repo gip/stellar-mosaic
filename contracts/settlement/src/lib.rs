@@ -106,7 +106,11 @@ pub struct BookInitialized {
 #[contractevent(topics = ["assetreg"], data_format = "vec")]
 pub struct AssetRegistered {
     pub asset_id: u32,
+    /// Real Soroban token for `Stellar`/`Dual`; the contract address itself as a placeholder for
+    /// `BaseRepresented` (which has no real Stellar token). Read `kind` to disambiguate.
     pub token: Address,
+    /// `AssetKind` as u32 (0 = Stellar, 1 = Dual, 2 = BaseRepresented).
+    pub kind: u32,
 }
 
 #[contractevent(topics = ["pairreg"], data_format = "vec")]
@@ -228,6 +232,10 @@ pub enum Error {
     BridgeMismatch = 25,        // journal bridgeAddress != the configured Base bridge address
     BaseBlockNotAttested = 26,  // journal block hash is not in the relayer-attested block registry
     DepositAlreadyProcessed = 27, // this Base depositId has already minted a note (replay)
+    AssetNotShieldable = 28,   // shield of a BaseRepresented asset (no Stellar deposit route)
+    AssetNotBridgeable = 29,   // shield_from_base of a Stellar-only asset (no Base route)
+    AssetNotUnshieldable = 30, // unshield of a BaseRepresented asset (trade-only; no Stellar payout)
+    AssetConfigInvalid = 31,   // constructor asset entry malformed (dup id, or token/kind mismatch)
 }
 
 /// Depth of the on-chain append-only Merkle note tree (matches the circuits' TREE_DEPTH).
@@ -335,6 +343,45 @@ pub struct BaseBridgeConfig {
     pub bridge: BytesN<20>,
 }
 
+/// What an asset *is*, which fixes the deposit routes it may legally use. Configured once at
+/// construction and immutable. See docs/architecture.md (asset classes) and the deposit-path checks
+/// in `shield` / `shield_from_base` / `unshield`.
+///   - `Stellar`         = distributed on Stellar (real SAC). `shield` ✓, `shield_from_base` ✗.
+///   - `Dual`            = distributed on both chains (real SAC + Base token). both deposit paths ✓.
+///   - `BaseRepresented` = distributed on Base, only *represented* on Stellar as note-space (no real
+///                         Stellar token). `shield_from_base` ✓, `shield` ✗, `unshield` ✗ (trade-only).
+// Fieldless variants WITHOUT explicit discriminants: `#[contracttype]` encodes this as a union whose
+// SCVal is the variant name, so CLI/JSON callers pass the string `"Stellar"`/`"Dual"`/
+// `"BaseRepresented"` (what backend/src/deploy.rs and the scripts emit). The numeric form used by the
+// `AssetRegistered` event comes from `kind_to_u32`.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AssetKind {
+    Stellar,
+    Dual,
+    BaseRepresented,
+}
+
+/// On-chain record for a supported asset id. `token` is the real Soroban token contract for
+/// `Stellar`/`Dual` (transferred by `shield`/`unshield`) and `None` for `BaseRepresented` (never
+/// transferred on Stellar). Stored under `DataKey::Asset(asset_id)`; set only at construction.
+#[contracttype]
+#[derive(Clone)]
+pub struct AssetDef {
+    pub token: Option<Address>,
+    pub kind: AssetKind,
+}
+
+/// One asset entry passed to `__constructor`. `asset_id` is the protocol id; `token`/`kind` populate
+/// the stored `AssetDef` (token must be `Some` for `Stellar`/`Dual`, `None` for `BaseRepresented`).
+#[contracttype]
+#[derive(Clone)]
+pub struct AssetInit {
+    pub asset_id: u32,
+    pub token: Option<Address>,
+    pub kind: AssetKind,
+}
+
 /// A canonical trading pair. Orders are always specified base/quote in this orientation
 /// (e.g. XLM/USDC, never USDC/XLM); the reverse orientation is rejected at registration and
 /// when deriving an order's pair. SELL = give base / want quote; BUY = give quote / want base.
@@ -376,7 +423,11 @@ pub struct Settlement;
 
 #[contractimpl]
 impl Settlement {
-    /// Install every operation VK atomically. There is deliberately no post-deploy VK mutator.
+    /// Install every operation VK and the full asset/pair set atomically. There is deliberately no
+    /// post-deploy mutator for any of these — VKs, assets, and pairs are all immutable from creation
+    /// (rebinding a live asset/pair would orphan custodied balances or resting orders). `assets`
+    /// declares every supported asset id with its `AssetKind`; `pairs` declares the canonical
+    /// markets. Both are validated here (see `register_asset_inner`/`register_pair_inner`).
     pub fn __constructor(
         env: Env,
         lift_vk: Bytes,
@@ -384,6 +435,8 @@ impl Settlement {
         cancel_vk: Bytes,
         join_vk: Bytes,
         admin: Address,
+        assets: Vec<AssetInit>,
+        pairs: Vec<PairDef>,
     ) -> Result<(), Error> {
         let vks = [(LIFT_OP, lift_vk), (UNSHIELD_OP, unshield_vk), (CANCEL_OP, cancel_vk), (JOIN_OP, join_vk)];
         let mut hashes: Vec<BytesN<32>> = Vec::new(&env);
@@ -398,9 +451,14 @@ impl Settlement {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().persistent().set(&DataKey::BookSeq, &0u64);
+        env.storage().persistent().set(&DataKey::PairCount, &0u32);
         tree_init(&env, &Hasher::new(&env));
         bump(&env, &DataKey::BookSeq);
+        bump(&env, &DataKey::PairCount);
         bump_core(&env); // instance + tree singletons to max from the start
+        // `bookinit` MUST be the FIRST event this contract emits — clients pin the protocol identity
+        // before replaying, and the indexer rejects any `assetreg`/`pairreg`/note event seen before
+        // it. So publish it before registering the static asset/pair config below.
         BookInitialized {
             schema_version: BOOK_EVENT_SCHEMA_VERSION,
             lift_vk_hash: hashes.get(0).unwrap(),
@@ -409,6 +467,13 @@ impl Settlement {
             join_vk_hash: hashes.get(3).unwrap(),
         }
         .publish(&env);
+        // Static asset + pair config (immutable): assets first so pairs can reference them.
+        for a in assets.iter() {
+            register_asset_inner(&env, a)?;
+        }
+        for p in pairs.iter() {
+            register_pair_inner(&env, &p)?;
+        }
         Ok(())
     }
 
@@ -454,57 +519,20 @@ impl Settlement {
         u256_to_bytesn(&env, &r)
     }
 
-    /// Map a supported asset id to its real Soroban token contract. Admin-gated; assets are not
-    /// silently rebindable (rebinding a live asset id would orphan custodied balances).
-    pub fn register_asset(env: Env, asset_id: u32, token: Address) -> Result<(), Error> {
-        Self::require_admin(&env)?;
-        if env.storage().persistent().has(&DataKey::Asset(asset_id)) {
-            return Err(Error::AssetAlreadyRegistered);
-        }
-        env.storage().persistent().set(&DataKey::Asset(asset_id), &token);
-        bump(&env, &DataKey::Asset(asset_id));
-        AssetRegistered { asset_id, token }.publish(&env);
-        Ok(())
+    /// Read the stored config for a supported asset id (its `AssetKind` and, for Stellar/Dual, its
+    /// real token), or `None` if the id is not configured. Read-only view for clients.
+    pub fn asset(env: Env, asset_id: u32) -> Option<AssetDef> {
+        env.storage().persistent().get(&DataKey::Asset(asset_id))
     }
 
-    /// Register a canonical trading pair `base/quote` (e.g. XLM/USDC). Admin-gated. Both assets must
-    /// already be registered. The canonical orientation is fixed here: an order is matched against
-    /// this pair only when its assets are `{base, quote}`; the orientation itself is derived from the
-    /// pair definition, never from the order, so XLM/USDC and USDC/XLM are the same market. Returns
-    /// the assigned pair id. Pairs are not redefinable (would orphan resting orders).
-    pub fn register_pair(env: Env, base_asset: u32, quote_asset: u32) -> Result<u32, Error> {
-        Self::require_admin(&env)?;
-        if base_asset == quote_asset {
-            return Err(Error::PairNotRegistered);
-        }
-        if !env.storage().persistent().has(&DataKey::Asset(base_asset))
-            || !env.storage().persistent().has(&DataKey::Asset(quote_asset))
-        {
-            return Err(Error::AssetNotRegistered);
-        }
-        // Reject a duplicate in either orientation: the pair is canonical, so {a,b} == {b,a}.
-        let count: u32 = env.storage().persistent().get(&DataKey::PairCount).unwrap_or(0);
-        let mut i = 0u32;
-        while i < count {
-            let p: PairDef = env.storage().persistent().get(&DataKey::Pair(i)).unwrap();
-            if (p.base_asset == base_asset && p.quote_asset == quote_asset)
-                || (p.base_asset == quote_asset && p.quote_asset == base_asset)
-            {
-                return Err(Error::PairAlreadyRegistered);
-            }
-            i += 1;
-        }
-        let pair_id = count;
-        env.storage().persistent().set(
-            &DataKey::Pair(pair_id),
-            &PairDef { base_asset, quote_asset },
-        );
-        env.storage().persistent().set(&DataKey::PairCount, &(count + 1));
-        bump(&env, &DataKey::Pair(pair_id));
-        bump(&env, &DataKey::PairCount);
-        PairRegistered { pair_id, base_asset, quote_asset }.publish(&env);
-        Ok(pair_id)
+    /// Number of registered canonical pairs (ids are `0..pair_count`).
+    pub fn pair_count(env: Env) -> u32 {
+        env.storage().persistent().get(&DataKey::PairCount).unwrap_or(0)
     }
+
+    // NOTE: assets and pairs are immutable from construction — there are deliberately no post-deploy
+    // `register_asset`/`register_pair` mutators. The constructor seeds them via the free helpers
+    // `register_asset_inner` / `register_pair_inner` below.
 
     /// Shield: move `amount` of a registered asset into custody and mint an AssetNote
     /// `{ asset_id, amount, owner_tag }`. Proof-free: the token transfer enforces the amount and
@@ -523,11 +551,16 @@ impl Settlement {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        let token: Address = env
+        let def: AssetDef = env
             .storage()
             .persistent()
             .get(&DataKey::Asset(asset_id))
             .ok_or(Error::AssetNotRegistered)?;
+        // A BaseRepresented asset has no Stellar deposit route — it can only enter via the bridge.
+        let token = match def.kind {
+            AssetKind::BaseRepresented => return Err(Error::AssetNotShieldable),
+            _ => def.token.ok_or(Error::AssetConfigInvalid)?,
+        };
 
         // Pull the real tokens into custody. `from` authorized above; the token contract enforces
         // the balance, so custody can never exceed what was actually shielded.
@@ -672,8 +705,15 @@ impl Settlement {
         }
         // The note's asset must be a known protocol asset (so it is spendable/tradeable like a native
         // shield). Custody equivalence (Base-USDC == Stellar-USDC) is the documented one-way peg.
-        if !env.storage().persistent().has(&DataKey::Asset(asset_id)) {
-            return Err(Error::AssetNotRegistered);
+        let def: AssetDef = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Asset(asset_id))
+            .ok_or(Error::AssetNotRegistered)?;
+        // Only assets that actually live on Base may arrive via the bridge: a Stellar-only asset has
+        // no Base side, so a bridged mint for it would be spurious.
+        if def.kind == AssetKind::Stellar {
+            return Err(Error::AssetNotBridgeable);
         }
         // Single-use: one mint per Base depositId.
         let dk = DataKey::BaseDeposit(deposit_id);
@@ -871,11 +911,17 @@ impl Settlement {
             return Err(Error::RecipientMismatch);
         }
 
-        let token: Address = env
+        let def: AssetDef = env
             .storage()
             .persistent()
             .get(&DataKey::Asset(asset))
             .ok_or(Error::AssetNotRegistered)?;
+        // A BaseRepresented asset is trade-only: there is no native Stellar token to pay out, so it
+        // can never leave custody by unshield (it must be traded into a Stellar/Dual asset first).
+        let token = match def.kind {
+            AssetKind::BaseRepresented => return Err(Error::AssetNotUnshieldable),
+            _ => def.token.ok_or(Error::AssetConfigInvalid)?,
+        };
 
         // Record the nullifier BEFORE paying out (single-use; spend cannot be replayed), then
         // transfer the public amount of the real token to the proof-bound recipient.
@@ -1293,6 +1339,71 @@ impl Settlement {
 fn bump(env: &Env, key: &DataKey) {
     let max = env.storage().max_ttl();
     env.storage().persistent().extend_ttl(key, max, max);
+}
+
+fn kind_to_u32(k: &AssetKind) -> u32 {
+    match k {
+        AssetKind::Stellar => 0,
+        AssetKind::Dual => 1,
+        AssetKind::BaseRepresented => 2,
+    }
+}
+
+/// Validate and store one asset entry (constructor-only). `Stellar`/`Dual` require a real token;
+/// `BaseRepresented` must not carry one (it is never transferred on Stellar). Ids cannot repeat.
+fn register_asset_inner(env: &Env, a: AssetInit) -> Result<(), Error> {
+    if env.storage().persistent().has(&DataKey::Asset(a.asset_id)) {
+        return Err(Error::AssetAlreadyRegistered);
+    }
+    let token = match (a.kind, a.token) {
+        (AssetKind::BaseRepresented, None) => None,
+        (AssetKind::BaseRepresented, Some(_)) => return Err(Error::AssetConfigInvalid),
+        (_, Some(t)) => Some(t),
+        (_, None) => return Err(Error::AssetConfigInvalid),
+    };
+    let def = AssetDef { token: token.clone(), kind: a.kind };
+    env.storage().persistent().set(&DataKey::Asset(a.asset_id), &def);
+    bump(env, &DataKey::Asset(a.asset_id));
+    // The event carries a non-optional token; for BaseRepresented use the contract's own address as
+    // an explicit placeholder (consumers disambiguate via `kind`).
+    let event_token = token.unwrap_or_else(|| env.current_contract_address());
+    AssetRegistered { asset_id: a.asset_id, token: event_token, kind: kind_to_u32(&a.kind) }
+        .publish(env);
+    Ok(())
+}
+
+/// Validate and store one canonical pair (constructor-only). Both assets must already be registered;
+/// self-pairs and either orientation of an existing pair are rejected. `pair_id` is sequential.
+fn register_pair_inner(env: &Env, p: &PairDef) -> Result<(), Error> {
+    if p.base_asset == p.quote_asset {
+        return Err(Error::PairNotRegistered);
+    }
+    if !env.storage().persistent().has(&DataKey::Asset(p.base_asset))
+        || !env.storage().persistent().has(&DataKey::Asset(p.quote_asset))
+    {
+        return Err(Error::AssetNotRegistered);
+    }
+    // Reject a duplicate in either orientation: the pair is canonical, so {a,b} == {b,a}.
+    let count: u32 = env.storage().persistent().get(&DataKey::PairCount).unwrap_or(0);
+    let mut i = 0u32;
+    while i < count {
+        let existing: PairDef = env.storage().persistent().get(&DataKey::Pair(i)).unwrap();
+        if (existing.base_asset == p.base_asset && existing.quote_asset == p.quote_asset)
+            || (existing.base_asset == p.quote_asset && existing.quote_asset == p.base_asset)
+        {
+            return Err(Error::PairAlreadyRegistered);
+        }
+        i += 1;
+    }
+    let pair_id = count;
+    env.storage()
+        .persistent()
+        .set(&DataKey::Pair(pair_id), &PairDef { base_asset: p.base_asset, quote_asset: p.quote_asset });
+    env.storage().persistent().set(&DataKey::PairCount, &(count + 1));
+    bump(env, &DataKey::Pair(pair_id));
+    bump(env, &DataKey::PairCount);
+    PairRegistered { pair_id, base_asset: p.base_asset, quote_asset: p.quote_asset }.publish(env);
+    Ok(())
 }
 
 /// Extend the contract instance (and its instance storage, e.g. the admin) TTL to the maximum.

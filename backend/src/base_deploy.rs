@@ -96,7 +96,6 @@ pub struct CompleteDeployment {
 struct Receipt {
     #[serde(rename = "contractAddress")]
     contract_address: Option<String>,
-    from: String,
     status: Value,
 }
 
@@ -167,6 +166,9 @@ fn verify_deployment(
         .base_rpc
         .as_deref()
         .ok_or_else(|| AppError::BadRequest("Base RPC is not configured".into()))?;
+    // Compare addresses canonically: the on-chain `from`/`owner()` values normalize to lowercase, so
+    // the stored deployer must too (it may have been persisted checksummed by an earlier desk).
+    let deployer = crate::stellar::normalize_evm_bridge(deployer)?;
     let cast_bin = &st.config.cast_bin;
     let chain_id = cast(cast_bin, rpc, &["chain-id".into()])?
         .parse::<u64>()
@@ -189,16 +191,21 @@ fn verify_deployment(
             "Base deployment transaction failed".into(),
         ));
     }
-    let receipt_bridge = receipt
-        .contract_address
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("transaction did not create a contract".into()))?;
-    if crate::stellar::normalize_evm_bridge(receipt_bridge)? != bridge
-        || crate::stellar::normalize_evm_bridge(&receipt.from)? != deployer
-    {
-        return Err(AppError::BadRequest(
-            "deployment receipt does not match the expected bridge and deployer".into(),
-        ));
+    // We deliberately do NOT constrain the receipt's `from`: the deploy may be relayed (MetaMask
+    // Smart Transactions) or sent by a 4337 bundler, so the top-level sender is a relayer, not the
+    // deployer. Authority comes from `owner() == deployer` below — the constructor sets the bridge
+    // admin to the deployer's account regardless of who submits the transaction.
+    //
+    // A direct `CREATE` binds the new contract address in the receipt; a CREATE2-proxy deploy
+    // creates the bridge in an internal call, leaving receipt.contractAddress null. When present it
+    // must match; when absent, the deployed-bytecode / owner() / assetToken() checks below fully
+    // validate the bridge at `bridge`.
+    if let Some(receipt_bridge) = receipt.contract_address.as_deref() {
+        if crate::stellar::normalize_evm_bridge(receipt_bridge)? != bridge {
+            return Err(AppError::BadRequest(
+                "deployment receipt contract address does not match the expected bridge".into(),
+            ));
+        }
     }
 
     let artifact = read_artifact(st)?;

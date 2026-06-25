@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Address } from 'viem'
 import { api, type BaseDeploymentConfig, type Desk } from '../api'
-import { deployBridge, displayEth, estimateBridgeDeployment } from '../base'
+import { deployBridge, displayEth, errorMessage, estimateBridgeDeployment } from '../base'
 import { useEthereumWallet } from '../EthereumWalletContext'
 import { hasEnoughEth, pendingDeploymentKey, readPendingDeployment } from '../baseDeployment'
 
@@ -34,7 +34,7 @@ export default function BaseDeploymentPanel({
 
   useEffect(() => {
     api.getBaseDeploymentConfig().then(setConfig).catch((cause) => {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      setError(errorMessage(cause))
     })
   }, [])
 
@@ -95,7 +95,7 @@ export default function BaseDeploymentPanel({
       onUpdated(updated)
       setStatus(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      setError(errorMessage(cause))
       setStatus(null)
     } finally {
       setBusy(false)

@@ -177,16 +177,19 @@ async fn untrust_asset(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Validate a Stellar token reference without touching the chain: `native`, `CODE:ISSUER`, or a
-/// `C...` contract id. A bare `G...` issuer is rejected (mirrors `deploy::resolve_token`).
+/// Validate a Stellar token reference without touching the chain: `native`, `represented`,
+/// `CODE:ISSUER`, or a `C...` contract id. A bare `G...` issuer is rejected (mirrors
+/// `deploy::resolve_token`). `represented` marks a Base-distributed asset that lives on Stellar only
+/// as a trade-only note (no real token) — the on-chain `BaseRepresented` class.
 fn validate_stellar_token(token: &str) -> AppResult<String> {
     let t = token.trim();
     let err = || {
         AppError::BadRequest(
-            "stellar_token must be \"native\", \"CODE:ISSUER\", or a C... contract id".into(),
+            "stellar_token must be \"native\", \"represented\", \"CODE:ISSUER\", or a C... contract id"
+                .into(),
         )
     };
-    if t == "native" {
+    if t == "native" || t == "represented" {
         Ok(t.to_string())
     } else if let Some((code, issuer)) = t.split_once(':') {
         if code.is_empty() || code.len() > 12 || !issuer.starts_with('G') || issuer.len() != 56 {

@@ -185,12 +185,41 @@ pub async fn create_desk(
                 requested.symbol
             )));
         }
+        // The asset class is derived from the catalog and must match what the client sent: a
+        // represented (token-less) Stellar side + a Base side = BaseRepresented; a real Stellar side
+        // + a Base side = Dual; a real Stellar side alone = Stellar.
+        let on_base = catalog.base_token.is_some();
+        let represented = catalog.stellar_token.as_deref() == Some("represented");
+        let expected_kind = match (represented, on_base) {
+            (true, true) => crate::models::AssetKind::BaseRepresented,
+            (true, false) => {
+                return Err(AppError::BadRequest(format!(
+                    "asset {} is represented on Stellar but has no Base side",
+                    requested.symbol
+                )))
+            }
+            (false, true) => crate::models::AssetKind::Dual,
+            (false, false) => crate::models::AssetKind::Stellar,
+        };
+        if requested.kind != expected_kind {
+            return Err(AppError::BadRequest(format!(
+                "asset {} class does not match the catalog; refresh and try again",
+                requested.symbol
+            )));
+        }
         if catalog.base_chain_id == Some(84_532) {
-            if let Some(token) = catalog.base_token.filter(|token| token != "native") {
+            if let Some(token) = catalog.base_token.clone() {
+                // Native ETH registers under the MosaicBridge `NATIVE` sentinel; ERC-20s use their
+                // 0x address.
+                let evm = if token == "native" {
+                    crate::stellar::normalize_evm_bridge(crate::models::NATIVE_EVM_SENTINEL)?
+                } else {
+                    crate::stellar::normalize_evm_bridge(&token)?
+                };
                 base_assets.push(crate::models::BaseAssetMapping {
                     asset_id: requested.asset_id,
                     symbol: requested.symbol.clone(),
-                    token: crate::stellar::normalize_evm_bridge(&token)?,
+                    token: evm,
                 });
             }
         }
@@ -202,7 +231,8 @@ pub async fn create_desk(
         .transpose()?;
     if deployer.is_some() && base_assets.is_empty() {
         return Err(AppError::BadRequest(
-            "Base deployment requires at least one selected Base Sepolia ERC-20".into(),
+            "Base deployment requires at least one selected Base Sepolia asset (ERC-20 or native ETH)"
+                .into(),
         ));
     }
     tracing::info!(name = %body.name, assets = body.assets.len(), pairs = body.pairs.len(), "create_desk");
