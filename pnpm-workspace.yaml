@@ -1,0 +1,15 @@
+packages:
+  - 'packages/*'
+  - 'frontend'
+
+# Pin the proving toolchain across ALL workspaces to the versions nargo 1.0.0-beta.9 / bb 0.87.0
+# emit. A newer @noir-lang/acvm_js cannot deserialize beta.9 ACIR, and bb proof formats differ
+# across versions — see CLAUDE.md 'Toolchain / version pinning'.
+overrides:
+  '@noir-lang/noir_js': 1.0.0-beta.9
+  '@aztec/bb.js': 0.87.0
+
+# msgpackr-extract is an optional native accelerator (transitive dep); the pure-JS fallback is fine,
+# so its build script is intentionally not run.
+allowBuilds:
+  msgpackr-extract: false

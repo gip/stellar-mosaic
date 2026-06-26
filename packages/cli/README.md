@@ -8,9 +8,9 @@ a thin shell over `@mosaic/sdk` (`createNodeClient`), so it shares one code path
 ## Install / build
 
 ```bash
-# from the repo root (npm workspaces)
-npm run build:sdk && npm -w @mosaic/cli run build
-node packages/cli/dist/cli.js --help     # or `npm link` to get the `mosaic` bin
+# from the repo root (pnpm workspaces)
+pnpm -r build
+node packages/cli/dist/cli.js --help     # or `cd packages/cli && pnpm link --global` for the `mosaic` bin
 ```
 
 State lives under `$MOSAIC_HOME` (default `~/.mosaic`): `config.json` (key + desks + network) and

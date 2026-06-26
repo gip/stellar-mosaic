@@ -16,7 +16,7 @@ else — shield, orders, unshield, cancel, note tracking — runs locally via `@
 ## Run
 
 ```bash
-npm -w @mosaic/mcp run build
+pnpm --filter @mosaic/mcp build
 mosaic-mcp            # stdio transport (what agents connect to)
 ```
 

@@ -15,7 +15,7 @@
     "clean": "tsc -b --clean"
   },
   "dependencies": {
-    "@mosaic/sdk": "*",
+    "@mosaic/sdk": "workspace:*",
     "@stellar/stellar-sdk": "^16.0.1",
     "commander": "^12.1.0"
   },

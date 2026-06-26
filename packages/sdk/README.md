@@ -38,6 +38,6 @@ The core is parameterized by injected ports; adapters implement them per environ
 ## Build
 
 ```bash
-# from the repo root (npm workspaces)
-npm run build:sdk
+# from the repo root (pnpm workspaces)
+pnpm --filter @mosaic/sdk build
 ```
