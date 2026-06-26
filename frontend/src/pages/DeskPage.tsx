@@ -463,6 +463,9 @@ function NotesTable({
 function noteDisplayStatus(n: Note, bookIndex: BookIndexSnapshot, noteIndexError: string | null): string {
   if (n.status !== 'active' || n.indexed) return n.status
   if (noteIndexError?.includes('trustless note history unavailable')) return 'active · index history unavailable'
+  // Any other reconcile failure is a real error, not normal indexing latency — surface it distinctly
+  // rather than reusing "pending index", so a wedged event reader doesn't look like healthy waiting.
+  if (noteIndexError) return 'active · index error'
   if (!n.cancel) return 'active · pending index'
   if (bookIndex.status !== 'synced') return 'order submitted · syncing book'
   const resting = bookIndex.orders.some(

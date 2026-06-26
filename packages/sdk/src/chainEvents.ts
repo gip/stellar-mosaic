@@ -11,7 +11,7 @@ import { rpc, scValToNative } from "@stellar/stellar-sdk";
 import type { NetworkConfig } from "./ports.js";
 import type { Amount, Field, Fill, TreeEvent } from "./types.js";
 import { ActivityHistory, type ActivityStore } from "./activity.js";
-import { getMosaicLogger, type MosaicLogger } from "./logging.js";
+import { errorMessage, getMosaicLogger, type MosaicLogger } from "./logging.js";
 
 function hex(value: unknown): Field {
   const bytes =
@@ -154,11 +154,31 @@ export class ChainEventSource {
   async events(contractId: string, startLedger?: number, recovery?: ChainEventRecovery): Promise<TreeEvent[]> {
     const st = await this.loadState(contractId);
     const filters = [{ type: "contract" as const, contractIds: [contractId] }];
+    const requested = startLedger ?? this.startLedger;
     try {
-      await this.fetchPages(contractId, st, filters, startLedger ?? this.startLedger);
+      await this.fetchPages(contractId, st, filters, requested);
     } catch (error) {
+      // A "ledger range" error means our resume point is outside the window getEvents will accept.
+      // Note: the RPC reports a JSON-RPC error object ({ code, message }), not an Error instance, so
+      // the range must be parsed via the message-aware errorMessage helper (a bare String() yields
+      // "[object Object]" and silently disables recovery).
       const range = parseLedgerRangeError(error);
-      if (range && !st.cursor) {
+      if (range) {
+        // Start ledger ahead of the queryable head, with no cursor yet: this is not missing history,
+        // just getLatestLedger() leading getEvents by a ledger or two (common right after a desk is
+        // created). Retry clamped to the head rather than replaying the whole retained window.
+        if (requested !== undefined && !st.cursor && requested > range.latest) {
+          this.logger.info("chain events start ledger ahead of RPC head; retrying at head", {
+            contractId,
+            requested,
+            head: range.latest,
+          });
+          await this.fetchPages(contractId, st, filters, range.latest);
+          return st.acc;
+        }
+        // Otherwise our resume point (start ledger or a stale cached cursor) has fallen behind
+        // retention; rebuild from the oldest ledger the RPC still retains. Rethrowing instead would
+        // wedge every future read and leave the reconcile loop's notes stuck at "pending index".
         await this.recoverFromRetainedRange(contractId, st, filters, range.oldest, recovery);
         return st.acc;
       }
@@ -265,11 +285,29 @@ export class ChainEventSource {
     oldestRetainedLedger: number,
     recovery?: ChainEventRecovery,
   ): Promise<void> {
-    if (st.acc.length > 0 || st.fills.length > 0) {
-      this.logger.info("chain events recovered from cached history", { contractId, cursor: st.cursor });
+    // Our resume point (start ledger or cursor) is outside retention. Reset to a clean slate and
+    // rebuild from the oldest ledger the RPC still retains — refetching from `oldestRetainedLedger`
+    // on top of stale accumulated events would duplicate leaves, so the existing history is dropped
+    // and the tree is replayed afresh (callers rebuild the tree from these events on every read).
+    const hadHistory = st.cursor !== undefined || st.acc.length > 0 || st.fills.length > 0;
+    st.cursor = undefined;
+    st.acc = [];
+    st.fills = [];
+    st.latestLedger = undefined;
+
+    if (hadHistory) {
+      // We previously held a coherent view, so the retained window is authoritative as long as it
+      // still reaches the desk's genesis. Validate that when a validator is available; otherwise
+      // recover best-effort (a wedged cursor is worse than an unvalidated but complete-looking read).
+      this.logger.info("chain events resume point outside retention; rebuilding from retained window", {
+        contractId,
+        oldestRetainedLedger,
+      });
       await this.fetchPages(contractId, st, filters, oldestRetainedLedger);
+      if (recovery?.validateReplay) await this.validateOrFatal(contractId, st, recovery);
       return;
     }
+
     this.logger.warn("chain events start ledger is outside RPC retention; attempting retained-window replay", {
       contractId,
       oldestRetainedLedger,
@@ -280,8 +318,18 @@ export class ChainEventSource {
       throw new Error(`${message}; no replay validator was configured`);
     }
     await this.fetchPages(contractId, st, filters, oldestRetainedLedger);
+    await this.validateOrFatal(contractId, st, recovery);
+  }
+
+  /** Run the caller's replay validator over the recovered events; persist a fatal marker and throw
+   * if the retained window no longer covers the desk's full history. */
+  private async validateOrFatal(
+    contractId: string,
+    st: ContractState,
+    recovery: ChainEventRecovery,
+  ): Promise<void> {
     try {
-      await recovery.validateReplay([...st.acc]);
+      await recovery.validateReplay!([...st.acc]);
     } catch (error) {
       const message = `trustless note history unavailable: RPC no longer retains the desk's full note-event history`;
       await this.persist(contractId, st, `${message}; ${errorMessage(error)}`);
@@ -328,10 +376,6 @@ export class ChainEventSource {
         .catch((error) => this.logger.debug("fill activity record failed", { contractId, error }));
     }
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export interface LedgerRange {

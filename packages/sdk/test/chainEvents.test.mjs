@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { nativeToScVal, xdr } from "@stellar/stellar-sdk";
-import { ChainEventSource, MemoryStore, parseLedgerRange } from "../dist/index.js";
+import { ChainEventSource, MemoryStore, parseLedgerRange, parseLedgerRangeError } from "../dist/index.js";
 
 const network = { rpcUrl: "https://example.invalid", networkPassphrase: "Test SDF Network ; September 2015" };
 
@@ -40,6 +40,78 @@ test("ChainEventSource resumes from cached cursor", async () => {
   const events = await source.events("C", 1);
   assert.equal(events.length, 1);
   assert.equal(calls.length, 1);
+});
+
+test("ChainEventSource recovers when a cached cursor has aged out of retention", async () => {
+  // Regression: a persistent cache can resume from a cursor whose ledger the RPC no longer retains.
+  // getEvents({cursor}) then throws a ledger-range error; the source must drop the stale cursor and
+  // rebuild from the oldest retained ledger instead of rethrowing (which left notes "pending index").
+  const calls = [];
+  const stale = { kind: "shielded", asset: 1, amount: "1", owner_tag: "0x" + "01".padStart(64, "0") };
+  const fresh = event(
+    "f",
+    "shielded",
+    xdr.ScVal.scvVec([
+      nativeToScVal(2, { type: "u32" }),
+      nativeToScVal(5n, { type: "i128" }),
+      xdr.ScVal.scvBytes(tag(2)),
+    ]),
+  );
+  const cache = {
+    async load() {
+      return { cursor: "stale-cursor", treeEvents: [stale], fills: [], latestLedger: 4 };
+    },
+    async save() {},
+  };
+  const source = new ChainEventSource({
+    network,
+    cache,
+    server: {
+      async getEvents(request) {
+        calls.push(request);
+        if (request.cursor === "stale-cursor") {
+          throw new Error("startLedger must be within the ledger range: 5 - 9");
+        }
+        assert.equal(request.startLedger, 5);
+        return { events: [fresh], cursor: "cursor-9", latestLedger: 9 };
+      },
+    },
+  });
+  // The replayed retained window is authoritative (it reaches genesis), so validation passes and the
+  // result reflects only the freshly-fetched events, not the discarded stale one.
+  const events = await source.events("C", 1, { validateReplay: async () => {} });
+  assert.deepEqual(events, [{ kind: "shielded", asset: 2, amount: "5", owner_tag: "0x" + "02".padStart(64, "0") }]);
+  assert.equal(calls.length, 2);
+});
+
+test("ChainEventSource clamps to head when start ledger leads the RPC, parsing a plain RPC error", async () => {
+  // Regression: right after desk creation getLatestLedger() can lead getEvents by a ledger, and the
+  // RPC rejects with a JSON-RPC *object* { code, message } (not an Error). The source must still
+  // parse the range, recognise "ahead of head", and retry at the head instead of rethrowing.
+  const calls = [];
+  const source = new ChainEventSource({
+    network,
+    server: {
+      async getEvents(request) {
+        calls.push(request);
+        if (request.startLedger === 12) {
+          throw { code: -32600, message: "startLedger must be within the ledger range: 5 - 9" };
+        }
+        assert.equal(request.startLedger, 9);
+        return { events: [], cursor: "cursor-9", latestLedger: 9 };
+      },
+    },
+  });
+  const events = await source.events("C", 12);
+  assert.deepEqual(events, []);
+  assert.equal(calls.length, 2); // ahead-of-head retry does NOT need a retained-window validator
+});
+
+test("parseLedgerRangeError reads a plain JSON-RPC error object", () => {
+  assert.deepEqual(
+    parseLedgerRangeError({ code: -32600, message: "startLedger must be within the ledger range: 5 - 9" }),
+    { oldest: 5, latest: 9 },
+  );
 });
 
 test("ChainEventSource salvages from oldest retained ledger when replay validates", async () => {

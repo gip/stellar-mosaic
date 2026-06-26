@@ -4,7 +4,7 @@ import type { Desk } from './api'
 import type { Note } from './notes'
 import { SOROBAN_RPC_URL } from './config'
 import { FreighterSigner } from './sdk/freighterSigner'
-import { browserActivityStore, browserEventCache, IndexedDbStore } from './sdk/indexedDbStore'
+import { browserActivityStore, IndexedDbStore } from './sdk/indexedDbStore'
 import { stageRecoverableNotes, syncRecoveryNow } from './recovery'
 import { initNoirWasm } from './noirWasm'
 
@@ -35,7 +35,9 @@ function trustlessClient(desk: Desk, address: string) {
     startLedger: desk.event_start_ledger ?? 0,
     prepareNotes: stageRecoverableNotes,
     initNoir: initNoirWasm,
-    eventCache: browserEventCache,
+    // No persistent eventCache here: this client is created fresh per operation and only needs to
+    // confirm its own note within waitForConfirm. Sharing the long-lived reconcile source's cache
+    // scope (keyed by passphrase+contractId) let the two clobber each other's cursor across reads.
   }).client
 }
 

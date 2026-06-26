@@ -215,7 +215,8 @@ export const api = {
       store: new IndexedDbStore(),
       activity: browserActivityStore,
       initNoir: initNoirWasm,
-      eventCache: browserEventCache,
+      // No persistent eventCache: this one-shot deploy client must not seed the long-lived reconcile
+      // source's cache scope with a cursor (which would later resume reads past freshly-shielded notes).
     })
     const startLedger = (await new rpc.Server(SOROBAN_RPC_URL).getLatestLedger()).sequence
     const deployed = await client.deploy({
