@@ -16,7 +16,7 @@ export default function Home() {
 
   async function load() {
     try {
-      setDesks(await api.listDesks())
+      setDesks(await api.listDesks(mosaicServer.trusted))
       setError(null)
     } catch (e) {
       setError(errorMessage(e))
@@ -26,7 +26,7 @@ export default function Home() {
   useEffect(() => {
     let active = true
     api
-      .listDesks()
+      .listDesks(mosaicServer.trusted)
       .then((next) => {
         if (!active) return
         setDesks(next)
@@ -36,7 +36,7 @@ export default function Home() {
     return () => {
       active = false
     }
-  }, [])
+  }, [mosaicServer.trusted])
 
   return (
     <>

@@ -16,12 +16,12 @@ import {
 } from '@stellar/stellar-sdk'
 import { signAuthEntry } from '@stellar/freighter-api'
 import { Buffer } from 'buffer'
+import { SOROBAN_RPC_URL } from './config'
 
 // recipientField now lives in @mosaic/sdk (single source of truth); re-export it so existing
 // imports of './soroban' keep working.
 export { recipientField } from '@mosaic/sdk'
 
-const RPC_URL = import.meta.env.VITE_SOROBAN_RPC ?? 'https://soroban-testnet.stellar.org'
 const PASSPHRASE = Networks.TESTNET
 
 /**
@@ -36,7 +36,7 @@ export async function buildSponsoredShield(
   amount: string,
   ownerTagBytes: Uint8Array,
 ): Promise<string> {
-  const srv = new rpc.Server(RPC_URL)
+  const srv = new rpc.Server(SOROBAN_RPC_URL)
   const args = [
     new Address(userPubkey).toScVal(),
     nativeToScVal(assetId, { type: 'u32' }),

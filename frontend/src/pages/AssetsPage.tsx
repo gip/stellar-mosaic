@@ -18,7 +18,7 @@ export default function AssetsPage() {
   const load = useCallback(async () => {
     if (!serverReady) return
     try {
-      setAssets(await api.listCatalogAssets())
+      setAssets(await api.listCatalogAssets(true))
       setError(null)
     } catch (e) {
       setError(errorMessage(e))
@@ -30,7 +30,7 @@ export default function AssetsPage() {
     let active = true
     if (!serverReady) return () => { active = false }
     api
-      .listCatalogAssets()
+      .listCatalogAssets(true)
       .then((next) => {
         if (active) {
           setAssets(next)

@@ -5,6 +5,7 @@
 
 import { randomBytes } from "node:crypto";
 import { Keypair } from "@stellar/stellar-sdk";
+import { sep53Digest } from "@mosaic/sdk";
 import type { MosaicStore } from "./store.js";
 
 export interface Session {
@@ -56,8 +57,9 @@ export class AuthService {
       this.challenges.delete(challengeId);
       throw new Error("challenge expired");
     }
+    // SEP-0053: wallets sign SHA256("Stellar Signed Message:\n" || message), not the raw bytes.
     const ok = Keypair.fromPublicKey(address).verify(
-      Buffer.from(c.message, "utf8"),
+      Buffer.from(sep53Digest(Buffer.from(c.message, "utf8"))),
       Buffer.from(signatureB64, "base64"),
     );
     if (!ok) throw new Error("signature verification failed");

@@ -76,7 +76,7 @@ export default function ShieldFromBaseForm({
   useEffect(() => {
     let active = true
     api
-      .listCatalogAssets()
+      .listCatalogAssets(true)
       .then((all) => {
         if (active)
           setBaseSymbols(

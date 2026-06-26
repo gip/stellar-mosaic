@@ -2,13 +2,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Keypair } from "@stellar/stellar-sdk";
+import { sep53Digest } from "@mosaic/sdk";
 import { AuthService } from "../dist/auth.js";
+
+const signChallenge = (kp, message) =>
+  kp.sign(Buffer.from(sep53Digest(new TextEncoder().encode(message)))).toString("base64");
 
 test("challenge/verify roundtrip issues a usable session", async () => {
   const kp = Keypair.random();
   const svc = new AuthService();
   const { challengeId, message } = await svc.challenge(kp.publicKey());
-  const sig = kp.sign(Buffer.from(message, "utf8")).toString("base64");
+  const sig = signChallenge(kp, message);
   const { token } = await svc.verify(kp.publicKey(), challengeId, sig);
   assert.equal((await svc.requireSession(token)).address, kp.publicKey());
 });
@@ -18,7 +22,7 @@ test("a signature from a different key is rejected", async () => {
   const other = Keypair.random();
   const svc = new AuthService();
   const { challengeId, message } = await svc.challenge(kp.publicKey());
-  const badSig = other.sign(Buffer.from(message, "utf8")).toString("base64");
+  const badSig = signChallenge(other, message);
   await assert.rejects(() => svc.verify(kp.publicKey(), challengeId, badSig), /verification failed/);
 });
 

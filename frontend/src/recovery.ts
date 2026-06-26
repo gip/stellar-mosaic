@@ -54,6 +54,7 @@ export interface RecoveryFile extends WalletBackupEnvelope {
 }
 
 let active: RecoverySession | null = null
+let backendEnabled = false
 let accountSelection = 0
 let state: RecoveryStatus = {
   unlocked: false,
@@ -89,6 +90,10 @@ export function recoveryStatus(): RecoveryStatus {
   return state
 }
 
+export function setRecoveryBackendEnabled(enabled: boolean): void {
+  backendEnabled = enabled
+}
+
 export function subscribeRecovery(fn: (s: RecoveryStatus) => void): () => void {
   listeners.add(fn)
   fn(state)
@@ -114,10 +119,12 @@ export async function selectRecoveryAccount(
   if (!cached) return
   active = cached
   publish({ unlocked: true })
-  try {
-    await restoreFromBackend()
-  } catch (e) {
-    publish({ error: message(e) })
+  if (backendEnabled) {
+    try {
+      await restoreFromBackend()
+    } catch (e) {
+      publish({ error: message(e) })
+    }
   }
 }
 
@@ -153,9 +160,9 @@ export async function unlockRecovery(account: string, networkPassphrase: string)
     }
     await (await cacheDb()).put('sessions', active)
     publish({ unlocked: true })
-    await restoreFromBackend()
-    // Creates an empty snapshot for a newly enrolled account and uploads any already-account-scoped
-    // records. Legacy notes without wallet_address are deliberately excluded.
+    if (backendEnabled) await restoreFromBackend()
+    // Marks account-scoped records protected locally. If Mosaic Server is trusted, this also uploads
+    // the encrypted snapshot; legacy notes without wallet_address are deliberately excluded.
     await syncRecoveryNow()
   } catch (e) {
     if (selection === accountSelection) {
@@ -198,6 +205,12 @@ export async function updateNoteAndSync(id: string, patch: Partial<Note>): Promi
 
 export async function syncRecoveryNow(): Promise<void> {
   const s = requireSession()
+  if (!backendEnabled) {
+    await (await cacheDb()).put('sessions', s)
+    await markRecoveryProtected(s.account)
+    publish({ syncing: false, error: null })
+    return
+  }
   publish({ syncing: true, error: null })
   try {
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -240,6 +253,7 @@ export async function syncRecoveryNow(): Promise<void> {
 }
 
 export async function restoreFromBackend(): Promise<number> {
+  if (!backendEnabled) return 0
   const s = requireSession()
   const remote = await getRemote(s.backupId)
   if (!remote) return 0

@@ -8,6 +8,7 @@ import { maxIn, planAssembly } from '../orderPlan'
 import { nowSeconds } from '../time'
 import { useRecovery } from '../RecoveryContext'
 import { useActivity } from '../ActivityContext'
+import { placeOrderTrustless } from '../trustless'
 
 type Side = 'SELL' | 'BUY'
 
@@ -64,11 +65,15 @@ export default function OrderForm({
   desk,
   notes,
   bookIndex,
+  userPubkey,
+  trustless = false,
   onDone,
 }: {
   desk: Desk
   notes: Note[]
   bookIndex: BookIndexSnapshot
+  userPubkey: string
+  trustless?: boolean
   onDone: () => void
 }) {
   const [pairId, setPairId] = useState(desk.pairs[0]?.pair_id ?? 0)
@@ -150,12 +155,25 @@ export default function OrderForm({
     setBusy(true)
     setError(null)
     try {
-      setStatus('Queueing order…')
-      const operation = await activity.enqueue({
-        kind: 'place_order', desk_id: desk.id, pair_id: pairId, side,
-        amount_in: amountInRaw.toString(), min_out: minOutRaw.toString(), partial_allowed: partial,
-      })
-      setStatus(`Queued · ${operation.id.slice(0, 8)}`)
+      if (trustless) {
+        setStatus('Submitting with Freighter…')
+        await placeOrderTrustless(desk, {
+          address: userPubkey,
+          pairId,
+          side: side === 'SELL' ? 1 : 0,
+          amountIn: amountInRaw.toString(),
+          minOut: minOutRaw.toString(),
+          partialAllowed: partial,
+        })
+        setStatus('Order submitted')
+      } else {
+        setStatus('Queueing order…')
+        const operation = await activity.enqueue({
+          kind: 'place_order', desk_id: desk.id, pair_id: pairId, side,
+          amount_in: amountInRaw.toString(), min_out: minOutRaw.toString(), partial_allowed: partial,
+        })
+        setStatus(`Queued · ${operation.id.slice(0, 8)}`)
+      }
       onDone()
     } catch (e) {
       setError(errorMessage(e))

@@ -4,6 +4,7 @@ import type { Desk } from '../api'
 import type { Note } from '../notes'
 import { useRecovery } from '../RecoveryContext'
 import { useActivity } from '../ActivityContext'
+import { cancelOrderTrustless } from '../trustless'
 
 /**
  * Cancel a resting limit order. Derives a fresh return destination, proves the cancel circuit
@@ -14,10 +15,14 @@ import { useActivity } from '../ActivityContext'
 export default function CancelOrderButton({
   desk,
   note,
+  userPubkey,
+  trustless = false,
   onDone,
 }: {
   desk: Desk
   note: Note
+  userPubkey: string
+  trustless?: boolean
   onDone: () => void
 }) {
   const [busy, setBusy] = useState(false)
@@ -35,9 +40,15 @@ export default function CancelOrderButton({
     setBusy(true)
     setError(null)
     try {
-      setStatus('Queueing cancellation…')
-      const operation = await activity.enqueue({ kind: 'cancel_order', desk_id: desk.id, wallet_note_id: note.id })
-      setStatus(`Queued · ${operation.id.slice(0, 8)}`)
+      if (trustless) {
+        setStatus('Submitting with Freighter…')
+        await cancelOrderTrustless(desk, { address: userPubkey, noteId: note.id })
+        setStatus('Cancelled')
+      } else {
+        setStatus('Queueing cancellation…')
+        const operation = await activity.enqueue({ kind: 'cancel_order', desk_id: desk.id, wallet_note_id: note.id })
+        setStatus(`Queued · ${operation.id.slice(0, 8)}`)
+      }
       onDone()
     } catch (e) {
       setError(errorMessage(e))

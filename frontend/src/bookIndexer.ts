@@ -3,9 +3,8 @@ import { BASE_FEE, Contract, Networks, TransactionBuilder, rpc, scValToNative } 
 import { errorMessage } from '@mosaic/sdk'
 import type { AssetKind, Desk } from './api'
 import { Buffer } from 'buffer'
+import { SOROBAN_RPC_URL } from './config'
 
-export const SOROBAN_RPC_URL =
-  import.meta.env.VITE_SOROBAN_RPC ?? 'https://soroban-testnet.stellar.org'
 export const BOOK_SCHEMA_VERSION = 1
 
 export interface IndexedOrder {

@@ -8,7 +8,7 @@ import {
   type xdr,
 } from '@stellar/stellar-sdk'
 import { currentAddress, network } from './wallet'
-import { SOROBAN_RPC_URL } from './bookIndexer'
+import { SOROBAN_RPC_URL } from './config'
 
 interface SubmissionRecord {
   hash: string

@@ -3,7 +3,6 @@ import { errorMessage } from '@mosaic/sdk'
 import { connect as fxConnect, currentAddress, network as currentNetwork } from './wallet'
 import { reconcileDirectSubmissions } from './directTransaction'
 import { Networks } from '@stellar/stellar-sdk'
-import { api } from './api'
 
 const DISCONNECTED_KEY = 'stellar-mosaic.wallet-disconnected'
 
@@ -105,7 +104,6 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setAddress(null)
     setNetworkPassphrase(null)
     setError(null)
-    await api.deleteAuthSession().catch(() => {})
   }
 
   return (

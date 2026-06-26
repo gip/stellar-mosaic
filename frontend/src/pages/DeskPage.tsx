@@ -15,6 +15,7 @@ import { isRecoveryUnlocked, syncRecoveryNow } from '../recovery'
 import { ordersFor, type BookIndexSnapshot } from '../bookIndexer'
 import { useBookIndex } from '../useBookIndex'
 import { setSubmissionMode, submissionMode } from '../directTransaction'
+import { hasLocalDesk } from '../sdk/indexedDbStore'
 
 /** Canonical 32-byte hex tag for comparison: drop any `0x`, lowercase, left-pad to 64. */
 function normTag(h: string): string {
@@ -42,6 +43,7 @@ export default function DeskPage() {
   const [desk, setDesk] = useState<Desk | null>(null)
   const [root, setRoot] = useState<string | null>(null)
   const [notes, setNotes] = useState<Note[]>([])
+  const [trustlessDesk, setTrustlessDesk] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [submitMode, setSubmitMode] = useState<'direct' | 'sponsored'>(submissionMode())
   const bookIndex = useBookIndex(desk, networkPassphrase)
@@ -52,7 +54,12 @@ export default function DeskPage() {
 
   useEffect(() => {
     if (!deskId) return
-    api.getDesk(deskId).then(setDesk).catch((e) => setError(errorMessage(e)))
+    Promise.all([api.getDesk(deskId), hasLocalDesk(deskId)])
+      .then(([nextDesk, isLocal]) => {
+        setDesk(nextDesk)
+        setTrustlessDesk(isLocal)
+      })
+      .catch((e) => setError(errorMessage(e)))
     reloadNotes()
   }, [deskId, reloadNotes])
 
@@ -224,17 +231,21 @@ export default function DeskPage() {
           <tr>
             <th>Submission</th>
             <td>
-              <select
-                value={submitMode}
-                onChange={(event) => {
-                  const mode = event.target.value as 'direct' | 'sponsored'
-                  setSubmissionMode(mode)
-                  setSubmitMode(mode)
-                }}
-              >
-                <option value="direct">Self-submit (you pay network fees)</option>
-                <option value="sponsored">Desk sponsor</option>
-              </select>
+              {trustlessDesk ? (
+                <span>Self-submit (you pay network fees)</span>
+              ) : (
+                <select
+                  value={submitMode}
+                  onChange={(event) => {
+                    const mode = event.target.value as 'direct' | 'sponsored'
+                    setSubmissionMode(mode)
+                    setSubmitMode(mode)
+                  }}
+                >
+                  <option value="direct">Self-submit (you pay network fees)</option>
+                  <option value="sponsored">Desk sponsor</option>
+                </select>
+              )}
             </td>
           </tr>
           <tr>
@@ -261,13 +272,21 @@ export default function DeskPage() {
         notes={notes}
         userPubkey={address}
         disabledReason={fundActionsDisabled}
+        trustless={trustlessDesk}
         onRecheck={bookIndex.status === 'error' ? bookIndex.recheck : undefined}
         onDone={reloadNotes}
       />
 
       <h2>Place limit order</h2>
       {address && bookIndex.status === 'synced' ? (
-        <OrderForm desk={verifiedDesk} notes={notes} bookIndex={bookIndex} onDone={reloadNotes} />
+        <OrderForm
+          desk={verifiedDesk}
+          notes={notes}
+          bookIndex={bookIndex}
+          userPubkey={address}
+          trustless={trustlessDesk}
+          onDone={reloadNotes}
+        />
       ) : (
         <p className="muted">
           {address ? 'Waiting for verified book synchronization.' : 'Connect your wallet to place orders.'}
@@ -296,6 +315,8 @@ export default function DeskPage() {
                 dec={dec}
                 desk={verifiedDesk}
                 bookIndex={bookIndex}
+                userPubkey={address ?? ''}
+                trustless={trustlessDesk}
                 onDone={reloadNotes}
               />
             </details>
@@ -308,6 +329,8 @@ export default function DeskPage() {
                 dec={dec}
                 desk={verifiedDesk}
                 bookIndex={bookIndex}
+                userPubkey={address ?? ''}
+                trustless={trustlessDesk}
                 onDone={reloadNotes}
               />
             </details>
@@ -336,6 +359,8 @@ export default function DeskPage() {
               notes={notes}
               orders={ordersFor(bookIndex, p.pair_id, 1)}
               bookIndex={bookIndex}
+              userPubkey={address ?? ''}
+              trustless={trustlessDesk}
               onCancel={reloadNotes}
             />
             <BookView
@@ -351,6 +376,8 @@ export default function DeskPage() {
               notes={notes}
               orders={ordersFor(bookIndex, p.pair_id, 0)}
               bookIndex={bookIndex}
+              userPubkey={address ?? ''}
+              trustless={trustlessDesk}
               onCancel={reloadNotes}
             />
           </div>
@@ -371,12 +398,16 @@ function NotesTable({
   dec,
   desk,
   bookIndex,
+  userPubkey,
+  trustless,
   onDone,
 }: {
   notes: Note[]
   dec: (id: number) => number
   desk: Desk
   bookIndex: BookIndexSnapshot
+  userPubkey: string
+  trustless: boolean
   onDone: () => void
 }) {
   return (
@@ -404,8 +435,14 @@ function NotesTable({
               {noteDisplayStatus(n, bookIndex)}
             </td>
             <td>
-              {n.status === 'active' && n.cancel && (
-                <CancelOrderButton desk={desk} note={n} onDone={onDone} />
+              {n.status === 'active' && n.cancel && userPubkey && (
+                <CancelOrderButton
+                  desk={desk}
+                  note={n}
+                  userPubkey={userPubkey}
+                  trustless={trustless}
+                  onDone={onDone}
+                />
               )}
             </td>
           </tr>

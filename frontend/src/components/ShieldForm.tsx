@@ -16,11 +16,13 @@ export default function ShieldForm({
   desk,
   userPubkey,
   disabledReason,
+  trustless = false,
   onDone,
 }: {
   desk: Desk
   userPubkey: string
   disabledReason?: string | null
+  trustless?: boolean
   onDone: () => void
 }) {
   const [assetId, setAssetId] = useState(desk.assets[0]?.asset_id ?? 1)
@@ -41,7 +43,7 @@ export default function ShieldForm({
     try {
       const asset = desk.assets.find((a) => a.asset_id === assetId)!
       const rawAmount = toRaw(amount, asset.decimals)
-      if (mosaicServer.trusted) {
+      if (mosaicServer.trusted && !trustless) {
         setStatus('Queueing shield…')
         const operation = await activity.enqueue({ kind: 'shield', desk_id: desk.id, asset_id: assetId, amount: rawAmount })
         setStatus(`Queued · ${operation.id.slice(0, 8)}`)

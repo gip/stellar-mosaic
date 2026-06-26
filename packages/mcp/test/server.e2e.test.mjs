@@ -3,6 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Keypair } from "@stellar/stellar-sdk";
+import { sep53Digest } from "@mosaic/sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMosaicMcpServer } from "../dist/server.js";
@@ -49,7 +50,9 @@ test("wallet auth handshake over the protocol, then base_shield gated by config"
 
   const ch = textOf(await client.callTool({ name: "auth_challenge", arguments: { address: kp.publicKey() } }));
   assert.ok(ch.message.includes(kp.publicKey()));
-  const signature = kp.sign(Buffer.from(ch.message, "utf8")).toString("base64");
+  const signature = kp
+    .sign(Buffer.from(sep53Digest(new TextEncoder().encode(ch.message))))
+    .toString("base64");
   const verified = textOf(
     await client.callTool({
       name: "auth_verify",

@@ -33,6 +33,7 @@ import { getLocalDesk, IndexedDbStore, listLocalDesks, putLocalDesk } from './sd
 import { currentAddress } from './wallet'
 import { defaultCatalogAssets } from './defaultCatalog'
 import { initNoirWasm } from './noirWasm'
+import { MCP_URL, SOROBAN_RPC_URL } from './config'
 
 export type AssetKind = 'Stellar' | 'Dual' | 'BaseRepresented'
 export type Asset = AssetDef & { token: string | null }
@@ -48,9 +49,6 @@ export type BaseDeploymentConfig = Omit<SdkBaseDeploymentConfig, 'abi' | 'byteco
 }
 export type { AuthChallenge, AuthSession, BaseShieldConfig, BaseShieldJob, ChainNote, ClientAction, Fill, NoteProof, Operation, OperationRequest, WalletBackupEnvelope }
 
-const RPC_URL = import.meta.env.VITE_SOROBAN_RPC ?? 'https://soroban-testnet.stellar.org'
-const MCP_URL = import.meta.env.VITE_MCP_URL ?? 'http://127.0.0.1:8788/mcp'
-
 export class ApiError extends Error {
   status: number
 
@@ -63,7 +61,7 @@ export class ApiError extends Error {
 const mcp = createMcpClient({ url: MCP_URL })
 const deskCache = new Map<string, Desk>()
 const chain = new ChainEventSource({
-  network: { rpcUrl: RPC_URL, networkPassphrase: Networks.TESTNET },
+  network: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase: Networks.TESTNET },
   startLedger: 0,
 })
 
@@ -137,8 +135,8 @@ export async function withClientAction<T>(action: ClientAction, run: () => Promi
 
 export const api = {
   mcp: () => mcp,
-  listDesks: () => wrap(async () => mergeDesks(
-    await mcp.listDesks().catch(() => [] as Desk[]),
+  listDesks: (includeRemote = false) => wrap(async () => mergeDesks(
+    includeRemote ? await mcp.listDesks().catch(() => [] as Desk[]) : [],
     (await listLocalDesks()) as Desk[],
   )),
   getDesk: (id: string) => wrap(() => getDesk(id)),
@@ -173,12 +171,12 @@ export const api = {
     if (!address) throw new ApiError(401, 'Connect Freighter before deploying a trustless desk.')
     const signer = new FreighterSigner(address)
     const { client } = createBrowserClient({
-      network: { rpcUrl: RPC_URL, networkPassphrase: Networks.TESTNET },
+      network: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase: Networks.TESTNET },
       signer,
       store: new IndexedDbStore(),
       initNoir: initNoirWasm,
     })
-    const startLedger = (await new rpc.Server(RPC_URL).getLatestLedger()).sequence
+    const startLedger = (await new rpc.Server(SOROBAN_RPC_URL).getLatestLedger()).sequence
     const deployed = await client.deploy({
       name: body.name,
       assets: body.assets.map((asset) => ({
@@ -211,10 +209,8 @@ export const api = {
       deskCache.set(desk.id, desk)
       return desk
     }),
-  listCatalogAssets: () => wrap(async () => {
-    const session = await mcp.session().catch(() => null)
-    return session ? await mcp.listAssets() : defaultCatalogAssets()
-  }),
+  listCatalogAssets: (includeRemote = false) =>
+    wrap(() => includeRemote ? mcp.listAssets() : Promise.resolve(defaultCatalogAssets())),
   proposeAsset: (body: ProposeAssetBody) => wrap(() => mcp.proposeAsset(body)),
   trustAsset: (id: string) => wrap(() => mcp.trustAsset(id)),
   untrustAsset: (id: string) => wrap(() => mcp.untrustAsset(id)),

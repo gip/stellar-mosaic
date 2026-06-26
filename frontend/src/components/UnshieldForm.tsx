@@ -7,6 +7,7 @@ import { maxIn, planAssembly } from '../orderPlan'
 import type { Note } from '../notes'
 import { useRecovery } from '../RecoveryContext'
 import { useActivity } from '../ActivityContext'
+import { unshieldTrustless } from '../trustless'
 
 function parseAmount(amount: string, decimals: number): bigint | null {
   if (amount.trim() === '') return null
@@ -23,12 +24,14 @@ export default function UnshieldForm({
   notes,
   userPubkey,
   disabledReason,
+  trustless = false,
   onDone,
 }: {
   desk: Desk
   notes: Note[]
   userPubkey: string
   disabledReason?: string | null
+  trustless?: boolean
   onDone: () => void
 }) {
   const [assetId, setAssetId] = useState(desk.assets[0]?.asset_id ?? 1)
@@ -84,12 +87,23 @@ export default function UnshieldForm({
     setError(null)
     setStatus(null)
     try {
-      setStatus('Queueing unshield…')
-      const operation = await activity.enqueue({
-        kind: 'unshield', desk_id: desk.id, asset_id: assetId,
-        amount: amountRaw.toString(), recipient: recipient.trim(),
-      })
-      setStatus(`Queued · ${operation.id.slice(0, 8)}`)
+      if (trustless) {
+        setStatus('Submitting with Freighter…')
+        await unshieldTrustless(desk, {
+          address: userPubkey,
+          assetId,
+          amount: amountRaw.toString(),
+          recipient: recipient.trim(),
+        })
+        setStatus('Unshielded')
+      } else {
+        setStatus('Queueing unshield…')
+        const operation = await activity.enqueue({
+          kind: 'unshield', desk_id: desk.id, asset_id: assetId,
+          amount: amountRaw.toString(), recipient: recipient.trim(),
+        })
+        setStatus(`Queued · ${operation.id.slice(0, 8)}`)
+      }
       onDone()
     } catch (e) {
       setError(errorMessage(e))

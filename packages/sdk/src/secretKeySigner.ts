@@ -6,6 +6,7 @@
 import { Keypair, TransactionBuilder, type Transaction } from "@stellar/stellar-sdk";
 import { Buffer } from "buffer";
 import type { StellarSigner } from "./ports.js";
+import { sep53Digest } from "./sep53.js";
 
 export class SecretKeySigner implements StellarSigner {
   private readonly kp: Keypair;
@@ -30,6 +31,7 @@ export class SecretKeySigner implements StellarSigner {
   }
 
   async signMessage(message: Uint8Array): Promise<Uint8Array> {
-    return Uint8Array.from(this.kp.sign(Buffer.from(message)));
+    // SEP-0053: sign the prefixed SHA-256 digest, matching Freighter and the MCP auth verifier.
+    return Uint8Array.from(this.kp.sign(Buffer.from(sep53Digest(message))));
   }
 }

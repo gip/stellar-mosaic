@@ -53,6 +53,10 @@ export async function getLocalDesk(id: string): Promise<Desk | undefined> {
   return (await db()).get('desks', id)
 }
 
+export async function hasLocalDesk(id: string): Promise<boolean> {
+  return !!(await getLocalDesk(id))
+}
+
 export async function putLocalDesk(desk: Desk): Promise<void> {
   await (await db()).put('desks', desk)
 }
