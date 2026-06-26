@@ -20,6 +20,7 @@ import type {
   SubmitResult,
   Submitter,
 } from "./ports.js";
+import { ActivityHistory, type ActivityStore } from "./activity.js";
 
 function b64FromScBytes(value: unknown): string {
   const native = scValToNative(value as xdr.ScVal);
@@ -51,6 +52,7 @@ export interface SponsoredSubmitterOptions {
   signer: StellarSigner;
   desks: DeskProvider;
   mcp: McpClient;
+  activity?: ActivityStore;
   /** Current leased client action, supplied by the operation runner. */
   lease?: () => ClientActionLease | undefined;
 }
@@ -63,6 +65,7 @@ export class SponsoredSubmitter implements Submitter {
   private readonly desks: DeskProvider;
   private readonly mcp: McpClient;
   private readonly lease?: () => ClientActionLease | undefined;
+  private readonly activity: ActivityHistory;
 
   constructor(opts: SponsoredSubmitterOptions) {
     this.network = opts.network;
@@ -70,38 +73,75 @@ export class SponsoredSubmitter implements Submitter {
     this.desks = opts.desks;
     this.mcp = opts.mcp;
     this.lease = opts.lease;
+    this.activity = new ActivityHistory(opts.activity);
   }
 
   async submit(call: ContractCall): Promise<SubmitResult> {
     if (!call.deskId) throw new Error("Sponsored submission requires call.deskId.");
     const lease = this.lease?.();
-    switch (call.method) {
-      case "shield":
-        return this.mcp.relayShield(call.deskId, await this.buildSponsoredShield(call), lease);
-      case "submit_order":
-        return this.mcp.relayOrder(call.deskId, b64FromScBytes(call.args[0]), b64FromScBytes(call.args[1]), lease);
-      case "join":
-        return this.mcp.relayJoin(call.deskId, b64FromScBytes(call.args[0]), b64FromScBytes(call.args[1]), lease);
-      case "unshield":
-        return this.mcp.relayUnshield(
-          call.deskId,
-          addressFromScVal(call.args[0]),
-          b64FromScBytes(call.args[1]),
-          b64FromScBytes(call.args[2]),
-          lease,
-        );
-      case "cancel_order":
-        return this.mcp.relayCancel(
-          call.deskId,
-          numberFromScVal(call.args[0]),
-          numberFromScVal(call.args[1]),
-          b64FromScBytes(call.args[2]),
-          b64FromScBytes(call.args[3]),
-          lease,
-        );
-      default:
-        throw new Error(`Unsupported sponsored contract method: ${call.method}`);
+    await this.recordTx(call, "submitted");
+    let result: SubmitResult;
+    try {
+      switch (call.method) {
+        case "shield":
+          result = await this.mcp.relayShield(call.deskId, await this.buildSponsoredShield(call), lease);
+          break;
+        case "submit_order":
+          result = await this.mcp.relayOrder(call.deskId, b64FromScBytes(call.args[0]), b64FromScBytes(call.args[1]), lease);
+          break;
+        case "join":
+          result = await this.mcp.relayJoin(call.deskId, b64FromScBytes(call.args[0]), b64FromScBytes(call.args[1]), lease);
+          break;
+        case "unshield":
+          result = await this.mcp.relayUnshield(
+            call.deskId,
+            addressFromScVal(call.args[0]),
+            b64FromScBytes(call.args[1]),
+            b64FromScBytes(call.args[2]),
+            lease,
+          );
+          break;
+        case "cancel_order":
+          result = await this.mcp.relayCancel(
+            call.deskId,
+            numberFromScVal(call.args[0]),
+            numberFromScVal(call.args[1]),
+            b64FromScBytes(call.args[2]),
+            b64FromScBytes(call.args[3]),
+            lease,
+          );
+          break;
+        default:
+          throw new Error(`Unsupported sponsored contract method: ${call.method}`);
+      }
+    } catch (error) {
+      await this.recordTx(call, "failed", undefined, error instanceof Error ? error.message : String(error));
+      throw error;
     }
+    await this.recordTx(call, "succeeded", result.txHash, undefined, result.status);
+    return result;
+  }
+
+  private async recordTx(
+    call: ContractCall,
+    status: "submitted" | "succeeded" | "failed",
+    hash?: string,
+    error?: string,
+    resultStatus?: string,
+  ): Promise<void> {
+    await this.activity
+      .record({
+        kind: "transaction",
+        idempotency_key: hash ? `tx:${hash}:${status}` : undefined,
+        status,
+        desk_id: call.deskId,
+        contract_id: call.contractId,
+        method: call.method,
+        tx_hash: hash,
+        message: error,
+        metadata: { sponsored: true, result_status: resultStatus, error },
+      })
+      .catch(() => undefined);
   }
 
   private async buildSponsoredShield(call: ContractCall): Promise<string> {

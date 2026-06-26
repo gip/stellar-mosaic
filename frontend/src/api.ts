@@ -1,10 +1,11 @@
 import { Noir } from '@noir-lang/noir_js'
-import { Networks } from '@stellar/stellar-sdk'
+import { BASE_FEE, Contract, Networks, rpc, scValToNative, TransactionBuilder } from '@stellar/stellar-sdk'
 import {
   ChainEventSource,
   errorMessage,
   LocalPathProvider,
   makeNoirCompressor,
+  replayNoteEvents,
   type AssetDef,
   type AuthChallenge,
   type AuthSession,
@@ -21,15 +22,15 @@ import {
   type OperationRequest,
   type PairDef,
   type ProposeAssetBody as SdkProposeAssetBody,
+  type TreeEvent,
   type WalletBackupEnvelope,
 } from '@mosaic/sdk'
 import { createBrowserClient } from '@mosaic/sdk/browser'
 import { circuitProvider } from '@mosaic/sdk/assets/browser'
 import { createMcpClient } from '@mosaic/sdk/mcp-client'
-import { rpc } from '@stellar/stellar-sdk'
 import type { Abi, Hex } from 'viem'
 import { FreighterSigner } from './sdk/freighterSigner'
-import { getLocalDesk, IndexedDbStore, listLocalDesks, putLocalDesk } from './sdk/indexedDbStore'
+import { browserActivityStore, browserEventCache, getLocalDesk, IndexedDbStore, listLocalDesks, putLocalDesk } from './sdk/indexedDbStore'
 import { currentAddress } from './wallet'
 import { defaultCatalogAssets } from './defaultCatalog'
 import { initNoirWasm } from './noirWasm'
@@ -63,24 +64,31 @@ const deskCache = new Map<string, Desk>()
 const chain = new ChainEventSource({
   network: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase: Networks.TESTNET },
   startLedger: 0,
+  cache: browserEventCache,
+  activity: browserActivityStore,
 })
 
 let compressNoir: Noir | undefined
+const compress = makeNoirCompressor({
+  execute: async (inputs) => {
+    await initNoirWasm()
+    compressNoir ??= new Noir(await circuitProvider('compress'))
+    return compressNoir.execute(inputs as never)
+  },
+})
 const source = new LocalPathProvider({
-  compress: makeNoirCompressor({
-    execute: async (inputs) => {
-      await initNoirWasm()
-      compressNoir ??= new Noir(await circuitProvider('compress'))
-      return compressNoir.execute(inputs as never)
-    },
-  }),
+  compress,
   events: async (deskId) => {
     const desk = await getDesk(deskId)
-    return chain.events(desk.contract_id, desk.event_start_ledger ?? 0)
+    return chain.events(desk.contract_id, desk.event_start_ledger ?? 0, {
+      validateReplay: (events) => validateReplayRoot(desk, events),
+    })
   },
   fills: async (deskId) => {
     const desk = await getDesk(deskId)
-    return chain.fills(desk.contract_id, desk.event_start_ledger ?? 0)
+    return chain.fills(desk.contract_id, desk.event_start_ledger ?? 0, {
+      validateReplay: (events) => validateReplayRoot(desk, events),
+    })
   },
 })
 
@@ -115,6 +123,37 @@ async function getDesk(id: string): Promise<Desk> {
   return desk
 }
 
+function bytesToHex(value: unknown): string {
+  const bytes =
+    value instanceof Uint8Array ? value : ArrayBuffer.isView(value) ? new Uint8Array((value as ArrayBufferView).buffer) : null
+  if (!bytes) throw new Error('contract returned non-bytes root')
+  return `0x${Array.from(bytes, (v) => v.toString(16).padStart(2, '0')).join('')}`
+}
+
+async function readContractRoot(desk: Desk): Promise<string> {
+  const server = new rpc.Server(SOROBAN_RPC_URL)
+  const account = await server.getAccount(desk.sponsor_pubkey)
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+    .addOperation(new Contract(desk.contract_id).call('root'))
+    .setTimeout(30)
+    .build()
+  const simulation = await server.simulateTransaction(tx)
+  if (rpc.Api.isSimulationError(simulation) || !simulation.result) {
+    throw new Error('root simulation failed')
+  }
+  return bytesToHex(scValToNative(simulation.result.retval))
+}
+
+async function validateReplayRoot(desk: Desk, events: TreeEvent[]): Promise<void> {
+  const [state, root] = await Promise.all([
+    replayNoteEvents({ events, compress }),
+    readContractRoot(desk),
+  ])
+  if (state.root.toLowerCase() !== root.toLowerCase()) {
+    throw new Error('retained event replay root does not match the live contract root')
+  }
+}
+
 function mergeDesks(remote: Desk[], local: Desk[]): Desk[] {
   const byId = new Map<string, Desk>()
   for (const desk of remote) byId.set(desk.id, desk)
@@ -140,7 +179,7 @@ export const api = {
     (await listLocalDesks()) as Desk[],
   )),
   getDesk: (id: string) => wrap(() => getDesk(id)),
-  getRoot: (id: string) => wrap(async () => ({ root: await source.root(id) })),
+  getRoot: (id: string) => wrap(async () => ({ root: await readContractRoot(await getDesk(id)) })),
   importDesk: (body: {
     name: string
     contract_id: string
@@ -174,7 +213,9 @@ export const api = {
       network: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase: Networks.TESTNET },
       signer,
       store: new IndexedDbStore(),
+      activity: browserActivityStore,
       initNoir: initNoirWasm,
+      eventCache: browserEventCache,
     })
     const startLedger = (await new rpc.Server(SOROBAN_RPC_URL).getLatestLedger()).sequence
     const deployed = await client.deploy({

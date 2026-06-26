@@ -42,7 +42,7 @@ export function useBookIndex(desk: Desk | null, networkPassphrase: string | null
       running = true
       try {
         const next = await syncBookIndex(
-          desk.contract_id,
+          desk,
           desk.sponsor_pubkey,
           network,
           desk.event_start_ledger,

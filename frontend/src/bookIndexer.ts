@@ -1,6 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
-import { BASE_FEE, Contract, Networks, TransactionBuilder, rpc, scValToNative } from '@stellar/stellar-sdk'
-import { errorMessage } from '@mosaic/sdk'
+import { BASE_FEE, Contract, Networks, TransactionBuilder, nativeToScVal, rpc, scValToNative } from '@stellar/stellar-sdk'
+import { errorMessage, parseLedgerRangeError } from '@mosaic/sdk'
 import type { AssetKind, Desk } from './api'
 import { Buffer } from 'buffer'
 import { SOROBAN_RPC_URL } from './config'
@@ -208,6 +208,182 @@ async function verifyRelease(
   }
 }
 
+function bytesHex(value: unknown): string {
+  const bytes =
+    value instanceof Uint8Array ? value : ArrayBuffer.isView(value) ? new Uint8Array((value as ArrayBufferView).buffer) : null
+  if (!bytes) throw new Error('expected bytes from contract view')
+  return `0x${Array.from(bytes, (v) => v.toString(16).padStart(2, '0')).join('')}`
+}
+
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (value instanceof Map) return Object.fromEntries(value.entries()) as Record<string, unknown>
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  throw new Error(`invalid ${label}`)
+}
+
+function kindFromNative(value: unknown): AssetKind {
+  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  if (text.includes('BaseRepresented')) return 'BaseRepresented'
+  if (text.includes('Dual')) return 'Dual'
+  if (text.includes('Stellar')) return 'Stellar'
+  throw new Error('invalid asset kind from contract')
+}
+
+function normalizeAddress(value: string | null | undefined): string | null {
+  return value ? value.toLowerCase() : null
+}
+
+async function simulateView(
+  server: rpc.Server,
+  contractId: string,
+  sourceAccount: string,
+  networkPassphrase: string,
+  method: string,
+  args: ReturnType<typeof nativeToScVal>[] = [],
+): Promise<unknown> {
+  const account = await server.getAccount(sourceAccount)
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase })
+    .addOperation(new Contract(contractId).call(method, ...args))
+    .setTimeout(30)
+    .build()
+  const simulation = await server.simulateTransaction(tx)
+  if (rpc.Api.isSimulationError(simulation) || !simulation.result) {
+    throw new Error(`${method} simulation failed${rpc.Api.isSimulationError(simulation) ? `: ${errorMessage(simulation.error)}` : ''}`)
+  }
+  return scValToNative(simulation.result.retval)
+}
+
+async function liveProtocolMeta(
+  server: rpc.Server,
+  contractId: string,
+  sourceAccount: string,
+  networkPassphrase: string,
+): Promise<Pick<BookMeta, 'schema_version' | 'vk_hashes'>> {
+  const native = record(await simulateView(server, contractId, sourceAccount, networkPassphrase, 'protocol_config'), 'protocol_config')
+  return {
+    schema_version: number(native.schema_version, 'schema version'),
+    vk_hashes: [
+      bytesHex(native.lift_vk_hash),
+      bytesHex(native.unshield_vk_hash),
+      bytesHex(native.cancel_vk_hash),
+      bytesHex(native.join_vk_hash),
+    ],
+  }
+}
+
+async function verifyLiveRelease(
+  server: rpc.Server,
+  contractId: string,
+  sourceAccount: string,
+  networkPassphrase: string,
+): Promise<Pick<BookMeta, 'schema_version' | 'vk_hashes'>> {
+  const meta = await liveProtocolMeta(server, contractId, sourceAccount, networkPassphrase)
+  const release = await manifest()
+  if (meta.schema_version !== release.schema_version) throw new BookIntegrityError('contract schema does not match release manifest')
+  const expectedVks = [
+    release.vk_hashes.lift,
+    release.vk_hashes.unshield,
+    release.vk_hashes.cancel,
+    release.vk_hashes.join,
+  ].map(normalizedHash)
+  if (!meta.vk_hashes || meta.vk_hashes.map(normalizedHash).join() !== expectedVks.join()) {
+    throw new BookIntegrityError('contract verification-key hashes do not match release manifest')
+  }
+  const entries = await server.getLedgerEntries(new Contract(contractId).getFootprint())
+  const data = entries.entries[0]?.val.contractData().val()
+  if (!data || data.switch().name !== 'scvContractInstance') throw new BookIntegrityError('contract instance ledger entry is missing')
+  const executable = data.instance().executable()
+  if (executable.switch().name !== 'contractExecutableWasm') throw new BookIntegrityError('desk is not a WASM contract')
+  const wasmHash = Buffer.from(executable.wasmHash()).toString('hex')
+  if (normalizedHash(wasmHash) !== normalizedHash(release.wasm_hash)) {
+    throw new BookIntegrityError('contract WASM hash does not match release manifest')
+  }
+  return meta
+}
+
+async function liveAsset(
+  server: rpc.Server,
+  contractId: string,
+  sourceAccount: string,
+  networkPassphrase: string,
+  asset: Desk['assets'][number],
+): Promise<IndexedAsset> {
+  const native = await simulateView(
+    server,
+    contractId,
+    sourceAccount,
+    networkPassphrase,
+    'asset',
+    [nativeToScVal(asset.asset_id, { type: 'u32' })],
+  )
+  if (native === null || native === undefined) throw new BookIntegrityError(`asset ${asset.asset_id} is not registered on-chain`)
+  const r = record(native, `asset ${asset.asset_id}`)
+  const kind = kindFromNative(r.kind)
+  if (kind !== asset.kind) throw new BookIntegrityError(`asset ${asset.asset_id} kind does not match the contract`)
+  const nativeToken = typeof r.token === 'string' ? r.token : null
+  const token = kind === 'BaseRepresented' ? (asset.token ?? '') : (nativeToken ?? asset.token ?? '')
+  if (kind !== 'BaseRepresented' && nativeToken && normalizeAddress(nativeToken) !== normalizeAddress(asset.token)) {
+    throw new BookIntegrityError(`asset ${asset.asset_id} token does not match the contract`)
+  }
+  return {
+    id: '',
+    scope: '',
+    asset_id: asset.asset_id,
+    token,
+    kind,
+  }
+}
+
+async function livePairCount(
+  server: rpc.Server,
+  contractId: string,
+  sourceAccount: string,
+  networkPassphrase: string,
+): Promise<number> {
+  return number(await simulateView(server, contractId, sourceAccount, networkPassphrase, 'pair_count'), 'pair count')
+}
+
+async function liveBook(
+  server: rpc.Server,
+  contractId: string,
+  sourceAccount: string,
+  networkPassphrase: string,
+  scope: string,
+  pairId: number,
+  side: number,
+): Promise<IndexedOrder[]> {
+  const native = await simulateView(
+    server,
+    contractId,
+    sourceAccount,
+    networkPassphrase,
+    'book',
+    [nativeToScVal(pairId, { type: 'u32' }), nativeToScVal(side, { type: 'u32' })],
+  )
+  const entries = Array.isArray(native) ? native : []
+  return entries.map((entry, index) => {
+    const r = record(entry, 'book entry')
+    const orderId = bytesHex(r.order_id)
+    return {
+      id: orderKey(scope, pairId, side, orderId),
+      scope,
+      book: bookKey(scope, pairId, side),
+      pair_id: pairId,
+      side,
+      order_id: orderId,
+      amount_in: bigint(r.amount_in, 'amount_in').toString(),
+      min_out: bigint(r.min_out, 'min_out').toString(),
+      remaining_in: bigint(r.remaining_in, 'remaining_in').toString(),
+      output_owner_tag: bytesHex(r.output_owner_tag),
+      cancel_owner_tag: bytesHex(r.cancel_owner_tag),
+      order_leaf: bytesHex(r.order_leaf),
+      expiry: bigint(r.expiry, 'expiry').toString(),
+      partial_allowed: Boolean(r.partial_allowed),
+      priority_sequence: (index + 1).toString(),
+    }
+  })
+}
+
 /** Apply one RPC page and its cursor atomically. Exported for deterministic reducer tests. */
 export async function applyBookEventPage(
   scope: string,
@@ -268,6 +444,10 @@ export async function applyBookEventPage(
       if (!meta.initialized) throw new Error('ordupsert before bookinit')
       const f = fields(native, 12)
       const next = bigint(f[0], 'book sequence')
+      if (next <= sequence) {
+        await tx.objectStore('processed').put({ id: processedId, scope })
+        continue
+      }
       if (next !== sequence + 1n) throw new Error(`book sequence gap: expected ${sequence + 1n}, got ${next}`)
       const pair = number(f[1], 'pair id')
       const side = number(f[2], 'side')
@@ -298,6 +478,10 @@ export async function applyBookEventPage(
       if (!meta.initialized) throw new Error('ordremove before bookinit')
       const f = fields(native, 5)
       const next = bigint(f[0], 'book sequence')
+      if (next <= sequence) {
+        await tx.objectStore('processed').put({ id: processedId, scope })
+        continue
+      }
       if (next !== sequence + 1n) throw new Error(`book sequence gap: expected ${sequence + 1n}, got ${next}`)
       const pair = number(f[1], 'pair id')
       const side = number(f[2], 'side')
@@ -390,12 +574,100 @@ async function readBookSequence(
   return bigint(scValToNative(simulation.result.retval), 'book_sequence')
 }
 
+async function writeLiveSnapshot(
+  scope: string,
+  protocol: Pick<BookMeta, 'schema_version' | 'vk_hashes'>,
+  assets: IndexedAsset[],
+  pairs: IndexedPair[],
+  orders: IndexedOrder[],
+  sequence: bigint,
+): Promise<void> {
+  const db = await database()
+  const tx = db.transaction(['meta', 'orders', 'assets', 'pairs', 'processed'], 'readwrite')
+  await tx.objectStore('meta').delete(scope)
+  for (const store of ['orders', 'assets', 'pairs', 'processed'] as const) {
+    let cursor = await tx.objectStore(store).index('by-scope').openCursor(IDBKeyRange.only(scope))
+    while (cursor) {
+      await cursor.delete()
+      cursor = await cursor.continue()
+    }
+  }
+  await tx.objectStore('meta').put({
+    scope,
+    initialized: true,
+    schema_version: protocol.schema_version,
+    vk_hashes: protocol.vk_hashes,
+    release_verified: true,
+    last_sequence: sequence.toString(),
+    target_sequence: sequence.toString(),
+    latest_ledger: 0,
+  })
+  for (const asset of assets) await tx.objectStore('assets').put(asset)
+  for (const pair of pairs) await tx.objectStore('pairs').put(pair)
+  for (const order of orders) await tx.objectStore('orders').put(order)
+  await tx.done
+}
+
+async function recoverLiveBookIndex(
+  scope: string,
+  server: rpc.Server,
+  desk: Desk,
+  sourceAccount: string,
+  networkPassphrase: string,
+  oldestRetainedLedger: number,
+): Promise<BookIndexSnapshot> {
+  const protocol = await verifyLiveRelease(server, desk.contract_id, sourceAccount, networkPassphrase)
+  const assetRows = await Promise.all(
+    desk.assets.map(async (asset) => {
+      const chain = await liveAsset(server, desk.contract_id, sourceAccount, networkPassphrase, asset)
+      return {
+        ...chain,
+        id: `${scope}\u0000${chain.asset_id}`,
+        scope,
+      }
+    }),
+  )
+  const pairCount = await livePairCount(server, desk.contract_id, sourceAccount, networkPassphrase)
+  if (pairCount !== desk.pairs.length) {
+    throw new BookIntegrityError('contract pair count does not match the local desk definition')
+  }
+  const pairs = desk.pairs
+    .map((pair) => ({
+      id: `${scope}\u0000${pair.pair_id}`,
+      scope,
+      pair_id: pair.pair_id,
+      base_asset: pair.base_asset,
+      quote_asset: pair.quote_asset,
+    }))
+    .sort((a, b) => a.pair_id - b.pair_id)
+  const sequence = await readBookSequence(server, desk.contract_id, sourceAccount, networkPassphrase)
+  const orderGroups = await Promise.all(
+    pairs.flatMap((pair) => [
+      liveBook(server, desk.contract_id, sourceAccount, networkPassphrase, scope, pair.pair_id, 0),
+      liveBook(server, desk.contract_id, sourceAccount, networkPassphrase, scope, pair.pair_id, 1),
+    ]),
+  )
+  await writeLiveSnapshot(scope, protocol, assetRows, pairs, orderGroups.flat(), sequence)
+
+  let response: rpc.Api.GetEventsResponse
+  let cursor: string | undefined
+  do {
+    response = cursor
+      ? await server.getEvents({ filters: [{ type: 'contract', contractIds: [desk.contract_id] }], cursor, limit: 1000 })
+      : await server.getEvents({ filters: [{ type: 'contract', contractIds: [desk.contract_id] }], startLedger: oldestRetainedLedger, limit: 1000 })
+    cursor = response.cursor
+    await applyBookEventPage(scope, response.events, response.cursor, response.latestLedger)
+  } while (response.events.length === 1000)
+  return snapshot(scope)
+}
+
 export async function syncBookIndex(
-  contractId: string,
+  desk: Desk,
   sourceAccount: string,
   networkPassphrase: string = Networks.TESTNET,
   eventStartLedger?: number | null,
 ): Promise<BookIndexSnapshot> {
+  const contractId = desk.contract_id
   const scope = scopeOf(networkPassphrase, contractId)
   const server = new rpc.Server(SOROBAN_RPC_URL)
   const transient = async (error: unknown) => ({
@@ -415,6 +687,18 @@ export async function syncBookIndex(
       ? await server.getEvents({ filters: [{ type: 'contract', contractIds: [contractId] }], cursor: meta.cursor, limit: 1000 })
       : await server.getEvents({ filters: [{ type: 'contract', contractIds: [contractId] }], startLedger: eventStartLedger!, limit: 1000 })
   } catch (error) {
+    const range = parseLedgerRangeError(error)
+    if (range && !meta.cursor) {
+      try {
+        return await recoverLiveBookIndex(scope, server, desk, sourceAccount, networkPassphrase, range.oldest)
+      } catch (recoveryError) {
+        if (recoveryError instanceof BookIntegrityError) {
+          await setFatal(scope, recoveryError.message)
+          return snapshot(scope)
+        }
+        return transient(recoveryError)
+      }
+    }
     return transient(error)
   }
   try {

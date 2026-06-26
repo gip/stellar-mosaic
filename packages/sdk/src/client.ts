@@ -11,6 +11,7 @@ import { fieldToBytes32, randomField } from "./field.js";
 import { recipientField } from "./recipient.js";
 import { nowMs, nowSeconds } from "./time.js";
 import { NoteManager } from "./notes.js";
+import { ActivityHistory, type ActivityEvent, type ActivityStore } from "./activity.js";
 import { planAssembly, type AssemblyStep, type JoinInputRef } from "./orderPlan.js";
 import { makeWalletMath, type WalletMath } from "./noirMath.js";
 import { makeProver, type Prover } from "./prove.js";
@@ -43,6 +44,8 @@ export interface MosaicPorts {
   /** Read-only on-chain note state (default: LocalPathProvider). */
   source: NoteSource;
   submitter: Submitter;
+  /** Optional append-only public-safe activity history. */
+  activity?: ActivityStore;
   /** Resolves desk config (contract id, assets, pairs). */
   desks: { get(deskId: string): Promise<DeskConfig> };
   circuits: CircuitProvider;
@@ -97,13 +100,38 @@ export class MosaicClient {
   private readonly wallet: WalletMath;
   private readonly prover: Prover;
   private readonly logger: MosaicLogger;
+  private readonly activity: ActivityHistory;
 
   constructor(ports: MosaicPorts) {
     this.p = ports;
     this.logger = ports.logger ?? getMosaicLogger();
-    this.notes = new NoteManager(ports.store, ports.onNotesChanged);
+    this.activity = new ActivityHistory(ports.activity);
+    this.notes = new NoteManager(ports.store, ports.onNotesChanged, ports.activity);
     this.wallet = makeWalletMath(ports.circuits, ports.noirRuntime);
     this.prover = makeProver(ports.circuits, ports.noirRuntime);
+  }
+
+  private actionId(): string {
+    return globalThis.crypto?.randomUUID?.() ?? `action-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  private async walletAddress(): Promise<string | undefined> {
+    try {
+      return await this.p.signer.address();
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async recordActivity(event: ActivityEvent): Promise<void> {
+    try {
+      await this.activity.record({
+        network: this.p.network.networkPassphrase,
+        ...event,
+      });
+    } catch (error) {
+      this.logger.debug("activity record failed", { error });
+    }
   }
 
   private async prepareNotes(notes: Note[]): Promise<Note[]> {
@@ -157,8 +185,18 @@ export class MosaicClient {
 
   async shield(params: ShieldParams): Promise<{ note: Note }> {
     let noteId: string | undefined;
+    const actionId = this.actionId();
+    const wallet = await this.walletAddress();
     try {
       this.logger.info("shield started", { deskId: params.deskId, assetId: params.asset_id, amount: params.amount });
+      await this.recordActivity({
+        kind: "user_action",
+        action: "shield",
+        status: "started",
+        wallet_address: wallet,
+        desk_id: params.deskId,
+        metadata: { action_id: actionId, asset_id: params.asset_id, amount: params.amount },
+      });
       const desk = await this.p.desks.get(params.deskId);
       const asset = desk.assets.find((a) => a.asset_id === params.asset_id);
       if (!asset) throw new Error("The requested asset is not registered on this desk.");
@@ -183,6 +221,16 @@ export class MosaicClient {
       [note] = await this.prepareNotes([note]);
       noteId = note.id;
       await this.notes.add(note);
+      await this.recordActivity({
+        kind: "user_action",
+        action: "shield",
+        status: "staged",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        note_id: note.id,
+        owner_tag,
+        metadata: { action_id: actionId, asset_id: params.asset_id, symbol: asset.symbol, amount: params.amount },
+      });
       this.logger.info("shield note staged", { deskId: desk.id, noteId, assetId: params.asset_id, symbol: asset.symbol });
 
       const source = await this.p.signer.address();
@@ -198,12 +246,45 @@ export class MosaicClient {
         ],
       });
       await this.notes.update(note.id, { txHash: res.txHash });
+      await this.recordActivity({
+        kind: "user_action",
+        action: "shield",
+        status: "submitted",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        tx_hash: res.txHash,
+        note_id: note.id,
+        owner_tag,
+        metadata: { action_id: actionId, method: "shield", status: res.status },
+      });
       this.logger.info("shield transaction submitted", { deskId: desk.id, noteId, txHash: res.txHash });
       try {
         await this.waitForConfirm(desk.id, note.id, 30_000);
+        await this.recordActivity({
+          kind: "user_action",
+          action: "shield",
+          status: "succeeded",
+          wallet_address: wallet,
+          desk_id: desk.id,
+          tx_hash: res.txHash,
+          note_id: note.id,
+          owner_tag,
+          metadata: { action_id: actionId, indexed: true },
+        });
         this.logger.info("shield note indexed", { deskId: desk.id, noteId });
       } catch (error) {
         this.logger.warn("shield note not indexed before timeout", { deskId: desk.id, noteId, error });
+        await this.recordActivity({
+          kind: "user_action",
+          action: "shield",
+          status: "succeeded",
+          wallet_address: wallet,
+          desk_id: desk.id,
+          tx_hash: res.txHash,
+          note_id: note.id,
+          owner_tag,
+          metadata: { action_id: actionId, indexed: false, index_timeout: true },
+        });
         /* shield is final; leave it pending until the loop reconciles it */
       }
       return { note: (await this.notes.forDesk(desk.id)).find((n) => n.id === note.id) ?? note };
@@ -214,6 +295,16 @@ export class MosaicClient {
         message: errorMessage(error),
         error: serializeError(error),
       });
+      await this.recordActivity({
+        kind: "error",
+        action: "shield",
+        status: "failed",
+        wallet_address: wallet,
+        desk_id: params.deskId,
+        note_id: noteId,
+        message: errorMessage(error),
+        metadata: { action_id: actionId, error: serializeError(error) },
+      });
       throw error;
     }
   }
@@ -222,15 +313,59 @@ export class MosaicClient {
 
   /** Produce one confirmed note of exactly `target` of `asset_id` (split/merge as needed). */
   async assemble(deskId: string, asset_id: number, target: Amount): Promise<{ note: Note }> {
-    const all = await this.notes.forDesk(deskId);
-    const plan = planAssembly(all, asset_id, BigInt(target));
-    if (plan.kind === "impossible") throw new Error(plan.reason);
-    if (plan.kind === "direct") {
-      const note = all.find((n) => n.id === plan.noteId);
-      if (!note) throw new Error("The selected private note is no longer available.");
+    const actionId = this.actionId();
+    const wallet = await this.walletAddress();
+    await this.recordActivity({
+      kind: "user_action",
+      action: "assemble",
+      status: "started",
+      wallet_address: wallet,
+      desk_id: deskId,
+      metadata: { action_id: actionId, asset_id, target },
+    });
+    try {
+      const all = await this.notes.forDesk(deskId);
+      const plan = planAssembly(all, asset_id, BigInt(target));
+      if (plan.kind === "impossible") throw new Error(plan.reason);
+      if (plan.kind === "direct") {
+        const note = all.find((n) => n.id === plan.noteId);
+        if (!note) throw new Error("The selected private note is no longer available.");
+        await this.recordActivity({
+          kind: "user_action",
+          action: "assemble",
+          status: "succeeded",
+          wallet_address: wallet,
+          desk_id: deskId,
+          note_id: note.id,
+          owner_tag: note.owner_tag,
+          metadata: { action_id: actionId, mode: "direct", asset_id, target },
+        });
+        return { note };
+      }
+      const note = await this.runAssembly(deskId, plan.steps, all);
+      await this.recordActivity({
+        kind: "user_action",
+        action: "assemble",
+        status: "succeeded",
+        wallet_address: wallet,
+        desk_id: deskId,
+        note_id: note.id,
+        owner_tag: note.owner_tag,
+        metadata: { action_id: actionId, mode: "join", asset_id, target, steps: plan.steps.length },
+      });
       return { note };
+    } catch (error) {
+      await this.recordActivity({
+        kind: "error",
+        action: "assemble",
+        status: "failed",
+        wallet_address: wallet,
+        desk_id: deskId,
+        message: errorMessage(error),
+        metadata: { action_id: actionId, asset_id, target, error: serializeError(error) },
+      });
+      throw error;
     }
-    return { note: await this.runAssembly(deskId, plan.steps, all) };
   }
 
   private async runAssembly(deskId: string, steps: AssemblyStep[], pool: Note[]): Promise<Note> {
@@ -256,6 +391,8 @@ export class MosaicClient {
     targetRaw: bigint,
     changeRaw: bigint,
   ): Promise<{ target: Note; change: Note | null }> {
+    const actionId = this.actionId();
+    const wallet = await this.walletAddress();
     const desk = await this.p.desks.get(deskId);
     const sk_out1 = randomField();
     const rho_out1 = randomField();
@@ -346,183 +483,366 @@ export class MosaicClient {
     change = change ? prepared[1] : null;
     await this.notes.add(target);
     if (change) await this.notes.add(change);
+    await this.recordActivity({
+      kind: "user_action",
+      action: "join",
+      status: "staged",
+      wallet_address: wallet,
+      desk_id: desk.id,
+      note_id: target.id,
+      owner_tag: target.owner_tag,
+      metadata: {
+        action_id: actionId,
+        input_note_ids: [a.id, b?.id].filter(Boolean),
+        target_amount: targetRaw.toString(),
+        change_note_id: change?.id,
+        change_amount: changeRaw.toString(),
+      },
+    });
 
-    await this.p.submitter.submit({
+    const res = await this.p.submitter.submit({
       deskId: desk.id,
       contractId: desk.contractId,
       method: "join",
       args: [this.scvBytes(bundle.proof), this.scvBytes(bundle.publicInputs)],
     });
+    await this.notes.update(target.id, { txHash: res.txHash });
+    if (change) await this.notes.update(change.id, { txHash: res.txHash });
     await this.notes.update(a.id, { status: "spent" });
     if (b) await this.notes.update(b.id, { status: "spent" });
+    await this.recordActivity({
+      kind: "user_action",
+      action: "join",
+      status: "succeeded",
+      wallet_address: wallet,
+      desk_id: desk.id,
+      tx_hash: res.txHash,
+      note_id: target.id,
+      owner_tag: target.owner_tag,
+      metadata: { action_id: actionId, change_note_id: change?.id, status: res.status },
+    });
     return { target, change };
   }
 
   // --- place order ------------------------------------------------------------------------------
 
   async placeOrder(params: OrderParams): Promise<{ note: Note }> {
-    const desk = await this.p.desks.get(params.deskId);
-    const pair = desk.pairs.find((p) => p.pair_id === params.pairId);
-    if (!pair) throw new Error("The requested pair is not registered on this desk.");
-    const assetIn = params.side === SIDE_SELL ? pair.base_asset : pair.quote_asset;
-    const assetOut = params.side === SIDE_SELL ? pair.quote_asset : pair.base_asset;
-
-    const offer = (await this.assemble(params.deskId, assetIn, params.amountIn)).note;
-    await this.waitForConfirm(params.deskId, offer.id);
-    const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
-
-    const expiry = params.expiry ?? nowSeconds() + 7 * 86400;
-    const rho_out = randomField();
-    const rho_ord = randomField();
-    const partial = params.partialAllowed ? 1 : 0;
-    const terms = await this.wallet.orderTerms({
-      sk: offer.sk,
-      rho_in: offer.rho,
-      rho_out,
-      rho_ord,
-      asset_in: assetIn,
-      amount_in: offer.amount,
-      asset_out: assetOut,
-      min_out: params.minOut,
-      expiry,
-      partial_allowed: partial,
-    });
-    const bundle = await this.prover.proveLift({
-      rho_in: offer.rho,
-      sk_o: offer.sk,
-      path: membership.siblings,
-      index_bits: membership.index_bits,
-      root: membership.root,
-      nullifier_in: terms.nullifier_in,
-      asset_in: assetIn,
-      amount_in: offer.amount,
-      asset_out: assetOut,
-      min_out: params.minOut,
-      output_owner_tag: terms.output_owner_tag,
-      cancel_owner_tag: terms.cancel_owner_tag,
-      expiry,
-      partial_allowed: partial,
-      order_leaf: terms.order_leaf,
-    });
-
-    let output: Note = {
-      id: crypto.randomUUID(),
-      deskId: desk.id,
-      role: "order-output",
-      asset_id: assetOut,
-      symbol: this.symbolOf(desk, assetOut),
-      amount: params.minOut,
-      sk: offer.sk,
-      rho: rho_out,
-      owner_tag: terms.output_owner_tag,
-      status: "active",
-      indexed: false,
-      createdAt: nowMs(),
-      cancel: {
-        rho_ord,
-        order_leaf: terms.order_leaf,
-        cancel_owner_tag: terms.cancel_owner_tag,
-        pairId: params.pairId,
+    const actionId = this.actionId();
+    const wallet = await this.walletAddress();
+    await this.recordActivity({
+      kind: "user_action",
+      action: "place_order",
+      status: "started",
+      wallet_address: wallet,
+      desk_id: params.deskId,
+      metadata: {
+        action_id: actionId,
+        pair_id: params.pairId,
         side: params.side,
-        asset_in: assetIn,
-        symbol_in: this.symbolOf(desk, assetIn),
-        amount_in: offer.amount,
+        amount_in: params.amountIn,
+        min_out: params.minOut,
+        partial_allowed: params.partialAllowed ?? false,
       },
-    };
-    [output] = await this.prepareNotes([output]);
-    await this.notes.add(output);
-    await this.p.submitter.submit({
-      deskId: desk.id,
-      contractId: desk.contractId,
-      method: "submit_order",
-      args: [this.scvBytes(bundle.proof), this.scvBytes(bundle.publicInputs)],
     });
-    await this.notes.update(offer.id, { status: "spent" });
-    return { note: output };
+    try {
+      const desk = await this.p.desks.get(params.deskId);
+      const pair = desk.pairs.find((p) => p.pair_id === params.pairId);
+      if (!pair) throw new Error("The requested pair is not registered on this desk.");
+      const assetIn = params.side === SIDE_SELL ? pair.base_asset : pair.quote_asset;
+      const assetOut = params.side === SIDE_SELL ? pair.quote_asset : pair.base_asset;
+
+      const offer = (await this.assemble(params.deskId, assetIn, params.amountIn)).note;
+      await this.waitForConfirm(params.deskId, offer.id);
+      const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
+
+      const expiry = params.expiry ?? nowSeconds() + 7 * 86400;
+      const rho_out = randomField();
+      const rho_ord = randomField();
+      const partial = params.partialAllowed ? 1 : 0;
+      const terms = await this.wallet.orderTerms({
+        sk: offer.sk,
+        rho_in: offer.rho,
+        rho_out,
+        rho_ord,
+        asset_in: assetIn,
+        amount_in: offer.amount,
+        asset_out: assetOut,
+        min_out: params.minOut,
+        expiry,
+        partial_allowed: partial,
+      });
+      const bundle = await this.prover.proveLift({
+        rho_in: offer.rho,
+        sk_o: offer.sk,
+        path: membership.siblings,
+        index_bits: membership.index_bits,
+        root: membership.root,
+        nullifier_in: terms.nullifier_in,
+        asset_in: assetIn,
+        amount_in: offer.amount,
+        asset_out: assetOut,
+        min_out: params.minOut,
+        output_owner_tag: terms.output_owner_tag,
+        cancel_owner_tag: terms.cancel_owner_tag,
+        expiry,
+        partial_allowed: partial,
+        order_leaf: terms.order_leaf,
+      });
+
+      let output: Note = {
+        id: crypto.randomUUID(),
+        deskId: desk.id,
+        role: "order-output",
+        asset_id: assetOut,
+        symbol: this.symbolOf(desk, assetOut),
+        amount: params.minOut,
+        sk: offer.sk,
+        rho: rho_out,
+        owner_tag: terms.output_owner_tag,
+        status: "active",
+        indexed: false,
+        createdAt: nowMs(),
+        cancel: {
+          rho_ord,
+          order_leaf: terms.order_leaf,
+          cancel_owner_tag: terms.cancel_owner_tag,
+          pairId: params.pairId,
+          side: params.side,
+          asset_in: assetIn,
+          symbol_in: this.symbolOf(desk, assetIn),
+          amount_in: offer.amount,
+        },
+      };
+      [output] = await this.prepareNotes([output]);
+      await this.notes.add(output);
+      await this.recordActivity({
+        kind: "user_action",
+        action: "place_order",
+        status: "staged",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        note_id: output.id,
+        owner_tag: output.owner_tag,
+        metadata: {
+          action_id: actionId,
+          input_note_id: offer.id,
+          pair_id: params.pairId,
+          asset_in: assetIn,
+          asset_out: assetOut,
+          amount_in: offer.amount,
+          min_out: params.minOut,
+          expiry,
+          partial_allowed: partial === 1,
+          order_leaf: terms.order_leaf,
+        },
+      });
+      const res = await this.p.submitter.submit({
+        deskId: desk.id,
+        contractId: desk.contractId,
+        method: "submit_order",
+        args: [this.scvBytes(bundle.proof), this.scvBytes(bundle.publicInputs)],
+      });
+      await this.notes.update(output.id, { txHash: res.txHash });
+      await this.notes.update(offer.id, { status: "spent" });
+      await this.recordActivity({
+        kind: "user_action",
+        action: "place_order",
+        status: "succeeded",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        tx_hash: res.txHash,
+        note_id: output.id,
+        owner_tag: output.owner_tag,
+        metadata: { action_id: actionId, status: res.status },
+      });
+      return { note: { ...output, txHash: res.txHash } };
+    } catch (error) {
+      await this.recordActivity({
+        kind: "error",
+        action: "place_order",
+        status: "failed",
+        wallet_address: wallet,
+        desk_id: params.deskId,
+        message: errorMessage(error),
+        metadata: { action_id: actionId, error: serializeError(error) },
+      });
+      throw error;
+    }
   }
 
   // --- unshield ---------------------------------------------------------------------------------
 
   async unshield(params: UnshieldParams): Promise<void> {
-    const desk = await this.p.desks.get(params.deskId);
-    const offer = (await this.assemble(params.deskId, params.asset_id, params.amount)).note;
-    await this.waitForConfirm(params.deskId, offer.id);
-    const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
+    const actionId = this.actionId();
+    const wallet = await this.walletAddress();
+    await this.recordActivity({
+      kind: "user_action",
+      action: "unshield",
+      status: "started",
+      wallet_address: wallet,
+      desk_id: params.deskId,
+      metadata: { action_id: actionId, asset_id: params.asset_id, amount: params.amount, recipient: params.recipient },
+    });
+    try {
+      const desk = await this.p.desks.get(params.deskId);
+      const offer = (await this.assemble(params.deskId, params.asset_id, params.amount)).note;
+      await this.waitForConfirm(params.deskId, offer.id);
+      const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
 
-    const [nullifier, recipient] = await Promise.all([
-      this.wallet.noteNullifier(offer.sk, offer.rho),
-      recipientField(params.recipient),
-    ]);
-    const bundle = await this.prover.proveUnshield({
-      rho_in: offer.rho,
-      sk_o: offer.sk,
-      path: membership.siblings,
-      index_bits: membership.index_bits,
-      root: membership.root,
-      nullifier,
-      asset: offer.asset_id,
-      amount: offer.amount,
-      recipient,
-    });
-    await this.p.submitter.submit({
-      deskId: desk.id,
-      contractId: desk.contractId,
-      method: "unshield",
-      args: [
-        new Address(params.recipient).toScVal(),
-        this.scvBytes(bundle.proof),
-        this.scvBytes(bundle.publicInputs),
-      ],
-    });
-    await this.notes.update(offer.id, { status: "spent" });
+      const [nullifier, recipient] = await Promise.all([
+        this.wallet.noteNullifier(offer.sk, offer.rho),
+        recipientField(params.recipient),
+      ]);
+      const bundle = await this.prover.proveUnshield({
+        rho_in: offer.rho,
+        sk_o: offer.sk,
+        path: membership.siblings,
+        index_bits: membership.index_bits,
+        root: membership.root,
+        nullifier,
+        asset: offer.asset_id,
+        amount: offer.amount,
+        recipient,
+      });
+      await this.recordActivity({
+        kind: "user_action",
+        action: "unshield",
+        status: "staged",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        note_id: offer.id,
+        owner_tag: offer.owner_tag,
+        metadata: { action_id: actionId, recipient: params.recipient, asset_id: offer.asset_id, amount: offer.amount },
+      });
+      const res = await this.p.submitter.submit({
+        deskId: desk.id,
+        contractId: desk.contractId,
+        method: "unshield",
+        args: [
+          new Address(params.recipient).toScVal(),
+          this.scvBytes(bundle.proof),
+          this.scvBytes(bundle.publicInputs),
+        ],
+      });
+      await this.notes.update(offer.id, { status: "spent", txHash: res.txHash });
+      await this.recordActivity({
+        kind: "user_action",
+        action: "unshield",
+        status: "succeeded",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        tx_hash: res.txHash,
+        note_id: offer.id,
+        owner_tag: offer.owner_tag,
+        metadata: { action_id: actionId, status: res.status, recipient: params.recipient },
+      });
+    } catch (error) {
+      await this.recordActivity({
+        kind: "error",
+        action: "unshield",
+        status: "failed",
+        wallet_address: wallet,
+        desk_id: params.deskId,
+        message: errorMessage(error),
+        metadata: { action_id: actionId, error: serializeError(error) },
+      });
+      throw error;
+    }
   }
 
   // --- cancel order -----------------------------------------------------------------------------
 
   async cancelOrder(params: CancelParams): Promise<{ note: Note }> {
-    const desk = await this.p.desks.get(params.deskId);
-    const note = (await this.notes.forDesk(params.deskId)).find((n) => n.id === params.noteId);
-    const c = note?.cancel;
-    if (!note || !c || note.status !== "active") throw new Error("The order is no longer cancellable.");
+    const actionId = this.actionId();
+    const wallet = await this.walletAddress();
+    await this.recordActivity({
+      kind: "user_action",
+      action: "cancel_order",
+      status: "started",
+      wallet_address: wallet,
+      desk_id: params.deskId,
+      note_id: params.noteId,
+      metadata: { action_id: actionId },
+    });
+    try {
+      const desk = await this.p.desks.get(params.deskId);
+      const note = (await this.notes.forDesk(params.deskId)).find((n) => n.id === params.noteId);
+      const c = note?.cancel;
+      if (!note || !c || note.status !== "active") throw new Error("The order is no longer cancellable.");
 
-    const rho_return = randomField();
-    const return_owner_tag = await this.wallet.noteTag(note.sk, rho_return);
-    const bundle = await this.prover.proveCancel({
-      sk_o: note.sk,
-      rho_ord: c.rho_ord,
-      order_leaf: c.order_leaf,
-      cancel_owner_tag: c.cancel_owner_tag,
-      return_owner_tag,
-    });
-    let refund: Note = {
-      id: crypto.randomUUID(),
-      deskId: desk.id,
-      role: "asset",
-      asset_id: c.asset_in,
-      symbol: c.symbol_in,
-      amount: c.amount_in,
-      sk: note.sk,
-      rho: rho_return,
-      owner_tag: return_owner_tag,
-      status: "active",
-      indexed: false,
-      createdAt: nowMs(),
-    };
-    [refund] = await this.prepareNotes([refund]);
-    await this.notes.add(refund);
-    await this.p.submitter.submit({
-      deskId: desk.id,
-      contractId: desk.contractId,
-      method: "cancel_order",
-      args: [
-        nativeToScVal(c.pairId, { type: "u32" }),
-        nativeToScVal(c.side, { type: "u32" }),
-        this.scvBytes(bundle.proof),
-        this.scvBytes(bundle.publicInputs),
-      ],
-    });
-    await this.notes.update(note.id, { status: "cancelled", cancelledAt: nowMs() });
-    return { note: refund };
+      const rho_return = randomField();
+      const return_owner_tag = await this.wallet.noteTag(note.sk, rho_return);
+      const bundle = await this.prover.proveCancel({
+        sk_o: note.sk,
+        rho_ord: c.rho_ord,
+        order_leaf: c.order_leaf,
+        cancel_owner_tag: c.cancel_owner_tag,
+        return_owner_tag,
+      });
+      let refund: Note = {
+        id: crypto.randomUUID(),
+        deskId: desk.id,
+        role: "asset",
+        asset_id: c.asset_in,
+        symbol: c.symbol_in,
+        amount: c.amount_in,
+        sk: note.sk,
+        rho: rho_return,
+        owner_tag: return_owner_tag,
+        status: "active",
+        indexed: false,
+        createdAt: nowMs(),
+      };
+      [refund] = await this.prepareNotes([refund]);
+      await this.notes.add(refund);
+      await this.recordActivity({
+        kind: "user_action",
+        action: "cancel_order",
+        status: "staged",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        note_id: refund.id,
+        owner_tag: refund.owner_tag,
+        metadata: { action_id: actionId, cancelled_note_id: note.id, pair_id: c.pairId, side: c.side },
+      });
+      const res = await this.p.submitter.submit({
+        deskId: desk.id,
+        contractId: desk.contractId,
+        method: "cancel_order",
+        args: [
+          nativeToScVal(c.pairId, { type: "u32" }),
+          nativeToScVal(c.side, { type: "u32" }),
+          this.scvBytes(bundle.proof),
+          this.scvBytes(bundle.publicInputs),
+        ],
+      });
+      await this.notes.update(refund.id, { txHash: res.txHash });
+      await this.notes.update(note.id, { status: "cancelled", cancelledAt: nowMs(), txHash: res.txHash });
+      await this.recordActivity({
+        kind: "user_action",
+        action: "cancel_order",
+        status: "succeeded",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        tx_hash: res.txHash,
+        note_id: refund.id,
+        owner_tag: refund.owner_tag,
+        metadata: { action_id: actionId, cancelled_note_id: note.id, status: res.status },
+      });
+      return { note: { ...refund, txHash: res.txHash } };
+    } catch (error) {
+      await this.recordActivity({
+        kind: "error",
+        action: "cancel_order",
+        status: "failed",
+        wallet_address: wallet,
+        desk_id: params.deskId,
+        note_id: params.noteId,
+        message: errorMessage(error),
+        metadata: { action_id: actionId, error: serializeError(error) },
+      });
+      throw error;
+    }
   }
 
   // --- deploy / fund / loop / base --------------------------------------------------------------
@@ -534,27 +854,121 @@ export class MosaicClient {
     assets: AssetDef[];
     pairs: Omit<PairDef, "pair_id">[];
   }): Promise<DeskConfig> {
-    if (!this.p.deployer) throw new Error("No Deployer configured (Node only).");
-    const admin = await this.p.signer.address();
-    const { contractId } = await this.p.deployer.deploySettlement({
-      assets: params.assets,
-      pairs: params.pairs,
-      admin,
+    const actionId = this.actionId();
+    const wallet = await this.walletAddress();
+    await this.recordActivity({
+      kind: "user_action",
+      action: "create_desk",
+      status: "started",
+      wallet_address: wallet,
+      metadata: { action_id: actionId, name: params.name, asset_count: params.assets.length, pair_count: params.pairs.length },
     });
-    return {
-      id: crypto.randomUUID(),
-      name: params.name,
-      contractId,
-      sponsor: admin,
-      assets: params.assets,
-      pairs: params.pairs.map((p, i) => ({ ...p, pair_id: i })),
-    };
+    try {
+      if (!this.p.deployer) throw new Error("No Deployer configured (Node only).");
+      const admin = await this.p.signer.address();
+      const deployed = await this.p.deployer.deploySettlement({
+        assets: params.assets,
+        pairs: params.pairs,
+        admin,
+      });
+      if (deployed.uploadWasmTxHash || deployed.wasmHash) {
+        await this.recordActivity({
+          kind: "user_action",
+          action: "update_wasm",
+          status: "succeeded",
+          wallet_address: wallet,
+          tx_hash: deployed.uploadWasmTxHash,
+          metadata: {
+            action_id: actionId,
+            step: 1,
+            wasm_hash: deployed.wasmHash,
+          },
+        });
+      }
+      if (deployed.contractId || deployed.createContractTxHash) {
+        await this.recordActivity({
+          kind: "user_action",
+          action: "create_contract",
+          status: "succeeded",
+          wallet_address: wallet,
+          contract_id: deployed.contractId,
+          tx_hash: deployed.createContractTxHash,
+          metadata: {
+            action_id: actionId,
+            step: 2,
+            contract_id: deployed.contractId,
+          },
+        });
+      }
+      const desk = {
+        id: crypto.randomUUID(),
+        name: params.name,
+        contractId: deployed.contractId,
+        sponsor: admin,
+        assets: params.assets,
+        pairs: params.pairs.map((p, i) => ({ ...p, pair_id: i })),
+      };
+      await this.recordActivity({
+        kind: "user_action",
+        action: "create_desk",
+        status: "succeeded",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        contract_id: deployed.contractId,
+        metadata: {
+          action_id: actionId,
+          name: params.name,
+          admin,
+          upload_wasm_tx_hash: deployed.uploadWasmTxHash,
+          create_contract_tx_hash: deployed.createContractTxHash,
+          wasm_hash: deployed.wasmHash,
+        },
+      });
+      return desk;
+    } catch (error) {
+      await this.recordActivity({
+        kind: "error",
+        action: "create_desk",
+        status: "failed",
+        wallet_address: wallet,
+        message: errorMessage(error),
+        metadata: { action_id: actionId, error: serializeError(error) },
+      });
+      throw error;
+    }
   }
 
   /** Fund an account on testnet (requires a {@link Funder}). */
   async fund(address: string): Promise<void> {
-    if (!this.p.funder) throw new Error("No Funder configured (Node only).");
-    await this.p.funder.fund(address);
+    const actionId = this.actionId();
+    await this.recordActivity({
+      kind: "user_action",
+      action: "fund",
+      status: "started",
+      wallet_address: address,
+      metadata: { action_id: actionId },
+    });
+    try {
+      if (!this.p.funder) throw new Error("No Funder configured (Node only).");
+      await this.p.funder.fund(address);
+      await this.recordActivity({
+        kind: "user_action",
+        action: "fund",
+        status: "succeeded",
+        wallet_address: address,
+        metadata: { action_id: actionId },
+      });
+    } catch (error) {
+      await this.recordActivity({
+        kind: "error",
+        action: "fund",
+        status: "failed",
+        wallet_address: address,
+        message: errorMessage(error),
+        metadata: { action_id: actionId, error: serializeError(error) },
+      });
+      throw error;
+    }
   }
 
   /** Start the local note-tracking loop: periodically reconcile the store against on-chain state. */
@@ -576,39 +990,92 @@ export class MosaicClient {
     amount: Amount;
     baseTxHash: string;
   }): Promise<{ owner_tag: Field; txHash: string }> {
-    if (!this.p.mcp) throw new Error("Base shielding requires an MCP (configure `mcp`).");
-    const desk = await this.p.desks.get(params.deskId);
-    const sk = randomField();
-    const rho = randomField();
-    const owner_tag = await this.wallet.noteTag(sk, rho);
-    const asset = desk.assets.find((a) => a.asset_id === params.asset_id);
-    let note: Note = {
-      id: crypto.randomUUID(),
-      deskId: desk.id,
-      role: "asset",
-      asset_id: params.asset_id,
-      symbol: asset?.symbol ?? `#${params.asset_id}`,
-      amount: params.amount,
-      sk,
-      rho,
-      owner_tag,
-      status: "active",
-      indexed: false,
-      createdAt: nowMs(),
-    };
-    [note] = await this.prepareNotes([note]);
-    await this.notes.add(note);
-    return this.p.mcp.baseShield({
-      contractId: desk.contractId,
-      asset_id: params.asset_id,
-      amount: params.amount,
-      owner_tag,
-      baseTxHash: params.baseTxHash,
+    const actionId = this.actionId();
+    const wallet = await this.walletAddress();
+    await this.recordActivity({
+      kind: "user_action",
+      action: "shield_from_base",
+      status: "started",
+      wallet_address: wallet,
+      desk_id: params.deskId,
+      tx_hash: params.baseTxHash,
+      metadata: { action_id: actionId, asset_id: params.asset_id, amount: params.amount, base_tx_hash: params.baseTxHash },
     });
+    try {
+      if (!this.p.mcp) throw new Error("Base shielding requires an MCP (configure `mcp`).");
+      const desk = await this.p.desks.get(params.deskId);
+      const sk = randomField();
+      const rho = randomField();
+      const owner_tag = await this.wallet.noteTag(sk, rho);
+      const asset = desk.assets.find((a) => a.asset_id === params.asset_id);
+      let note: Note = {
+        id: crypto.randomUUID(),
+        deskId: desk.id,
+        role: "asset",
+        asset_id: params.asset_id,
+        symbol: asset?.symbol ?? `#${params.asset_id}`,
+        amount: params.amount,
+        sk,
+        rho,
+        owner_tag,
+        status: "active",
+        indexed: false,
+        createdAt: nowMs(),
+      };
+      [note] = await this.prepareNotes([note]);
+      await this.notes.add(note);
+      await this.recordActivity({
+        kind: "user_action",
+        action: "shield_from_base",
+        status: "staged",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        note_id: note.id,
+        owner_tag,
+        tx_hash: params.baseTxHash,
+        metadata: { action_id: actionId, asset_id: params.asset_id, amount: params.amount },
+      });
+      const result = await this.p.mcp.baseShield({
+        contractId: desk.contractId,
+        asset_id: params.asset_id,
+        amount: params.amount,
+        owner_tag,
+        baseTxHash: params.baseTxHash,
+      });
+      await this.notes.update(note.id, { txHash: result.txHash });
+      await this.recordActivity({
+        kind: "user_action",
+        action: "shield_from_base",
+        status: "succeeded",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        note_id: note.id,
+        owner_tag,
+        tx_hash: result.txHash,
+        metadata: { action_id: actionId, base_tx_hash: params.baseTxHash },
+      });
+      return result;
+    } catch (error) {
+      await this.recordActivity({
+        kind: "error",
+        action: "shield_from_base",
+        status: "failed",
+        wallet_address: wallet,
+        desk_id: params.deskId,
+        tx_hash: params.baseTxHash,
+        message: errorMessage(error),
+        metadata: { action_id: actionId, error: serializeError(error) },
+      });
+      throw error;
+    }
   }
 
   /** Direct read access to the note manager (lists, recovery merge, etc.). */
   get noteManager(): NoteManager {
     return this.notes;
+  }
+
+  get history(): ActivityHistory {
+    return this.activity;
   }
 }

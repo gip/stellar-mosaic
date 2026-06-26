@@ -45,6 +45,7 @@ export default function DeskPage() {
   const [notes, setNotes] = useState<Note[]>([])
   const [trustlessDesk, setTrustlessDesk] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [noteIndexError, setNoteIndexError] = useState<string | null>(null)
   const [submitMode, setSubmitMode] = useState<'direct' | 'sponsored'>(submissionMode())
   const bookIndex = useBookIndex(desk, networkPassphrase)
 
@@ -94,12 +95,15 @@ export default function DeskPage() {
         .getNotes(deskId)
         .then(async (r) => {
           if (!alive) return
+          setNoteIndexError(null)
           if (await reconcile(deskId, r.notes)) {
             if (isRecoveryUnlocked(address ?? undefined)) syncRecoveryNow().catch(() => {})
             reloadNotes()
           }
         })
-        .catch(() => {})
+        .catch((e) => {
+          if (alive) setNoteIndexError(errorMessage(e))
+        })
     tick()
     const h = setInterval(tick, 7000)
     return () => {
@@ -315,6 +319,7 @@ export default function DeskPage() {
                 dec={dec}
                 desk={verifiedDesk}
                 bookIndex={bookIndex}
+                noteIndexError={noteIndexError}
                 userPubkey={address ?? ''}
                 trustless={trustlessDesk}
                 onDone={reloadNotes}
@@ -329,6 +334,7 @@ export default function DeskPage() {
                 dec={dec}
                 desk={verifiedDesk}
                 bookIndex={bookIndex}
+                noteIndexError={noteIndexError}
                 userPubkey={address ?? ''}
                 trustless={trustlessDesk}
                 onDone={reloadNotes}
@@ -398,6 +404,7 @@ function NotesTable({
   dec,
   desk,
   bookIndex,
+  noteIndexError,
   userPubkey,
   trustless,
   onDone,
@@ -406,6 +413,7 @@ function NotesTable({
   dec: (id: number) => number
   desk: Desk
   bookIndex: BookIndexSnapshot
+  noteIndexError: string | null
   userPubkey: string
   trustless: boolean
   onDone: () => void
@@ -432,7 +440,7 @@ function NotesTable({
             <td>{formatAmount(n.amount, dec(n.asset_id))}</td>
             <td className="mono">{n.owner_tag.slice(0, 14)}…</td>
             <td className={n.status === 'active' ? 'ok' : 'muted'}>
-              {noteDisplayStatus(n, bookIndex)}
+              {noteDisplayStatus(n, bookIndex, noteIndexError)}
             </td>
             <td>
               {n.status === 'active' && n.cancel && userPubkey && (
@@ -452,8 +460,9 @@ function NotesTable({
   )
 }
 
-function noteDisplayStatus(n: Note, bookIndex: BookIndexSnapshot): string {
+function noteDisplayStatus(n: Note, bookIndex: BookIndexSnapshot, noteIndexError: string | null): string {
   if (n.status !== 'active' || n.indexed) return n.status
+  if (noteIndexError?.includes('trustless note history unavailable')) return 'active · index history unavailable'
   if (!n.cancel) return 'active · pending index'
   if (bookIndex.status !== 'synced') return 'order submitted · syncing book'
   const resting = bookIndex.orders.some(

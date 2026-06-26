@@ -6,6 +6,7 @@
 // callback so the core stays environment-agnostic.
 
 import { nowMs } from "./time.js";
+import { ActivityHistory, type ActivityStore } from "./activity.js";
 import type { NoteStore } from "./ports.js";
 import type { ChainNote, Note, NoteStatus } from "./types.js";
 
@@ -57,10 +58,12 @@ export function mergeNote(a: Note, b: Note): Note {
 export class NoteManager {
   private readonly store: NoteStore;
   private readonly onChange?: () => void;
+  private readonly activity: ActivityHistory;
 
-  constructor(store: NoteStore, onChange?: () => void) {
+  constructor(store: NoteStore, onChange?: () => void, activity?: ActivityStore) {
     this.store = store;
     this.onChange = onChange;
+    this.activity = new ActivityHistory(activity);
   }
 
   private notify(): void {
@@ -161,6 +164,24 @@ export class NoteManager {
       }
       if (Object.keys(patch).length) {
         await this.update(n.id, patch);
+        if (!n.indexed && patch.indexed) {
+          await this.activity.record({
+            kind: "note_indexed",
+            idempotency_key: `note-indexed:${deskId}:${n.id}:${c.leaf_index}`,
+            status: "indexed",
+            desk_id: deskId,
+            note_id: n.id,
+            owner_tag: n.owner_tag,
+            tx_hash: n.txHash,
+            metadata: {
+              role: n.role,
+              asset_id: c.asset,
+              amount: c.amount,
+              leaf_index: c.leaf_index,
+              symbol: n.symbol,
+            },
+          }).catch(() => undefined);
+        }
         changed = true;
       }
     }

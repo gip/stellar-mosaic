@@ -77,3 +77,19 @@ test("reconcile stamps leaf_index + indexed + on-chain amount, skips cancelled",
   const cancelled = all.find((n) => n.id === "cancelled");
   assert.equal(cancelled.leaf_index, undefined); // cancelled notes are skipped
 });
+
+test("reconcile records note_indexed once", async () => {
+  const store = new MemoryStore();
+  const m = new NoteManager(store, undefined, store);
+  await m.add(note({ id: "indexed", owner_tag: "0xAbC", indexed: false, amount: "0", txHash: "tx" }));
+  const chain = [{ leaf_index: 7, asset: 1, amount: "100", owner_tag: "0xabc" }];
+
+  assert.equal(await m.reconcile("d", chain), true);
+  assert.equal(await m.reconcile("d", chain), false);
+
+  const events = await store.list({ kind: "note_indexed" });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].note_id, "indexed");
+  assert.equal(events[0].tx_hash, "tx");
+  assert.equal(events[0].metadata.leaf_index, 7);
+});

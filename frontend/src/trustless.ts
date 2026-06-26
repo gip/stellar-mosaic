@@ -4,7 +4,7 @@ import type { Desk } from './api'
 import type { Note } from './notes'
 import { SOROBAN_RPC_URL } from './config'
 import { FreighterSigner } from './sdk/freighterSigner'
-import { IndexedDbStore } from './sdk/indexedDbStore'
+import { browserActivityStore, browserEventCache, IndexedDbStore } from './sdk/indexedDbStore'
 import { stageRecoverableNotes, syncRecoveryNow } from './recovery'
 import { initNoirWasm } from './noirWasm'
 
@@ -30,10 +30,12 @@ function trustlessClient(desk: Desk, address: string) {
     network: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase: Networks.TESTNET },
     signer: new FreighterSigner(address),
     store: new IndexedDbStore(),
+    activity: browserActivityStore,
     desks: [deskConfig(desk)],
     startLedger: desk.event_start_ledger ?? 0,
     prepareNotes: stageRecoverableNotes,
     initNoir: initNoirWasm,
+    eventCache: browserEventCache,
   }).client
 }
 

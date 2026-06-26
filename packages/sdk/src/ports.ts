@@ -27,6 +27,7 @@ import type {
   TreeEvent,
   WalletBackupEnvelope,
 } from "./types.js";
+export type { ActivityStore } from "./activity.js";
 
 /** Network coordinates shared by every RPC-touching adapter. */
 export interface NetworkConfig {
@@ -96,6 +97,7 @@ export interface NoteStore {
   byDesk(deskId: string): Promise<Note[]>;
 }
 
+
 // --- Network sources -----------------------------------------------------------------------------
 
 /** Read-only view of on-chain note state. The default LocalPathProvider rebuilds paths from chain
@@ -132,12 +134,19 @@ export interface DeskProvider {
 }
 
 /** Deploys a settlement contract (custody + book) with its immutable asset/pair/VK config. */
+export interface DeploySettlementResult {
+  contractId: string;
+  uploadWasmTxHash?: string;
+  createContractTxHash?: string;
+  wasmHash?: string;
+}
+
 export interface Deployer {
   deploySettlement(params: {
     assets: AssetDef[];
     pairs: Omit<PairDef, "pair_id">[];
     admin: string;
-  }): Promise<{ contractId: string }>;
+  }): Promise<DeploySettlementResult>;
 }
 
 // --- MCP (optional server) -----------------------------------------------------------------------

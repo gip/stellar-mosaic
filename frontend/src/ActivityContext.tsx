@@ -1,14 +1,16 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { errorMessage } from '@mosaic/sdk'
+import { ActivityHistory, errorMessage, type ActivityEvent } from '@mosaic/sdk'
 import { ApiError, api, type Operation, type OperationRequest } from './api'
 import { executeClientAction, reconcileOperationJournals, rollbackClientAction } from './operationExecutor'
 import { useRecovery } from './RecoveryContext'
 import { useWallet } from './WalletContext'
 import { cacheActionResult, cachedActionResult, removeCachedActionResult } from './actionCache'
 import { useMosaicServer } from './MosaicServerContext'
+import { browserActivityStore } from './sdk/indexedDbStore'
 
 interface ActivityState {
   operations: Operation[]
+  activities: ActivityEvent[]
   connected: boolean
   error: string | null
   enqueue: (request: OperationRequest) => Promise<Operation>
@@ -17,12 +19,14 @@ interface ActivityState {
 }
 
 const Ctx = createContext<ActivityState | null>(null)
+const history = new ActivityHistory(browserActivityStore)
 
 export function ActivityProvider({ children }: { children: ReactNode }) {
   const wallet = useWallet()
   const mosaicServer = useMosaicServer()
   const recovery = useRecovery()
   const [operations, setOperations] = useState<Operation[]>([])
+  const [activities, setActivities] = useState<ActivityEvent[]>([])
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const running = useRef(false)
@@ -34,6 +38,11 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     setConnected(true)
   }, [mosaicServer.trusted, wallet.address, wallet.networkPassphrase])
 
+  const refreshActivities = useCallback(async () => {
+    const next = await browserActivityStore.list()
+    setActivities(next.slice(-100).toReversed())
+  }, [])
+
   const refresh = useCallback(async () => {
     if (!wallet.address) return
     try {
@@ -41,12 +50,13 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       const next = await api.listOperations()
       if (wallet.address && recovery.unlocked) await reconcileOperationJournals(next, wallet.address)
       setOperations(next)
+      await refreshActivities()
       setError(null)
     } catch (e) {
       setConnected(false)
       setError(errorMessage(e))
     }
-  }, [authenticate, wallet.address, recovery.unlocked])
+  }, [authenticate, wallet.address, recovery.unlocked, refreshActivities])
 
   const enqueue = useCallback(async (request: OperationRequest) => {
     await authenticate()
@@ -58,6 +68,24 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const cancel = useCallback(async (id: string) => {
     const operation = await api.cancelOperation(id)
     setOperations((previous) => previous.map((x) => x.id === id ? operation : x))
+  }, [])
+
+  useEffect(() => {
+    let alive = true
+    const tick = async () => {
+      try {
+        const next = await browserActivityStore.list()
+        if (alive) setActivities(next.slice(-100).toReversed())
+      } catch {
+        /* Activity is best-effort UI state; writes remain durable. */
+      }
+    }
+    void tick()
+    const interval = window.setInterval(() => void tick(), 1000)
+    return () => {
+      alive = false
+      window.clearInterval(interval)
+    }
   }, [])
 
   useEffect(() => {
@@ -81,6 +109,11 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
         const events = await api.operationEventsSince(eventCursor.current)
         if (!alive || events.length === 0) return
         eventCursor.current = Math.max(eventCursor.current, ...events.map((event) => event.cursor))
+        await history.ingestOperationEvents(events, {
+          wallet_address: wallet.address ?? undefined,
+          network: wallet.networkPassphrase ?? undefined,
+        })
+        await refreshActivities()
         await refresh()
       } catch {
         if (alive) {
@@ -95,7 +128,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       alive = false
       window.clearInterval(interval)
     }
-  }, [connected, refresh])
+  }, [connected, refresh, refreshActivities, wallet.address, wallet.networkPassphrase])
 
   // Any tab may poll, but the backend lease lets only one execute the private step.
   useEffect(() => {
@@ -138,7 +171,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     return () => { alive = false; window.clearInterval(handle) }
   }, [connected, recovery.unlocked, recovery.error, refresh, wallet.address])
 
-  return <Ctx.Provider value={{ operations, connected, error, enqueue, cancel, refresh }}>{children}</Ctx.Provider>
+  return <Ctx.Provider value={{ operations, activities, connected, error, enqueue, cancel, refresh }}>{children}</Ctx.Provider>
 }
 
 // eslint-disable-next-line react-refresh/only-export-components

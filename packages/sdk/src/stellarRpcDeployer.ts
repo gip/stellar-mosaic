@@ -13,7 +13,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import type { AssetDef } from "./types.js";
-import type { Deployer, NetworkConfig, StellarSigner } from "./ports.js";
+import type { Deployer, DeploySettlementResult, NetworkConfig, StellarSigner } from "./ports.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const CONTRACT_ID = /^C[A-Z2-7]{55}$/;
@@ -47,10 +47,10 @@ export class StellarRpcDeployer implements Deployer {
     assets: AssetDef[];
     pairs: { base_asset: number; quote_asset: number }[];
     admin: string;
-  }): Promise<{ contractId: string }> {
+  }): Promise<DeploySettlementResult> {
     const wasm = await this.loadSettlementWasm();
     const wasmHash = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", Buffer.from(wasm)));
-    await this.submitOperation(StellarOperation.uploadContractWasm({ wasm }));
+    const upload = await this.submitOperation(StellarOperation.uploadContractWasm({ wasm }));
     const constructorArgs = [
       this.bytes(await this.loadVk("lift")),
       this.bytes(await this.loadVk("unshield")),
@@ -68,7 +68,12 @@ export class StellarRpcDeployer implements Deployer {
       }),
     );
     if (!result.returnValue) throw new Error("deploy transaction returned no contract id");
-    return { contractId: Address.fromScVal(result.returnValue).toString() };
+    return {
+      contractId: Address.fromScVal(result.returnValue).toString(),
+      uploadWasmTxHash: upload.txHash,
+      createContractTxHash: result.txHash,
+      wasmHash: Buffer.from(wasmHash).toString("hex"),
+    };
   }
 
   private assetInit(asset: AssetDef): xdr.ScVal {
