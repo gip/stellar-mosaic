@@ -163,6 +163,7 @@ export class MosaicClient {
 
     const source = await this.p.signer.address();
     const res = await this.p.submitter.submit({
+      deskId: desk.id,
       contractId: desk.contractId,
       method: "shield",
       args: [
@@ -308,6 +309,7 @@ export class MosaicClient {
     if (change) await this.notes.add(change);
 
     await this.p.submitter.submit({
+      deskId: desk.id,
       contractId: desk.contractId,
       method: "join",
       args: [this.scvBytes(bundle.proof), this.scvBytes(bundle.publicInputs)],
@@ -390,6 +392,7 @@ export class MosaicClient {
     };
     await this.notes.add(output);
     await this.p.submitter.submit({
+      deskId: desk.id,
       contractId: desk.contractId,
       method: "submit_order",
       args: [this.scvBytes(bundle.proof), this.scvBytes(bundle.publicInputs)],
@@ -422,6 +425,7 @@ export class MosaicClient {
       recipient,
     });
     await this.p.submitter.submit({
+      deskId: desk.id,
       contractId: desk.contractId,
       method: "unshield",
       args: [
@@ -466,6 +470,7 @@ export class MosaicClient {
     };
     await this.notes.add(refund);
     await this.p.submitter.submit({
+      deskId: desk.id,
       contractId: desk.contractId,
       method: "cancel_order",
       args: [

@@ -6,11 +6,10 @@
 import { readFileSync } from "node:fs";
 import { Command } from "commander";
 import { Keypair, rpc } from "@stellar/stellar-sdk";
-import { createNodeClient } from "@mosaic/sdk/node";
+import { createNodeClient, StellarCliDeployer } from "@mosaic/sdk/node";
 import { SIDE_BUY, SIDE_SELL, SecretKeySigner, type McpClient, type Side } from "@mosaic/sdk";
 import { createMcpClient } from "@mosaic/sdk/mcp-client";
 import { dbPath, load, requireKey, save, type CliConfig } from "./config.js";
-import { StellarCliDeployer } from "./deployer.js";
 
 function build(cfg: CliConfig, opts: { withDeployer?: boolean; mcp?: McpClient } = {}) {
   const secretKey = requireKey(cfg);

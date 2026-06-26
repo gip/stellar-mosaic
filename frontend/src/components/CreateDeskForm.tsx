@@ -30,6 +30,7 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
   const [deploymentConfig, setDeploymentConfig] = useState<BaseDeploymentConfig | null>(null)
   const [estimatedFee, setEstimatedFee] = useState<bigint | null>(null)
   const [createdDesk, setCreatedDesk] = useState<Desk | null>(null)
+  const [stellarDeployment, setStellarDeployment] = useState<'sponsored' | 'self-funded'>('sponsored')
   const ethereum = useEthereumWallet()
 
   useEffect(() => {
@@ -108,14 +109,20 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
       if (deployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
         throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
       }
-      const desk = await api.createDesk({
+      if (stellarDeployment === 'self-funded' && deployBase) {
+        throw new Error('Base deployment setup currently requires the sponsored MCP deployment path.')
+      }
+      const deskBody = {
         name,
         assets,
         pairs: deskPairs,
         ...(deployBase && ethereum.address
           ? { base_deployment: { deployer_address: ethereum.address } }
           : {}),
-      })
+      }
+      const desk = stellarDeployment === 'self-funded'
+        ? await api.createDeskSelfFunded({ name, assets, pairs: deskPairs })
+        : await api.createDesk(deskBody)
       setCreatedDesk(desk)
       setName('')
       setSelected([])
@@ -240,6 +247,24 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
           </p>
         </>
       )}
+
+      <label>Stellar deployment</label>
+      <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+        <button
+          type="button"
+          aria-pressed={stellarDeployment === 'sponsored'}
+          onClick={() => setStellarDeployment('sponsored')}
+        >
+          MCP sponsored
+        </button>
+        <button
+          type="button"
+          aria-pressed={stellarDeployment === 'self-funded'}
+          onClick={() => setStellarDeployment('self-funded')}
+        >
+          Freighter self-funded
+        </button>
+      </div>
 
       {ethereum.address && (
         <div className="base-deployment">

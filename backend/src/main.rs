@@ -11,7 +11,9 @@ mod handlers;
 mod indexer;
 mod models;
 mod operations;
+mod prove;
 mod stellar;
+mod validate;
 
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
@@ -69,6 +71,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(handlers::health))
+        .route("/prove/base-deposit", post(prove::prove_base_deposit))
+        .route("/validate/relay", post(validate::validate_relay))
         .merge(auth::routes())
         .merge(operations::routes())
         .merge(catalog::routes())

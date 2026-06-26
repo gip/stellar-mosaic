@@ -108,6 +108,19 @@ export interface NoteProof {
   index_bits: number[];
 }
 
+/** A crossing-fill summary from a `filled` event. Taker perspective: `amount_in` was spent and
+ * `amount_out` was received by `owner_tag`. */
+export interface Fill {
+  id: string;
+  ledger: number;
+  tx_hash: string;
+  asset_in: number;
+  amount_in: Amount;
+  asset_out: number;
+  amount_out: Amount;
+  owner_tag: Field;
+}
+
 /** A note-tree event as read from the chain, in insertion order. Fed to the local path provider
  * (WASM NoteTree) to rebuild paths without a server. */
 export type TreeEvent =
@@ -122,3 +135,159 @@ export type TreeEvent =
       a_amount_in: Amount;
       b_output_owner_tag: Field;
     };
+
+export interface CatalogAsset {
+  id: string;
+  symbol: string;
+  stellar_token: string | null;
+  stellar_decimals: number | null;
+  base_chain_id: number | null;
+  base_token: string | null;
+  base_decimals: number | null;
+  proposer_address: string | null;
+  is_default: boolean;
+  created_at: number;
+  trust_count: number;
+  trusted_by_me: boolean;
+}
+
+export interface ProposeAssetBody {
+  symbol: string;
+  stellar_token?: string | null;
+  stellar_decimals?: number | null;
+  base_chain_id?: number | null;
+  base_token?: string | null;
+  base_decimals?: number | null;
+}
+
+export interface BaseAssetMapping {
+  asset_id: number;
+  symbol: string;
+  token: string;
+}
+
+export interface BaseDeployment {
+  status: "awaiting_wallet" | "verifying" | "configuring" | "active" | "failed";
+  deployer_address: string;
+  tx_hash: string | null;
+  bridge_address: string | null;
+  error: string | null;
+  assets: BaseAssetMapping[];
+}
+
+export interface Desk {
+  id: string;
+  name: string;
+  contract_id: string;
+  sponsor_pubkey: string;
+  event_start_ledger: number | null;
+  assets: AssetDef[];
+  pairs: PairDef[];
+  base_deployment: BaseDeployment | null;
+}
+
+export interface BaseDeploymentConfig {
+  available: boolean;
+  chain_id: number;
+  network: "base-sepolia";
+  reason: string | null;
+  abi: unknown | null;
+  bytecode: string | null;
+}
+
+export interface BaseShieldConfig {
+  available: boolean;
+  chain_id: number;
+  network: "base-sepolia";
+  bridge: string | null;
+  worker_ready: boolean;
+  reason: "contract_unconfigured" | "worker_disabled" | null;
+}
+
+export interface AuthChallenge {
+  challenge_id: string;
+  message: string;
+  expires_at: number;
+}
+
+export interface AuthSession {
+  address: string;
+  network: string;
+  expires_at?: number;
+}
+
+export type OperationStatus =
+  | "queued"
+  | "running"
+  | "waiting_for_client"
+  | "waiting_for_chain"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export type OperationRequest =
+  | { kind: "shield"; desk_id: string; asset_id: number; amount: Amount }
+  | {
+      kind: "place_order";
+      desk_id: string;
+      pair_id: number;
+      side: "BUY" | "SELL";
+      amount_in: Amount;
+      min_out: Amount;
+      partial_allowed: boolean;
+    }
+  | { kind: "unshield"; desk_id: string; asset_id: number; amount: Amount; recipient: string }
+  | { kind: "cancel_order"; desk_id: string; wallet_note_id: string };
+
+export interface Operation {
+  id: string;
+  address: string;
+  network: string;
+  desk_id: string;
+  kind: OperationRequest["kind"];
+  request: OperationRequest;
+  status: OperationStatus;
+  created_at: number;
+  updated_at: number;
+  error?: string | null;
+  submitted: boolean;
+}
+
+export interface OperationEvent {
+  cursor: number;
+  operation_id: string;
+  event_type: string;
+  state: string;
+  message: string;
+  details: unknown;
+  created_at: number;
+}
+
+export interface ClientAction {
+  id: string;
+  operation_id: string;
+  kind: Operation["kind"];
+  payload: OperationRequest;
+  lease_token: string;
+  lease_expires_at: number;
+}
+
+export interface WalletBackupEnvelope {
+  format_version: 1;
+  generation: number;
+  nonce_b64: string;
+  ciphertext_b64: string;
+}
+
+export interface BaseShieldJob {
+  id: string;
+  desk_id: string;
+  bridge: string;
+  deposit_id: number;
+  status: string;
+  block_number?: number | null;
+  block_hash?: string | null;
+  seal_hex?: string | null;
+  journal_hex?: string | null;
+  error?: string | null;
+}

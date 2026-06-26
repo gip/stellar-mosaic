@@ -14,8 +14,9 @@ import { LocalPathProvider } from "./localPathProvider.js";
 import { makeNoirCompressor } from "./noirCompressor.js";
 import { StaticDeskProvider } from "./deskRegistry.js";
 import { FriendbotFunder } from "./friendbot.js";
-import { circuitProvider } from "./assets.browser.js";
-import type { McpClient, NetworkConfig, NoteStore, StellarSigner } from "./ports.js";
+import { loadSettlementWasm, loadVk, circuitProvider } from "./assets.browser.js";
+import { StellarRpcDeployer } from "./stellarRpcDeployer.js";
+import type { Deployer, McpClient, NetworkConfig, NoteStore, StellarSigner } from "./ports.js";
 import type { DeskConfig } from "./types.js";
 
 export interface BrowserClientOptions {
@@ -32,6 +33,8 @@ export interface BrowserClientOptions {
   onNotesChanged?: () => void;
   /** Optional MCP for the Base→Stellar shield flow. */
   mcp?: McpClient;
+  /** Optional self-funded deployer. In browser apps this should sign with the connected wallet. */
+  deployer?: Deployer;
 }
 
 export interface BrowserClient {
@@ -55,11 +58,20 @@ export function createBrowserClient(opts: BrowserClientOptions): BrowserClient {
   const source = new LocalPathProvider({
     compress,
     events: async (deskId) => chain.events((await desks.get(deskId)).contractId),
+    fills: async (deskId) => chain.fills((await desks.get(deskId)).contractId),
   });
 
   const funder = opts.network.friendbotUrl
     ? new FriendbotFunder(opts.network.friendbotUrl)
     : undefined;
+  const deployer =
+    opts.deployer ??
+    new StellarRpcDeployer({
+      network: opts.network,
+      signer: opts.signer,
+      loadSettlementWasm,
+      loadVk,
+    });
 
   const client = new MosaicClient({
     network: opts.network,
@@ -72,6 +84,7 @@ export function createBrowserClient(opts: BrowserClientOptions): BrowserClient {
     funder,
     onNotesChanged: opts.onNotesChanged,
     mcp: opts.mcp,
+    deployer,
   });
   return { client, desks };
 }

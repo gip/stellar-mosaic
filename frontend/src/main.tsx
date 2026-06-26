@@ -16,6 +16,7 @@ import { RecoveryProvider } from './RecoveryContext'
 import { ActivityProvider } from './ActivityContext'
 import { EthereumWalletProvider } from './EthereumWalletContext'
 
+// eslint-disable-next-line react-refresh/only-export-components
 function AppRoute() {
   return (
     <WalletProvider>

@@ -1,7 +1,7 @@
 // Browser StellarSigner adapter for @mosaic/sdk, backed by the Freighter extension. Used by the
 // local-mode client (createBrowserClient); the signer holds the connected address and delegates to
 // Freighter for transaction / auth-entry signing.
-import { signTransaction, signAuthEntry } from '@stellar/freighter-api'
+import { signTransaction, signAuthEntry, signMessage } from '@stellar/freighter-api'
 import type { StellarSigner } from '@mosaic/sdk'
 
 function b64(value: string | Uint8Array): string {
@@ -34,9 +34,12 @@ export class FreighterSigner implements StellarSigner {
     return b64(res.signedAuthEntry as string | Uint8Array)
   }
 
-  async signMessage(): Promise<Uint8Array> {
-    // Recovery/auth message signing stays on the existing wallet.ts path; not needed by the
-    // local-mode client. Implement here if/when recovery moves onto the SDK.
-    throw new Error('FreighterSigner.signMessage is not used by the local client.')
+  async signMessage(message: Uint8Array): Promise<Uint8Array> {
+    const text = new TextDecoder().decode(message)
+    const res = await signMessage(text, { address: this.addr })
+    if (res.error || !res.signedMessage) throw new Error(String(res.error ?? 'Freighter returned no signed message.'))
+    return typeof res.signedMessage === 'string'
+      ? Uint8Array.from(atob(res.signedMessage), (c) => c.charCodeAt(0))
+      : res.signedMessage
   }
 }

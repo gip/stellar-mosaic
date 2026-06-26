@@ -18,13 +18,29 @@ async function connect() {
 
 const textOf = (res) => JSON.parse(res.content.find((c) => c.type === "text").text);
 
-test("exposes exactly the minimal tool set", async () => {
+test("exposes the MCP-only frontend tool set", async () => {
   const client = await connect();
   const { tools } = await client.listTools();
-  assert.deepEqual(
-    tools.map((t) => t.name).sort(),
-    ["auth_challenge", "auth_verify", "base_shield"],
-  );
+  const names = new Set(tools.map((t) => t.name));
+  for (const name of [
+    "auth_challenge",
+    "auth_verify",
+    "auth_session",
+    "auth_logout",
+    "list_desks",
+    "get_desk",
+    "create_operation",
+    "claim_client_action",
+    "relay_shield",
+    "relay_order",
+    "get_wallet_backup",
+    "put_wallet_backup",
+    "base_shield_config",
+    "enqueue_base_shield",
+    "base_shield",
+  ]) {
+    assert.ok(names.has(name), `missing tool ${name}`);
+  }
 });
 
 test("wallet auth handshake over the protocol, then base_shield gated by config", async () => {

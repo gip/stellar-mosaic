@@ -9,10 +9,11 @@
 import { NoteTree } from "./noteTree.js";
 import type { Compressor } from "./noteTree.js";
 import type { NoteSource } from "./ports.js";
-import type { ChainNote, Field, NoteProof, TreeEvent } from "./types.js";
+import type { ChainNote, Field, Fill, NoteProof, TreeEvent } from "./types.js";
 
 /** Reads the insertion-ordered tree events for a desk (shielded / noteins / settled). */
 export type EventSource = (deskId: string) => Promise<TreeEvent[]>;
+export type FillSource = (deskId: string) => Promise<Fill[]>;
 
 interface DeskCache {
   count: number;
@@ -22,11 +23,13 @@ interface DeskCache {
 export class LocalPathProvider implements NoteSource {
   private readonly compress: Compressor;
   private readonly source: EventSource;
+  private readonly fillSource?: FillSource;
   private readonly cache = new Map<string, DeskCache>();
 
-  constructor(opts: { compress: Compressor; events: EventSource }) {
+  constructor(opts: { compress: Compressor; events: EventSource; fills?: FillSource }) {
     this.compress = opts.compress;
     this.source = opts.events;
+    this.fillSource = opts.fills;
   }
 
   private async tree(deskId: string): Promise<NoteTree> {
@@ -58,5 +61,10 @@ export class LocalPathProvider implements NoteSource {
 
   async events(deskId: string): Promise<TreeEvent[]> {
     return this.source(deskId);
+  }
+
+  async fills(deskId: string): Promise<Fill[]> {
+    if (!this.fillSource) return [];
+    return this.fillSource(deskId);
   }
 }

@@ -19,6 +19,8 @@ export * from "./notes.js";
 export * from "./memoryStore.js";
 export * from "./recipient.js";
 export * from "./submit.js";
+export * from "./sponsoredSubmit.js";
+export * from "./stellarRpcDeployer.js";
 export * from "./assets.js";
 export * from "./secretKeySigner.js";
 export * from "./deskRegistry.js";

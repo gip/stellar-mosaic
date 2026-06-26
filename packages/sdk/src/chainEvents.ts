@@ -9,7 +9,7 @@
 
 import { rpc, scValToNative } from "@stellar/stellar-sdk";
 import type { NetworkConfig } from "./ports.js";
-import type { Amount, Field, TreeEvent } from "./types.js";
+import type { Amount, Field, Fill, TreeEvent } from "./types.js";
 
 function hex(value: unknown): Field {
   const bytes =
@@ -27,6 +27,22 @@ function num(value: unknown): number {
 function amt(value: unknown): Amount {
   if (typeof value !== "bigint") throw new Error("invalid i128 in note-tree event");
   return value.toString();
+}
+
+function eventId(event: rpc.Api.EventResponse): string {
+  const raw = event as unknown as { id?: string; ledger?: number | string; txHash?: string };
+  return raw.id ?? `${raw.ledger ?? 0}:${raw.txHash ?? ""}`;
+}
+
+function eventLedger(event: rpc.Api.EventResponse): number {
+  const raw = event as unknown as { ledger?: number | string };
+  const n = typeof raw.ledger === "string" ? Number(raw.ledger) : (raw.ledger ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function eventTxHash(event: rpc.Api.EventResponse): string {
+  const raw = event as unknown as { txHash?: string; tx_hash?: string };
+  return raw.txHash ?? raw.tx_hash ?? "";
 }
 
 /** Parse one contract event into a {@link TreeEvent}, or null if it doesn't affect the tree. */
@@ -48,9 +64,27 @@ function parseTreeEvent(event: rpc.Api.EventResponse): TreeEvent | null {
   };
 }
 
+/** Parse one contract event into a taker-perspective fill summary, or null for other topics. */
+export function parseFillEvent(event: rpc.Api.EventResponse): Fill | null {
+  const topic = scValToNative(event.topic[0]) as string;
+  if (topic !== "filled") return null;
+  const f = scValToNative(event.value) as unknown[];
+  return {
+    id: eventId(event),
+    ledger: eventLedger(event),
+    tx_hash: eventTxHash(event),
+    asset_in: num(f[0]),
+    amount_in: amt(f[1]),
+    asset_out: num(f[2]),
+    amount_out: amt(f[3]),
+    owner_tag: hex(f[4]),
+  };
+}
+
 interface ContractState {
   cursor?: string;
   acc: TreeEvent[];
+  fills: Fill[];
 }
 
 /** Stateful, incremental reader of a desk's note-tree events. Keeps a per-contract cursor and the
@@ -68,7 +102,7 @@ export class ChainEventSource {
 
   /** Fetch any new events for a contract and return the full insertion-ordered tree-event list. */
   async events(contractId: string, startLedger?: number): Promise<TreeEvent[]> {
-    const st = this.state.get(contractId) ?? { acc: [] };
+    const st = this.state.get(contractId) ?? { acc: [], fills: [] };
     this.state.set(contractId, st);
     const filters = [{ type: "contract" as const, contractIds: [contractId] }];
     for (;;) {
@@ -85,10 +119,18 @@ export class ChainEventSource {
       for (const ev of page.events) {
         const t = parseTreeEvent(ev);
         if (t) st.acc.push(t);
+        const fill = parseFillEvent(ev);
+        if (fill) st.fills.push(fill);
       }
       st.cursor = page.cursor;
       if (page.events.length < 1000) break;
     }
     return st.acc;
+  }
+
+  /** Fetch any new events for a contract and return informational fills in emission order. */
+  async fills(contractId: string, startLedger?: number): Promise<Fill[]> {
+    await this.events(contractId, startLedger);
+    return [...(this.state.get(contractId)?.fills ?? [])];
   }
 }

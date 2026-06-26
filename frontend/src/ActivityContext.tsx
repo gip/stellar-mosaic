@@ -24,6 +24,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const running = useRef(false)
+  const eventCursor = useRef(0)
 
   const authenticate = useCallback(async () => {
     if (!wallet.address || !wallet.networkPassphrase) throw new Error('Connect your Stellar wallet first.')
@@ -69,17 +70,29 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     return () => { active = false }
   }, [wallet.address, wallet.networkPassphrase, refresh])
 
-  // Durable event stream. REST refresh is the reconnect/history fallback.
+  // Durable event replay over MCP. A periodic poll replaces the old backend SSE stream.
   useEffect(() => {
     if (!connected) return
-    const source = new EventSource('/api/operations/events', { withCredentials: true })
-    source.addEventListener('operation', () => void refresh())
-    source.onerror = () => {
-      source.close()
-      setConnected(false)
-      setTimeout(() => void refresh(), 2000)
+    let alive = true
+    const tick = async () => {
+      try {
+        const events = await api.operationEventsSince(eventCursor.current)
+        if (!alive || events.length === 0) return
+        eventCursor.current = Math.max(eventCursor.current, ...events.map((event) => event.cursor))
+        await refresh()
+      } catch {
+        if (alive) {
+          setConnected(false)
+          setTimeout(() => void refresh(), 2000)
+        }
+      }
     }
-    return () => source.close()
+    void tick()
+    const interval = window.setInterval(() => void tick(), 1000)
+    return () => {
+      alive = false
+      window.clearInterval(interval)
+    }
   }, [connected, refresh])
 
   // Any tab may poll, but the backend lease lets only one execute the private step.

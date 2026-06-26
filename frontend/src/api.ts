@@ -1,95 +1,51 @@
-// Typed client for the Rust backend. All paths go through the Vite `/api` proxy in dev.
+import { Noir } from '@noir-lang/noir_js'
+import { Networks } from '@stellar/stellar-sdk'
+import {
+  ChainEventSource,
+  LocalPathProvider,
+  makeNoirCompressor,
+  type AssetDef,
+  type AuthChallenge,
+  type AuthSession,
+  type BaseDeploymentConfig as SdkBaseDeploymentConfig,
+  type BaseShieldConfig,
+  type BaseShieldJob,
+  type CatalogAsset as SdkCatalogAsset,
+  type ChainNote,
+  type ClientAction,
+  type Desk as SdkDesk,
+  type Fill,
+  type NoteProof,
+  type Operation,
+  type OperationRequest,
+  type PairDef,
+  type ProposeAssetBody as SdkProposeAssetBody,
+  type WalletBackupEnvelope,
+} from '@mosaic/sdk'
+import { createBrowserClient } from '@mosaic/sdk/browser'
+import { circuitProvider } from '@mosaic/sdk/assets/browser'
+import { createMcpClient } from '@mosaic/sdk/mcp-client'
+import { rpc } from '@stellar/stellar-sdk'
 import type { Abi, Hex } from 'viem'
+import { FreighterSigner } from './sdk/freighterSigner'
+import { IndexedDbStore } from './sdk/indexedDbStore'
 
-/** Asset class, mirroring the contract `AssetKind`. Fixes the legal deposit routes:
- *  Stellar = shield only; Dual = shield + bridge; BaseRepresented = bridge only, trade-only. */
 export type AssetKind = 'Stellar' | 'Dual' | 'BaseRepresented'
-
-export interface Asset {
-  asset_id: number
-  symbol: string
-  token: string
-  decimals: number
-  kind: AssetKind
-}
-
-export interface Pair {
-  pair_id: number
-  base_asset: number
-  quote_asset: number
-}
-
-/** An entry in the app-wide asset catalog: a cross-chain definition (Stellar side always present,
- * Base side optional). Off-chain metadata only — on-chain support is set at contract deployment. */
-export interface CatalogAsset {
-  id: string
-  symbol: string
-  stellar_token: string | null
-  stellar_decimals: number | null
-  base_chain_id: number | null
-  base_token: string | null
-  base_decimals: number | null
-  proposer_address: string | null
-  is_default: boolean
-  created_at: number
-  trust_count: number
-  trusted_by_me: boolean
-}
-
-export interface ProposeAssetBody {
-  symbol: string
-  stellar_token?: string | null
-  stellar_decimals?: number | null
-  base_chain_id?: number | null
-  base_token?: string | null
-  base_decimals?: number | null
-}
-
-export interface Desk {
-  id: string
-  name: string
-  contract_id: string
-  sponsor_pubkey: string
-  event_start_ledger: number | null
-  assets: Asset[]
-  pairs: Pair[]
-  base_deployment: BaseDeployment | null
-}
-
-export interface BaseAssetMapping {
-  asset_id: number
-  symbol: string
-  token: string
-}
-
-export interface BaseDeployment {
-  status: 'awaiting_wallet' | 'verifying' | 'configuring' | 'active' | 'failed'
-  deployer_address: string
-  tx_hash: string | null
-  bridge_address: string | null
-  error: string | null
-  assets: BaseAssetMapping[]
-}
-
-export interface BaseDeploymentConfig {
-  available: boolean
-  chain_id: number
-  network: 'base-sepolia'
-  reason: string | null
+export type Asset = AssetDef & { token: string }
+export type Pair = PairDef
+export type CatalogAsset = SdkCatalogAsset
+export type ProposeAssetBody = SdkProposeAssetBody
+export type Desk = Omit<SdkDesk, 'assets'> & { assets: Asset[] }
+export type BaseAssetMapping = { asset_id: number; symbol: string; token: string }
+export type BaseDeployment = NonNullable<SdkDesk['base_deployment']>
+export type BaseDeploymentConfig = Omit<SdkBaseDeploymentConfig, 'abi' | 'bytecode'> & {
   abi: Abi | null
   bytecode: Hex | null
 }
+export type { AuthChallenge, AuthSession, BaseShieldConfig, BaseShieldJob, ChainNote, ClientAction, Fill, NoteProof, Operation, OperationRequest, WalletBackupEnvelope }
 
-export interface BaseShieldConfig {
-  available: boolean
-  chain_id: number
-  network: 'base-sepolia'
-  bridge: string | null
-  worker_ready: boolean
-  reason: 'contract_unconfigured' | 'worker_disabled' | null
-}
-
-const BASE = '/api'
+const RPC_URL = import.meta.env.VITE_SOROBAN_RPC ?? 'https://soroban-testnet.stellar.org'
+const MCP_URL = import.meta.env.VITE_MCP_URL ?? 'http://127.0.0.1:8788/mcp'
 
 export class ApiError extends Error {
   status: number
@@ -100,32 +56,55 @@ export class ApiError extends Error {
   }
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const action = activeClientAction
-  const res = await fetch(BASE + path, {
-    credentials: 'include',
-    headers: {
-      'content-type': 'application/json',
-      ...(action
-        ? { 'x-mosaic-action-id': action.id, 'x-mosaic-action-lease': action.lease_token }
-        : {}),
+const mcp = createMcpClient({ url: MCP_URL })
+const deskCache = new Map<string, Desk>()
+const chain = new ChainEventSource({
+  network: { rpcUrl: RPC_URL, networkPassphrase: Networks.TESTNET },
+  startLedger: 0,
+})
+
+let compressNoir: Noir | undefined
+const source = new LocalPathProvider({
+  compress: makeNoirCompressor({
+    execute: async (inputs) => {
+      compressNoir ??= new Noir(await circuitProvider('compress'))
+      return compressNoir.execute(inputs as never)
     },
-    ...init,
-  })
-  if (!res.ok) {
-    let msg = `${res.status} ${res.statusText}`
-    try {
-      const body = await res.json()
-      if (body?.error) msg = body.error
-    } catch {
-      /* ignore */
-    }
-    throw new ApiError(res.status, msg)
-  }
-  return res.json() as Promise<T>
-}
+  }),
+  events: async (deskId) => {
+    const desk = await getDesk(deskId)
+    return chain.events(desk.contract_id, desk.event_start_ledger ?? 0)
+  },
+  fills: async (deskId) => {
+    const desk = await getDesk(deskId)
+    return chain.fills(desk.contract_id, desk.event_start_ledger ?? 0)
+  },
+})
 
 let activeClientAction: ClientAction | null = null
+
+function lease() {
+  return activeClientAction
+    ? { action_id: activeClientAction.id, lease_token: activeClientAction.lease_token }
+    : undefined
+}
+
+async function wrap<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch (error) {
+    if (error instanceof ApiError) throw error
+    throw new ApiError(500, error instanceof Error ? error.message : String(error))
+  }
+}
+
+async function getDesk(id: string): Promise<Desk> {
+  const cached = deskCache.get(id)
+  if (cached) return cached
+  const desk = (await mcp.getDesk(id)) as Desk
+  deskCache.set(id, desk)
+  return desk
+}
 
 /** Mutation relays are accepted only while a leased durable client action is active. */
 export async function withClientAction<T>(action: ClientAction, run: () => Promise<T>): Promise<T> {
@@ -139,201 +118,148 @@ export async function withClientAction<T>(action: ClientAction, run: () => Promi
 }
 
 export const api = {
-  listDesks: () => req<Desk[]>('/desks'),
-  getDesk: (id: string) => req<Desk>(`/desks/${id}`),
-  getRoot: (id: string) => req<{ root: string }>(`/desks/${id}/root`),
+  mcp: () => mcp,
+  listDesks: () => wrap(async () => (await mcp.listDesks()) as Desk[]),
+  getDesk: (id: string) => wrap(() => getDesk(id)),
+  getRoot: (id: string) => wrap(async () => ({ root: await source.root(id) })),
   importDesk: (body: {
     name: string
     contract_id: string
     sponsor_pubkey: string
     assets: Asset[]
     pairs: Pair[]
-  }) => req<Desk>('/desks/import', { method: 'POST', body: JSON.stringify(body) }),
+  }) => wrap(async () => {
+    const desk = (await mcp.importDesk(body)) as Desk
+    deskCache.set(desk.id, desk)
+    return desk
+  }),
   createDesk: (body: {
     name: string
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
     base_deployment?: { deployer_address: string }
-  }) => req<Desk>('/desks', { method: 'POST', body: JSON.stringify(body) }),
-  getBaseDeploymentConfig: () => req<BaseDeploymentConfig>('/base-deployment-config'),
+  }) => wrap(async () => {
+    const desk = (await mcp.createDesk(body)) as Desk
+    deskCache.set(desk.id, desk)
+    return desk
+  }),
+  createDeskSelfFunded: (body: {
+    name: string
+    assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
+    pairs: { base_asset: number; quote_asset: number }[]
+  }) => wrap(async () => {
+    const session = await mcp.session()
+    if (!session) throw new ApiError(401, 'wallet session required')
+    const signer = new FreighterSigner(session.address)
+    const { client } = createBrowserClient({
+      network: { rpcUrl: RPC_URL, networkPassphrase: Networks.TESTNET },
+      signer,
+      store: new IndexedDbStore(),
+      mcp,
+    })
+    const startLedger = (await new rpc.Server(RPC_URL).getLatestLedger()).sequence
+    const deployed = await client.deploy({
+      name: body.name,
+      assets: body.assets.map((asset) => ({
+        asset_id: asset.asset_id,
+        symbol: asset.symbol,
+        token: asset.kind === 'BaseRepresented' ? null : asset.token,
+        decimals: asset.decimals,
+        kind: asset.kind,
+      })),
+      pairs: body.pairs,
+    })
+    const desk = (await mcp.importDesk({
+      name: deployed.name ?? body.name,
+      contract_id: deployed.contractId,
+      sponsor_pubkey: session.address,
+      assets: deployed.assets,
+      pairs: deployed.pairs,
+      event_start_ledger: startLedger,
+    })) as Desk
+    deskCache.set(desk.id, desk)
+    return desk
+  }),
+  getBaseDeploymentConfig: () => wrap(async () => (await mcp.baseDeploymentConfig()) as BaseDeploymentConfig),
   completeBaseDeployment: (id: string, body: { tx_hash: string; bridge_address: string }) =>
-    req<Desk>(`/desks/${id}/base-deployment`, {
-      method: 'POST',
-      body: JSON.stringify(body),
+    wrap(async () => {
+      const desk = (await mcp.completeBaseDeployment(id, body)) as Desk
+      deskCache.set(desk.id, desk)
+      return desk
     }),
-  listCatalogAssets: () => req<CatalogAsset[]>('/assets'),
-  proposeAsset: (body: ProposeAssetBody) =>
-    req<CatalogAsset>('/assets', { method: 'POST', body: JSON.stringify(body) }),
-  trustAsset: (id: string) =>
-    req<{ ok: boolean }>(`/assets/${id}/trust`, { method: 'POST' }),
-  untrustAsset: (id: string) =>
-    req<{ ok: boolean }>(`/assets/${id}/trust`, { method: 'DELETE' }),
-  getNotes: (id: string) => req<{ notes: ChainNote[] }>(`/desks/${id}/notes`),
-  getFills: (id: string) => req<{ fills: Fill[] }>(`/desks/${id}/fills`),
-  getBaseShieldConfig: (id: string) =>
-    req<BaseShieldConfig>(`/desks/${id}/base-shield-config`),
+  listCatalogAssets: () => wrap(() => mcp.listAssets()),
+  proposeAsset: (body: ProposeAssetBody) => wrap(() => mcp.proposeAsset(body)),
+  trustAsset: (id: string) => wrap(() => mcp.trustAsset(id)),
+  untrustAsset: (id: string) => wrap(() => mcp.untrustAsset(id)),
+  getNotes: (id: string) => wrap(async () => ({ notes: await source.notes(id) })),
+  getFills: (id: string) => wrap(async () => ({ fills: await source.fills(id) })),
+  getBaseShieldConfig: (id: string) => wrap(() => mcp.baseShieldConfig(id)),
   enqueueBaseShield: (id: string, body: { expected_bridge: string; deposit_id: number }) =>
-    req<BaseShieldJob>(`/desks/${id}/base-shields`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-  listBaseShields: (id: string) => req<BaseShieldJob[]>(`/desks/${id}/base-shields`),
+    wrap(() => mcp.enqueueBaseShield(id, body)),
+  listBaseShields: (id: string) => wrap(() => mcp.listBaseShields(id)),
   submitShield: (id: string, tx_xdr: string) =>
-    req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/shield`, {
-      method: 'POST',
-      body: JSON.stringify({ tx_xdr }),
+    wrap(async () => {
+      const result = await mcp.relayShield(id, tx_xdr, lease())
+      return { ok: true, result: result.txHash }
     }),
-  getNoteProof: (id: string, ownerTag: string) =>
-    req<NoteProof>(`/desks/${id}/note-proof?owner_tag=${ownerTag}`),
+  getNoteProof: (id: string, ownerTag: string) => wrap(() => source.notePath(id, ownerTag)),
   relayOrder: (id: string, proof_b64: string, public_inputs_b64: string) =>
-    req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/order`, {
-      method: 'POST',
-      body: JSON.stringify({ proof_b64, public_inputs_b64 }),
+    wrap(async () => {
+      const result = await mcp.relayOrder(id, proof_b64, public_inputs_b64, lease())
+      return { ok: true, result: result.txHash }
     }),
   relayJoin: (id: string, proof_b64: string, public_inputs_b64: string) =>
-    req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/join`, {
-      method: 'POST',
-      body: JSON.stringify({ proof_b64, public_inputs_b64 }),
+    wrap(async () => {
+      const result = await mcp.relayJoin(id, proof_b64, public_inputs_b64, lease())
+      return { ok: true, result: result.txHash }
     }),
   relayUnshield: (id: string, to: string, proof_b64: string, public_inputs_b64: string) =>
-    req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/unshield`, {
-      method: 'POST',
-      body: JSON.stringify({ to, proof_b64, public_inputs_b64 }),
+    wrap(async () => {
+      const result = await mcp.relayUnshield(id, to, proof_b64, public_inputs_b64, lease())
+      return { ok: true, result: result.txHash }
     }),
-  relayCancel: (
-    id: string,
-    pair_id: number,
-    side: number,
-    proof_b64: string,
-    public_inputs_b64: string,
-  ) =>
-    req<{ ok: boolean; result: string }>(`/client-actions/relay/desks/${id}/cancel`, {
-      method: 'POST',
-      body: JSON.stringify({ pair_id, side, proof_b64, public_inputs_b64 }),
+  relayCancel: (id: string, pair_id: number, side: number, proof_b64: string, public_inputs_b64: string) =>
+    wrap(async () => {
+      const result = await mcp.relayCancel(id, pair_id, side, proof_b64, public_inputs_b64, lease())
+      return { ok: true, result: result.txHash }
     }),
-  getWalletBackup: (backupId: string) =>
-    req<WalletBackupEnvelope>(`/wallet-backups/${encodeURIComponent(backupId)}`),
+  getWalletBackup: (backupId: string) => wrap(async () => {
+    const backup = await mcp.getWalletBackup(backupId)
+    if (!backup) throw new ApiError(404, 'wallet backup not found')
+    return backup
+  }),
   putWalletBackup: (
     backupId: string,
     body: WalletBackupEnvelope & { expected_generation: number; write_token: string },
-  ) =>
-    req<{ generation: number }>(`/wallet-backups/${encodeURIComponent(backupId)}`, {
-      method: 'PUT',
-      body: JSON.stringify(body),
-    }),
-  getAuthSession: () => req<AuthSession>('/auth/session'),
-  createAuthChallenge: (address: string) =>
-    req<AuthChallenge>('/auth/challenges', { method: 'POST', body: JSON.stringify({ address }) }),
-  createAuthSession: (challenge_id: string, signature: string) =>
-    req<AuthSession>('/auth/sessions', {
-      method: 'POST',
-      body: JSON.stringify({ challenge_id, signature }),
-    }),
-  deleteAuthSession: () => req<{ ok: boolean }>('/auth/sessions', { method: 'DELETE' }),
+  ) => wrap(() => mcp.putWalletBackup(backupId, body)),
+  getAuthSession: () => wrap(async () => {
+    const session = await mcp.session()
+    if (!session) throw new ApiError(401, 'wallet session required')
+    return session
+  }),
+  createAuthChallenge: (address: string) => {
+    void address
+    return Promise.reject(new ApiError(410, 'Use createMcpClient().authenticate() for MCP auth.')) as Promise<AuthChallenge>
+  },
+  createAuthSession: (challenge_id: string, signature: string) => {
+    void challenge_id
+    void signature
+    return Promise.reject(new ApiError(410, 'Use createMcpClient().authenticate() for MCP auth.')) as Promise<AuthSession>
+  },
+  deleteAuthSession: () => wrap(async () => {
+    await mcp.logout()
+    return { ok: true }
+  }),
   createOperation: (body: OperationRequest, idempotencyKey = crypto.randomUUID()) =>
-    req<Operation>('/operations', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'idempotency-key': idempotencyKey },
-      body: JSON.stringify(body),
-    }),
-  listOperations: () => req<Operation[]>('/operations'),
-  getOperation: (id: string) => req<Operation>(`/operations/${id}`),
-  cancelOperation: (id: string) => req<Operation>(`/operations/${id}/cancel`, { method: 'POST' }),
-  claimClientAction: () =>
-    req<{ action: ClientAction | null }>('/client-actions/next', { method: 'POST' }),
-  heartbeatClientAction: (id: string, lease_token: string) =>
-    req<{ lease_expires_at: number }>(`/client-actions/${id}/heartbeat`, {
-      method: 'POST',
-      body: JSON.stringify({ lease_token }),
-    }),
+    wrap(() => mcp.createOperation(body, idempotencyKey)),
+  listOperations: () => wrap(() => mcp.listOperations()),
+  getOperation: (id: string) => wrap(() => mcp.getOperation(id)),
+  cancelOperation: (id: string) => wrap(() => mcp.cancelOperation(id)),
+  claimClientAction: () => wrap(() => mcp.claimClientAction()),
+  heartbeatClientAction: (id: string, lease_token: string) => wrap(() => mcp.heartbeatClientAction(id, lease_token)),
   completeClientAction: (id: string, lease_token: string, result: unknown) =>
-    req<Operation>(`/client-actions/${id}/complete`, {
-      method: 'POST',
-      body: JSON.stringify({ lease_token, result }),
-    }),
+    wrap(() => mcp.completeClientAction(id, lease_token, result)),
   failClientAction: (id: string, lease_token: string, error: string, retryable = false) =>
-    req<Operation>(`/client-actions/${id}/fail`, {
-      method: 'POST',
-      body: JSON.stringify({ lease_token, error, retryable }),
-    }),
-}
-
-export interface AuthChallenge { challenge_id: string; message: string; expires_at: number }
-export interface AuthSession { address: string; network: string; expires_at?: number }
-
-export type OperationStatus =
-  | 'queued' | 'running' | 'waiting_for_client' | 'waiting_for_chain'
-  | 'succeeded' | 'failed' | 'cancelled'
-
-export interface Operation {
-  id: string
-  address: string
-  network: string
-  desk_id: string
-  kind: 'shield' | 'place_order' | 'unshield' | 'cancel_order'
-  request: OperationRequest
-  status: OperationStatus
-  created_at: number
-  updated_at: number
-  error?: string | null
-  submitted: boolean
-}
-
-export type OperationRequest =
-  | { kind: 'shield'; desk_id: string; asset_id: number; amount: string }
-  | { kind: 'place_order'; desk_id: string; pair_id: number; side: 'BUY' | 'SELL'; amount_in: string; min_out: string; partial_allowed: boolean }
-  | { kind: 'unshield'; desk_id: string; asset_id: number; amount: string; recipient: string }
-  | { kind: 'cancel_order'; desk_id: string; wallet_note_id: string }
-
-export interface ClientAction {
-  id: string
-  operation_id: string
-  kind: Operation['kind']
-  payload: OperationRequest
-  lease_token: string
-  lease_expires_at: number
-}
-
-export interface WalletBackupEnvelope {
-  format_version: 1
-  generation: number
-  nonce_b64: string
-  ciphertext_b64: string
-}
-
-export interface BaseShieldJob {
-  id: string
-  desk_id: string
-  bridge: string
-  deposit_id: number
-  status: string
-  block_number?: number | null
-  block_hash?: string | null
-  error?: string | null
-}
-
-export interface NoteProof {
-  leaf_index: number
-  root: string
-  siblings: string[]
-  index_bits: number[]
-}
-
-export interface ChainNote {
-  leaf_index: number
-  asset: number
-  amount: string
-  owner_tag: string
-}
-
-/** A crossing-fill summary from a `filled` event (taker-perspective: `in` spent, `out` received). */
-export interface Fill {
-  id: string
-  ledger: number
-  tx_hash: string
-  asset_in: number
-  amount_in: string
-  asset_out: number
-  amount_out: string
-  owner_tag: string
+    wrap(() => mcp.failClientAction(id, lease_token, error, retryable)),
+  operationEventsSince: (cursor: number) => wrap(() => mcp.operationEventsSince(cursor)),
 }

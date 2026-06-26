@@ -13,6 +13,8 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
+    "start": "node dist/bin.js",
+    "http": "node dist/bin.js --http",
     "test": "tsc -b && node --test test/*.test.mjs"
   },
   "dependencies": {

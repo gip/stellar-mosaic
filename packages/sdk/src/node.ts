@@ -24,6 +24,7 @@ import type { DeskConfig } from "./types.js";
 
 export { SqliteStore } from "./sqliteStore.js";
 export { SecretKeySigner } from "./secretKeySigner.js";
+export { StellarCliDeployer } from "./stellarCliDeployer.js";
 
 export interface NodeClientOptions {
   network: NetworkConfig;

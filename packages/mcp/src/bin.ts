@@ -6,6 +6,16 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createMosaicMcpServer } from "./server.js";
 import { baseShieldConfigFromEnv } from "./baseShield.js";
+import { startHttpServer } from "./http.js";
+import { openMosaicStore } from "./store.js";
 
-const server = createMosaicMcpServer({ baseShield: baseShieldConfigFromEnv() });
-await server.connect(new StdioServerTransport());
+if (process.argv.includes("--http")) {
+  const server = await startHttpServer({ baseShield: baseShieldConfigFromEnv() });
+  process.stderr.write(`mosaic-mcp HTTP listening at ${server.url}\n`);
+} else {
+  const server = createMosaicMcpServer({
+    baseShield: baseShieldConfigFromEnv(),
+    store: openMosaicStore(process.env.MOSAIC_DATABASE_URL),
+  });
+  await server.connect(new StdioServerTransport());
+}

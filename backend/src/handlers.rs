@@ -629,7 +629,7 @@ async fn relay(
     Ok(Json(json!({ "ok": true, "result": out })))
 }
 
-fn validate_public_inputs(action: &str, request: &Value, pi: &[u8], desk: &Desk) -> AppResult<()> {
+pub(crate) fn validate_public_inputs(action: &str, request: &Value, pi: &[u8], desk: &Desk) -> AppResult<()> {
     let field = |index: usize| -> AppResult<u128> {
         let bytes = pi
             .get(index * 32..index * 32 + 32)
@@ -740,7 +740,7 @@ fn validate_public_inputs(action: &str, request: &Value, pi: &[u8], desk: &Desk)
     Ok(())
 }
 
-fn validate_shield_xdr(tx_xdr: &str, desk: &Desk, address: &str, request: &Value) -> AppResult<()> {
+pub(crate) fn validate_shield_xdr(tx_xdr: &str, desk: &Desk, address: &str, request: &Value) -> AppResult<()> {
     use stellar_xdr::curr::{
         HostFunction, Limits, MuxedAccount, OperationBody, ReadXdr, ScAddress, ScVal,
         TransactionEnvelope,
