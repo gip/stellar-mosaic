@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import type { Desk, Pair } from '../api'
 import { ordersFor, type BookIndexSnapshot } from '../bookIndexer'
 import type { Note } from '../notes'
@@ -157,7 +158,7 @@ export default function OrderForm({
       setStatus(`Queued · ${operation.id.slice(0, 8)}`)
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
       setStatus(null)
     } finally {
       setBusy(false)

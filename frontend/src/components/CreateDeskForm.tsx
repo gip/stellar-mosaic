@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { Link } from 'react-router-dom'
 import { api, type BaseDeploymentConfig, type CatalogAsset, type Desk } from '../api'
 import { useEthereumWallet } from '../EthereumWalletContext'
@@ -19,7 +20,13 @@ interface PairRow {
  * Assets are chosen from the catalog, restricted to ones the current user trusts (the built-in
  * defaults are always trusted). New assets are proposed and trusted on the Assets page.
  */
-export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
+export default function CreateDeskForm({
+  onDone,
+  allowSponsored = true,
+}: {
+  onDone: () => void
+  allowSponsored?: boolean
+}) {
   const [name, setName] = useState('')
   const [catalog, setCatalog] = useState<CatalogAsset[] | null>(null)
   const [selected, setSelected] = useState<string[]>([])
@@ -30,8 +37,9 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
   const [deploymentConfig, setDeploymentConfig] = useState<BaseDeploymentConfig | null>(null)
   const [estimatedFee, setEstimatedFee] = useState<bigint | null>(null)
   const [createdDesk, setCreatedDesk] = useState<Desk | null>(null)
-  const [stellarDeployment, setStellarDeployment] = useState<'sponsored' | 'self-funded'>('sponsored')
+  const [stellarDeployment, setStellarDeployment] = useState<'sponsored' | 'self-funded'>('self-funded')
   const ethereum = useEthereumWallet()
+  const effectiveStellarDeployment = allowSponsored ? stellarDeployment : 'self-funded'
 
   useEffect(() => {
     let active = true
@@ -39,11 +47,11 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
       // Desks are Stellar settlement contracts, so only assets with a Stellar side are selectable.
       .listCatalogAssets()
       .then((all) => active && setCatalog(all.filter((a) => a.trusted_by_me && a.stellar_token)))
-      .catch((e) => active && setError(e instanceof Error ? e.message : String(e)))
+      .catch((e) => active && setError(errorMessage(e)))
     return () => {
       active = false
     }
-  }, [])
+  }, [allowSponsored])
 
   useEffect(() => {
     api.getBaseDeploymentConfig().then(setDeploymentConfig).catch(() => setDeploymentConfig(null))
@@ -109,8 +117,8 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
       if (deployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
         throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
       }
-      if (stellarDeployment === 'self-funded' && deployBase) {
-        throw new Error('Base deployment setup currently requires the sponsored MCP deployment path.')
+      if (effectiveStellarDeployment === 'self-funded' && deployBase) {
+        throw new Error('Base deployment setup currently requires the Mosaic Server sponsored deployment path.')
       }
       const deskBody = {
         name,
@@ -120,7 +128,7 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
           ? { base_deployment: { deployer_address: ethereum.address } }
           : {}),
       }
-      const desk = stellarDeployment === 'self-funded'
+      const desk = effectiveStellarDeployment === 'self-funded'
         ? await api.createDeskSelfFunded({ name, assets, pairs: deskPairs })
         : await api.createDesk(deskBody)
       setCreatedDesk(desk)
@@ -129,7 +137,7 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
       setPairs([])
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setBusy(false)
     }
@@ -249,20 +257,22 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
       )}
 
       <label>Stellar deployment</label>
-      <div className="row" style={{ gap: 8, marginBottom: 12 }}>
+      <div className="segmented" style={{ marginBottom: 12 }}>
         <button
           type="button"
-          aria-pressed={stellarDeployment === 'sponsored'}
+          aria-pressed={effectiveStellarDeployment === 'sponsored'}
+          disabled={!allowSponsored}
+          title={allowSponsored ? undefined : 'Trust Mosaic Server in the header to enable sponsorship'}
           onClick={() => setStellarDeployment('sponsored')}
         >
-          MCP sponsored
+          Mosaic Server sponsored
         </button>
         <button
           type="button"
-          aria-pressed={stellarDeployment === 'self-funded'}
+          aria-pressed={effectiveStellarDeployment === 'self-funded'}
           onClick={() => setStellarDeployment('self-funded')}
         >
-          Freighter self-funded
+          Trustless browser deploy
         </button>
       </div>
 

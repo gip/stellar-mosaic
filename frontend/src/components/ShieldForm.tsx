@@ -1,8 +1,11 @@
 import { useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import type { Desk } from '../api'
 import { toRaw } from '../amount'
 import { useRecovery } from '../RecoveryContext'
 import { useActivity } from '../ActivityContext'
+import { useMosaicServer } from '../MosaicServerContext'
+import { shieldTrustless } from '../trustless'
 
 /**
  * Shield a supported asset into the desk's custody. Generates fresh note secrets in-browser,
@@ -11,6 +14,7 @@ import { useActivity } from '../ActivityContext'
  */
 export default function ShieldForm({
   desk,
+  userPubkey,
   disabledReason,
   onDone,
 }: {
@@ -26,6 +30,7 @@ export default function ShieldForm({
   const [error, setError] = useState<string | null>(null)
   const recovery = useRecovery()
   const activity = useActivity()
+  const mosaicServer = useMosaicServer()
   const recoveryReady = recovery.unlocked && !recovery.error
 
   async function submit(e: React.FormEvent) {
@@ -36,12 +41,18 @@ export default function ShieldForm({
     try {
       const asset = desk.assets.find((a) => a.asset_id === assetId)!
       const rawAmount = toRaw(amount, asset.decimals)
-      setStatus('Queueing shield…')
-      const operation = await activity.enqueue({ kind: 'shield', desk_id: desk.id, asset_id: assetId, amount: rawAmount })
-      setStatus(`Queued · ${operation.id.slice(0, 8)}`)
+      if (mosaicServer.trusted) {
+        setStatus('Queueing shield…')
+        const operation = await activity.enqueue({ kind: 'shield', desk_id: desk.id, asset_id: assetId, amount: rawAmount })
+        setStatus(`Queued · ${operation.id.slice(0, 8)}`)
+      } else {
+        setStatus('Submitting with Freighter…')
+        const note = await shieldTrustless(desk, { address: userPubkey, assetId, amount: rawAmount })
+        setStatus(note.indexed ? 'Shielded' : 'Shielded · indexing')
+      }
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
       setStatus(null)
     } finally {
       setBusy(false)

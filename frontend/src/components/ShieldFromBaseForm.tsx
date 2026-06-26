@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { bytesToHex } from 'viem'
 import { api, type BaseShieldConfig, type BaseShieldJob, type Desk } from '../api'
 import { toRaw } from '../amount'
@@ -186,7 +187,7 @@ export default function ShieldFromBaseForm({
       setJob(created)
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setBusy(false)
       setStatus(null)

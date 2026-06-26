@@ -21,6 +21,7 @@ import { SqliteStore } from "./sqliteStore.js";
 import { circuitProvider } from "./assets.node.js";
 import type { Deployer, McpClient, NetworkConfig, NoteStore } from "./ports.js";
 import type { DeskConfig } from "./types.js";
+import { getMosaicLogger, type MosaicLogger } from "./logging.js";
 
 export { SqliteStore } from "./sqliteStore.js";
 export { SecretKeySigner } from "./secretKeySigner.js";
@@ -42,6 +43,8 @@ export interface NodeClientOptions {
   mcp?: McpClient;
   /** Optional deployer (e.g. one that shells to the `stellar` CLI) enabling `client.deploy`. */
   deployer?: Deployer;
+  /** Optional logger. Defaults to the SDK console logger. */
+  logger?: MosaicLogger;
 }
 
 export interface NodeClient {
@@ -52,11 +55,12 @@ export interface NodeClient {
 
 /** Build a fully-local Node {@link MosaicClient}. Returns the client and its desk registry. */
 export function createNodeClient(opts: NodeClientOptions): NodeClient {
+  const logger = opts.logger ?? getMosaicLogger();
   const signer = new SecretKeySigner(opts.secretKey);
   const store = opts.store ?? (opts.dbPath ? new SqliteStore(opts.dbPath) : new MemoryStore());
   const desks = new StaticDeskProvider(opts.desks ?? []);
-  const submitter = new DirectSubmitter({ network: opts.network, signer });
-  const chain = new ChainEventSource({ network: opts.network, startLedger: opts.startLedger });
+  const submitter = new DirectSubmitter({ network: opts.network, signer, logger });
+  const chain = new ChainEventSource({ network: opts.network, startLedger: opts.startLedger, logger });
 
   // The compress circuit is loaded lazily (and only once) for the local Merkle-path tree.
   let compressNoir: Noir | undefined;
@@ -69,6 +73,7 @@ export function createNodeClient(opts: NodeClientOptions): NodeClient {
   const source = new LocalPathProvider({
     compress,
     events: async (deskId) => chain.events((await desks.get(deskId)).contractId),
+    logger,
   });
 
   const funder = opts.network.friendbotUrl
@@ -83,6 +88,7 @@ export function createNodeClient(opts: NodeClientOptions): NodeClient {
     submitter,
     desks,
     circuits: circuitProvider,
+    logger,
     funder,
     deployer: opts.deployer,
     mcp: opts.mcp,

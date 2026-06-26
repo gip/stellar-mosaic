@@ -1,13 +1,16 @@
 import { useEffect, useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { Link } from 'react-router-dom'
 import { api, type Desk } from '../api'
 import { useWallet } from '../WalletContext'
+import { useMosaicServer } from '../MosaicServerContext'
 import CreateDeskForm from '../components/CreateDeskForm'
 import ImportDeskForm from '../components/ImportDeskForm'
 import BaseDeploymentPanel from '../components/BaseDeploymentPanel'
 
 export default function Home() {
   const { address } = useWallet()
+  const mosaicServer = useMosaicServer()
   const [desks, setDesks] = useState<Desk[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -16,7 +19,7 @@ export default function Home() {
       setDesks(await api.listDesks())
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     }
   }
 
@@ -29,7 +32,7 @@ export default function Home() {
         setDesks(next)
         setError(null)
       })
-      .catch((e) => active && setError(e instanceof Error ? e.message : String(e)))
+      .catch((e) => active && setError(errorMessage(e)))
     return () => {
       active = false
     }
@@ -72,16 +75,24 @@ export default function Home() {
       {address ? (
         <>
           <h2>Create desk</h2>
-          <CreateDeskForm onDone={load} />
+          {!mosaicServer.trusted && (
+            <p className="muted">
+              Trustless mode deploys from this browser with Freighter and stores desk metadata locally.
+              Trust Mosaic Server only if you want sponsored deployment or shared import/catalog workflows.
+            </p>
+          )}
+          <CreateDeskForm onDone={load} allowSponsored={mosaicServer.trusted} />
 
-          <details style={{ marginTop: 24 }}>
-            <summary className="muted" style={{ cursor: 'pointer' }}>
-              Import an existing contract instead
-            </summary>
-            <div style={{ marginTop: 12 }}>
-              <ImportDeskForm onDone={load} />
-            </div>
-          </details>
+          {mosaicServer.trusted && (
+            <details style={{ marginTop: 24 }}>
+              <summary className="muted" style={{ cursor: 'pointer' }}>
+                Import an existing contract instead
+              </summary>
+              <div style={{ marginTop: 12 }}>
+                <ImportDeskForm onDone={load} />
+              </div>
+            </details>
+          )}
         </>
       ) : (
         <p className="muted">Connect your wallet to create or import a desk.</p>

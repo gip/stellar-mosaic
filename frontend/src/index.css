@@ -47,6 +47,12 @@ header.topbar {
 .wallet-chain { display: flex; flex-direction: column; gap: 3px; }
 .chain-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 .address-button { border-color: var(--line); padding-inline: 8px; }
+.trust-toggle[aria-pressed="true"],
+button[aria-pressed="true"] {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+}
 header.topbar h1 {
   font-size: 16px;
   font-weight: 600;
@@ -175,6 +181,18 @@ th {
   display: flex;
   gap: 16px;
   flex-wrap: wrap;
+}
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0;
+}
+.segmented button + button {
+  border-left: 0;
+}
+.segmented button[aria-pressed="true"] {
+  background: var(--fg);
+  color: var(--bg);
 }
 .card {
   border: 1px solid var(--line);

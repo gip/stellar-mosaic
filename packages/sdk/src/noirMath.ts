@@ -8,6 +8,7 @@ import { Noir } from "@noir-lang/noir_js";
 import { toFieldHex } from "./field.js";
 import type { CircuitProvider } from "./circuits.js";
 import type { Field } from "./types.js";
+import { initNoirRuntime, type NoirRuntimeOptions } from "./noirRuntime.js";
 
 function asField(v: unknown): Field {
   // noir_js returns field outputs as hex strings; normalize to 0x + 64 hex chars.
@@ -60,12 +61,12 @@ export interface WalletMath {
 }
 
 /** Build the wallet-math helpers over an injected circuit provider. Noir instances are cached. */
-export function makeWalletMath(circuits: CircuitProvider): WalletMath {
+export function makeWalletMath(circuits: CircuitProvider, opts?: NoirRuntimeOptions): WalletMath {
   const cache = new Map<string, Promise<Noir>>();
   const load = (name: string): Promise<Noir> => {
     let p = cache.get(name);
     if (!p) {
-      p = circuits(name).then((c) => new Noir(c));
+      p = initNoirRuntime(opts).then(() => circuits(name)).then((c) => new Noir(c));
       cache.set(name, p);
     }
     return p;

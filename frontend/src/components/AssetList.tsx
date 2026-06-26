@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { api, type CatalogAsset } from '../api'
 import { useWallet } from '../WalletContext'
 
@@ -32,7 +33,7 @@ export default function AssetList({
       else await api.trustAsset(a.id)
       onChange()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setBusy(null)
     }

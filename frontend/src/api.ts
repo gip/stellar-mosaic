@@ -2,6 +2,7 @@ import { Noir } from '@noir-lang/noir_js'
 import { Networks } from '@stellar/stellar-sdk'
 import {
   ChainEventSource,
+  errorMessage,
   LocalPathProvider,
   makeNoirCompressor,
   type AssetDef,
@@ -28,10 +29,13 @@ import { createMcpClient } from '@mosaic/sdk/mcp-client'
 import { rpc } from '@stellar/stellar-sdk'
 import type { Abi, Hex } from 'viem'
 import { FreighterSigner } from './sdk/freighterSigner'
-import { IndexedDbStore } from './sdk/indexedDbStore'
+import { getLocalDesk, IndexedDbStore, listLocalDesks, putLocalDesk } from './sdk/indexedDbStore'
+import { currentAddress } from './wallet'
+import { defaultCatalogAssets } from './defaultCatalog'
+import { initNoirWasm } from './noirWasm'
 
 export type AssetKind = 'Stellar' | 'Dual' | 'BaseRepresented'
-export type Asset = AssetDef & { token: string }
+export type Asset = AssetDef & { token: string | null }
 export type Pair = PairDef
 export type CatalogAsset = SdkCatalogAsset
 export type ProposeAssetBody = SdkProposeAssetBody
@@ -67,6 +71,7 @@ let compressNoir: Noir | undefined
 const source = new LocalPathProvider({
   compress: makeNoirCompressor({
     execute: async (inputs) => {
+      await initNoirWasm()
       compressNoir ??= new Noir(await circuitProvider('compress'))
       return compressNoir.execute(inputs as never)
     },
@@ -94,16 +99,29 @@ async function wrap<T>(run: () => Promise<T>): Promise<T> {
     return await run()
   } catch (error) {
     if (error instanceof ApiError) throw error
-    throw new ApiError(500, error instanceof Error ? error.message : String(error))
+    throw new ApiError(500, errorMessage(error))
   }
 }
 
 async function getDesk(id: string): Promise<Desk> {
   const cached = deskCache.get(id)
   if (cached) return cached
+  const local = await getLocalDesk(id)
+  if (local) {
+    const desk = local as Desk
+    deskCache.set(id, desk)
+    return desk
+  }
   const desk = (await mcp.getDesk(id)) as Desk
   deskCache.set(id, desk)
   return desk
+}
+
+function mergeDesks(remote: Desk[], local: Desk[]): Desk[] {
+  const byId = new Map<string, Desk>()
+  for (const desk of remote) byId.set(desk.id, desk)
+  for (const desk of local) byId.set(desk.id, desk)
+  return [...byId.values()]
 }
 
 /** Mutation relays are accepted only while a leased durable client action is active. */
@@ -119,7 +137,10 @@ export async function withClientAction<T>(action: ClientAction, run: () => Promi
 
 export const api = {
   mcp: () => mcp,
-  listDesks: () => wrap(async () => (await mcp.listDesks()) as Desk[]),
+  listDesks: () => wrap(async () => mergeDesks(
+    await mcp.listDesks().catch(() => [] as Desk[]),
+    (await listLocalDesks()) as Desk[],
+  )),
   getDesk: (id: string) => wrap(() => getDesk(id)),
   getRoot: (id: string) => wrap(async () => ({ root: await source.root(id) })),
   importDesk: (body: {
@@ -148,14 +169,14 @@ export const api = {
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
   }) => wrap(async () => {
-    const session = await mcp.session()
-    if (!session) throw new ApiError(401, 'wallet session required')
-    const signer = new FreighterSigner(session.address)
+    const address = await currentAddress()
+    if (!address) throw new ApiError(401, 'Connect Freighter before deploying a trustless desk.')
+    const signer = new FreighterSigner(address)
     const { client } = createBrowserClient({
       network: { rpcUrl: RPC_URL, networkPassphrase: Networks.TESTNET },
       signer,
       store: new IndexedDbStore(),
-      mcp,
+      initNoir: initNoirWasm,
     })
     const startLedger = (await new rpc.Server(RPC_URL).getLatestLedger()).sequence
     const deployed = await client.deploy({
@@ -169,14 +190,17 @@ export const api = {
       })),
       pairs: body.pairs,
     })
-    const desk = (await mcp.importDesk({
+    const desk = {
+      id: deployed.id,
       name: deployed.name ?? body.name,
       contract_id: deployed.contractId,
-      sponsor_pubkey: session.address,
+      sponsor_pubkey: address,
       assets: deployed.assets,
       pairs: deployed.pairs,
       event_start_ledger: startLedger,
-    })) as Desk
+      base_deployment: null,
+    } as Desk
+    await putLocalDesk(desk)
     deskCache.set(desk.id, desk)
     return desk
   }),
@@ -187,7 +211,10 @@ export const api = {
       deskCache.set(desk.id, desk)
       return desk
     }),
-  listCatalogAssets: () => wrap(() => mcp.listAssets()),
+  listCatalogAssets: () => wrap(async () => {
+    const session = await mcp.session().catch(() => null)
+    return session ? await mcp.listAssets() : defaultCatalogAssets()
+  }),
   proposeAsset: (body: ProposeAssetBody) => wrap(() => mcp.proposeAsset(body)),
   trustAsset: (id: string) => wrap(() => mcp.trustAsset(id)),
   untrustAsset: (id: string) => wrap(() => mcp.untrustAsset(id)),

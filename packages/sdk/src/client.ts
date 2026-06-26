@@ -15,6 +15,8 @@ import { planAssembly, type AssemblyStep, type JoinInputRef } from "./orderPlan.
 import { makeWalletMath, type WalletMath } from "./noirMath.js";
 import { makeProver, type Prover } from "./prove.js";
 import type { CircuitProvider } from "./circuits.js";
+import type { NoirRuntimeOptions } from "./noirRuntime.js";
+import { errorMessage, getMosaicLogger, serializeError, type MosaicLogger } from "./logging.js";
 import type {
   Deployer,
   EthSigner,
@@ -44,12 +46,18 @@ export interface MosaicPorts {
   /** Resolves desk config (contract id, assets, pairs). */
   desks: { get(deskId: string): Promise<DeskConfig> };
   circuits: CircuitProvider;
+  /** Optional runtime hook for browser WASM loaders used by Noir. */
+  noirRuntime?: NoirRuntimeOptions;
+  /** Optional logger. Defaults to the SDK console logger. */
+  logger?: MosaicLogger;
   funder?: Funder;
   deployer?: Deployer;
   ethSigner?: EthSigner;
   mcp?: McpClient;
   /** Notified after note mutations (e.g. to trigger a UI refresh). */
   onNotesChanged?: () => void;
+  /** Lets an app protect or annotate freshly-created notes before a transaction is submitted. */
+  prepareNotes?: (notes: Note[]) => Promise<Note[]>;
 }
 
 export interface ShieldParams {
@@ -88,12 +96,21 @@ export class MosaicClient {
   private readonly notes: NoteManager;
   private readonly wallet: WalletMath;
   private readonly prover: Prover;
+  private readonly logger: MosaicLogger;
 
   constructor(ports: MosaicPorts) {
     this.p = ports;
+    this.logger = ports.logger ?? getMosaicLogger();
     this.notes = new NoteManager(ports.store, ports.onNotesChanged);
-    this.wallet = makeWalletMath(ports.circuits);
-    this.prover = makeProver(ports.circuits);
+    this.wallet = makeWalletMath(ports.circuits, ports.noirRuntime);
+    this.prover = makeProver(ports.circuits, ports.noirRuntime);
+  }
+
+  private async prepareNotes(notes: Note[]): Promise<Note[]> {
+    if (!this.p.prepareNotes) return notes;
+    const prepared = await this.p.prepareNotes(notes);
+    if (prepared.length !== notes.length) throw new Error("prepareNotes returned the wrong number of notes.");
+    return prepared;
   }
 
   // --- helpers ----------------------------------------------------------------------------------
@@ -113,6 +130,7 @@ export class MosaicClient {
       try {
         return await this.p.source.notePath(deskId, ownerTag);
       } catch (err) {
+        this.logger.debug("note path not indexed yet", { deskId, ownerTag, error: err });
         if (Date.now() - start >= timeoutMs) throw err;
         await sleep(1_500);
       }
@@ -138,48 +156,66 @@ export class MosaicClient {
   // --- shield -----------------------------------------------------------------------------------
 
   async shield(params: ShieldParams): Promise<{ note: Note }> {
-    const desk = await this.p.desks.get(params.deskId);
-    const asset = desk.assets.find((a) => a.asset_id === params.asset_id);
-    if (!asset) throw new Error("The requested asset is not registered on this desk.");
-
-    const sk = randomField();
-    const rho = randomField();
-    const owner_tag = await this.wallet.noteTag(sk, rho);
-    const note: Note = {
-      id: crypto.randomUUID(),
-      deskId: desk.id,
-      role: "asset",
-      asset_id: params.asset_id,
-      symbol: asset.symbol,
-      amount: params.amount,
-      sk,
-      rho,
-      owner_tag,
-      status: "active",
-      indexed: false,
-      createdAt: nowMs(),
-    };
-    await this.notes.add(note);
-
-    const source = await this.p.signer.address();
-    const res = await this.p.submitter.submit({
-      deskId: desk.id,
-      contractId: desk.contractId,
-      method: "shield",
-      args: [
-        new Address(source).toScVal(),
-        nativeToScVal(params.asset_id, { type: "u32" }),
-        nativeToScVal(BigInt(params.amount), { type: "i128" }),
-        this.scvBytes(fieldToBytes32(owner_tag)),
-      ],
-    });
-    await this.notes.update(note.id, { txHash: res.txHash });
+    let noteId: string | undefined;
     try {
-      await this.waitForConfirm(desk.id, note.id, 30_000);
-    } catch {
-      /* shield is final; leave it pending until the loop reconciles it */
+      this.logger.info("shield started", { deskId: params.deskId, assetId: params.asset_id, amount: params.amount });
+      const desk = await this.p.desks.get(params.deskId);
+      const asset = desk.assets.find((a) => a.asset_id === params.asset_id);
+      if (!asset) throw new Error("The requested asset is not registered on this desk.");
+
+      const sk = randomField();
+      const rho = randomField();
+      const owner_tag = await this.wallet.noteTag(sk, rho);
+      let note: Note = {
+        id: crypto.randomUUID(),
+        deskId: desk.id,
+        role: "asset",
+        asset_id: params.asset_id,
+        symbol: asset.symbol,
+        amount: params.amount,
+        sk,
+        rho,
+        owner_tag,
+        status: "active",
+        indexed: false,
+        createdAt: nowMs(),
+      };
+      [note] = await this.prepareNotes([note]);
+      noteId = note.id;
+      await this.notes.add(note);
+      this.logger.info("shield note staged", { deskId: desk.id, noteId, assetId: params.asset_id, symbol: asset.symbol });
+
+      const source = await this.p.signer.address();
+      const res = await this.p.submitter.submit({
+        deskId: desk.id,
+        contractId: desk.contractId,
+        method: "shield",
+        args: [
+          new Address(source).toScVal(),
+          nativeToScVal(params.asset_id, { type: "u32" }),
+          nativeToScVal(BigInt(params.amount), { type: "i128" }),
+          this.scvBytes(fieldToBytes32(owner_tag)),
+        ],
+      });
+      await this.notes.update(note.id, { txHash: res.txHash });
+      this.logger.info("shield transaction submitted", { deskId: desk.id, noteId, txHash: res.txHash });
+      try {
+        await this.waitForConfirm(desk.id, note.id, 30_000);
+        this.logger.info("shield note indexed", { deskId: desk.id, noteId });
+      } catch (error) {
+        this.logger.warn("shield note not indexed before timeout", { deskId: desk.id, noteId, error });
+        /* shield is final; leave it pending until the loop reconciles it */
+      }
+      return { note: (await this.notes.forDesk(desk.id)).find((n) => n.id === note.id) ?? note };
+    } catch (error) {
+      this.logger.error("shield failed", {
+        deskId: params.deskId,
+        noteId,
+        message: errorMessage(error),
+        error: serializeError(error),
+      });
+      throw error;
     }
-    return { note: (await this.notes.forDesk(desk.id)).find((n) => n.id === note.id) ?? note };
   }
 
   // --- assemble (join/split) --------------------------------------------------------------------
@@ -274,7 +310,7 @@ export class MosaicClient {
       out_amount_2: changeRaw.toString(),
     });
 
-    const target: Note = {
+    let target: Note = {
       id: crypto.randomUUID(),
       deskId: desk.id,
       role: "asset",
@@ -288,7 +324,7 @@ export class MosaicClient {
       indexed: false,
       createdAt: nowMs(),
     };
-    const change: Note | null =
+    let change: Note | null =
       changeRaw > 0n
         ? {
             id: crypto.randomUUID(),
@@ -305,6 +341,9 @@ export class MosaicClient {
             createdAt: nowMs(),
           }
         : null;
+    const prepared = await this.prepareNotes(change ? [target, change] : [target]);
+    target = prepared[0];
+    change = change ? prepared[1] : null;
     await this.notes.add(target);
     if (change) await this.notes.add(change);
 
@@ -366,7 +405,7 @@ export class MosaicClient {
       order_leaf: terms.order_leaf,
     });
 
-    const output: Note = {
+    let output: Note = {
       id: crypto.randomUUID(),
       deskId: desk.id,
       role: "order-output",
@@ -390,6 +429,7 @@ export class MosaicClient {
         amount_in: offer.amount,
       },
     };
+    [output] = await this.prepareNotes([output]);
     await this.notes.add(output);
     await this.p.submitter.submit({
       deskId: desk.id,
@@ -454,7 +494,7 @@ export class MosaicClient {
       cancel_owner_tag: c.cancel_owner_tag,
       return_owner_tag,
     });
-    const refund: Note = {
+    let refund: Note = {
       id: crypto.randomUUID(),
       deskId: desk.id,
       role: "asset",
@@ -468,6 +508,7 @@ export class MosaicClient {
       indexed: false,
       createdAt: nowMs(),
     };
+    [refund] = await this.prepareNotes([refund]);
     await this.notes.add(refund);
     await this.p.submitter.submit({
       deskId: desk.id,
@@ -541,7 +582,7 @@ export class MosaicClient {
     const rho = randomField();
     const owner_tag = await this.wallet.noteTag(sk, rho);
     const asset = desk.assets.find((a) => a.asset_id === params.asset_id);
-    await this.notes.add({
+    let note: Note = {
       id: crypto.randomUUID(),
       deskId: desk.id,
       role: "asset",
@@ -554,7 +595,9 @@ export class MosaicClient {
       status: "active",
       indexed: false,
       createdAt: nowMs(),
-    });
+    };
+    [note] = await this.prepareNotes([note]);
+    await this.notes.add(note);
     return this.p.mcp.baseShield({
       contractId: desk.contractId,
       asset_id: params.asset_id,

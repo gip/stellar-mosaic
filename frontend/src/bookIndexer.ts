@@ -1,5 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import { BASE_FEE, Contract, Networks, TransactionBuilder, rpc, scValToNative } from '@stellar/stellar-sdk'
+import { errorMessage } from '@mosaic/sdk'
 import type { AssetKind, Desk } from './api'
 import { Buffer } from 'buffer'
 
@@ -385,7 +386,7 @@ async function readBookSequence(
     .build()
   const simulation = await server.simulateTransaction(tx)
   if (rpc.Api.isSimulationError(simulation) || !simulation.result) {
-    throw new Error(`book_sequence simulation failed${rpc.Api.isSimulationError(simulation) ? `: ${simulation.error}` : ''}`)
+    throw new Error(`book_sequence simulation failed${rpc.Api.isSimulationError(simulation) ? `: ${errorMessage(simulation.error)}` : ''}`)
   }
   return bigint(scValToNative(simulation.result.retval), 'book_sequence')
 }
@@ -401,7 +402,7 @@ export async function syncBookIndex(
   const transient = async (error: unknown) => ({
     ...(await snapshot(scope)),
     status: 'syncing' as const,
-    error: error instanceof Error ? error.message : String(error),
+    error: errorMessage(error),
   })
   const db = await database()
   const meta = (await db.get('meta', scope)) ?? initialMeta(scope)
@@ -420,7 +421,7 @@ export async function syncBookIndex(
   try {
     await applyBookEventPage(scope, response.events, response.cursor, response.latestLedger)
   } catch (error) {
-    await setFatal(scope, error instanceof Error ? error.message : String(error))
+    await setFatal(scope, errorMessage(error))
     return snapshot(scope)
   }
   let target: bigint

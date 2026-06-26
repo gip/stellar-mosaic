@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { api } from '../api'
 
 const BASE_SEPOLIA_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e'
@@ -70,7 +71,7 @@ export default function AddAssetForm({ onDone }: { onDone: () => void }) {
       setBaseToken('')
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setBusy(false)
     }

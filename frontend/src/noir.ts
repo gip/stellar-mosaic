@@ -3,9 +3,10 @@
 // same names so existing imports of './noir' keep working.
 import { makeWalletMath } from '@mosaic/sdk'
 import { circuitProvider } from '@mosaic/sdk/assets/browser'
+import { initNoirWasm } from './noirWasm'
 
 export type { OrderTerms, JoinTerms } from '@mosaic/sdk'
 
-const wallet = makeWalletMath(circuitProvider)
+const wallet = makeWalletMath(circuitProvider, { initNoir: initNoirWasm })
 
 export const { noteTag, orderTerms, noteNullifier, joinTerms } = wallet

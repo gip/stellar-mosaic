@@ -17,7 +17,9 @@ import { FriendbotFunder } from "./friendbot.js";
 import { loadSettlementWasm, loadVk, circuitProvider } from "./assets.browser.js";
 import { StellarRpcDeployer } from "./stellarRpcDeployer.js";
 import type { Deployer, McpClient, NetworkConfig, NoteStore, StellarSigner } from "./ports.js";
-import type { DeskConfig } from "./types.js";
+import type { DeskConfig, Note } from "./types.js";
+import { initNoirRuntime, type NoirRuntimeOptions } from "./noirRuntime.js";
+import { getMosaicLogger, type MosaicLogger } from "./logging.js";
 
 export interface BrowserClientOptions {
   network: NetworkConfig;
@@ -31,6 +33,12 @@ export interface BrowserClientOptions {
   startLedger?: number;
   /** Notified after note mutations (e.g. dispatch a DOM event to refresh React). */
   onNotesChanged?: () => void;
+  /** Protect or annotate newly-created notes before direct browser submissions. */
+  prepareNotes?: (notes: Note[]) => Promise<Note[]>;
+  /** Optional runtime hook for apps that serve Noir WASM from app-controlled URLs. */
+  initNoir?: NoirRuntimeOptions["initNoir"];
+  /** Optional logger. Defaults to the SDK console logger. */
+  logger?: MosaicLogger;
   /** Optional MCP for the Base→Stellar shield flow. */
   mcp?: McpClient;
   /** Optional self-funded deployer. In browser apps this should sign with the connected wallet. */
@@ -44,13 +52,18 @@ export interface BrowserClient {
 
 /** Build a fully-local browser {@link MosaicClient}. Returns the client and its desk registry. */
 export function createBrowserClient(opts: BrowserClientOptions): BrowserClient {
+  const logger = opts.logger ?? getMosaicLogger();
   const desks = new StaticDeskProvider(opts.desks ?? []);
-  const submitter = new DirectSubmitter({ network: opts.network, signer: opts.signer });
-  const chain = new ChainEventSource({ network: opts.network, startLedger: opts.startLedger });
+  const submitter = new DirectSubmitter({ network: opts.network, signer: opts.signer, logger });
+  const chain = new ChainEventSource({ network: opts.network, startLedger: opts.startLedger, logger });
+  const noirRuntime: NoirRuntimeOptions | undefined = opts.initNoir
+    ? { initNoir: opts.initNoir }
+    : undefined;
 
   let compressNoir: Noir | undefined;
   const compress = makeNoirCompressor({
     execute: async (inputs) => {
+      await initNoirRuntime(noirRuntime);
       compressNoir ??= new Noir(await circuitProvider("compress"));
       return compressNoir.execute(inputs as never);
     },
@@ -59,6 +72,7 @@ export function createBrowserClient(opts: BrowserClientOptions): BrowserClient {
     compress,
     events: async (deskId) => chain.events((await desks.get(deskId)).contractId),
     fills: async (deskId) => chain.fills((await desks.get(deskId)).contractId),
+    logger,
   });
 
   const funder = opts.network.friendbotUrl
@@ -81,8 +95,11 @@ export function createBrowserClient(opts: BrowserClientOptions): BrowserClient {
     submitter,
     desks,
     circuits: circuitProvider,
+    noirRuntime,
+    logger,
     funder,
     onNotesChanged: opts.onNotesChanged,
+    prepareNotes: opts.prepareNotes,
     mcp: opts.mcp,
     deployer,
   });

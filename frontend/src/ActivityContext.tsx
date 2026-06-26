@@ -1,10 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { ApiError, api, type Operation, type OperationRequest } from './api'
-import { ensureBackendSession } from './auth'
 import { executeClientAction, reconcileOperationJournals, rollbackClientAction } from './operationExecutor'
 import { useRecovery } from './RecoveryContext'
 import { useWallet } from './WalletContext'
 import { cacheActionResult, cachedActionResult, removeCachedActionResult } from './actionCache'
+import { useMosaicServer } from './MosaicServerContext'
 
 interface ActivityState {
   operations: Operation[]
@@ -19,6 +20,7 @@ const Ctx = createContext<ActivityState | null>(null)
 
 export function ActivityProvider({ children }: { children: ReactNode }) {
   const wallet = useWallet()
+  const mosaicServer = useMosaicServer()
   const recovery = useRecovery()
   const [operations, setOperations] = useState<Operation[]>([])
   const [connected, setConnected] = useState(false)
@@ -28,9 +30,9 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
 
   const authenticate = useCallback(async () => {
     if (!wallet.address || !wallet.networkPassphrase) throw new Error('Connect your Stellar wallet first.')
-    await ensureBackendSession(wallet.address, wallet.networkPassphrase)
+    if (!mosaicServer.trusted) throw new Error('Trust Mosaic Server in the header to use server-backed operations.')
     setConnected(true)
-  }, [wallet.address, wallet.networkPassphrase])
+  }, [mosaicServer.trusted, wallet.address, wallet.networkPassphrase])
 
   const refresh = useCallback(async () => {
     if (!wallet.address) return
@@ -42,7 +44,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       setError(null)
     } catch (e) {
       setConnected(false)
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     }
   }, [authenticate, wallet.address, recovery.unlocked])
 
@@ -64,11 +66,11 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       await Promise.resolve()
       if (!active) return
       setOperations([]); setConnected(false); setError(null)
-      if (wallet.address && wallet.networkPassphrase) await refresh()
+      if (wallet.address && wallet.networkPassphrase && mosaicServer.trusted) await refresh()
     }
     void selectWallet()
     return () => { active = false }
-  }, [wallet.address, wallet.networkPassphrase, refresh])
+  }, [mosaicServer.trusted, wallet.address, wallet.networkPassphrase, refresh])
 
   // Durable event replay over MCP. A periodic poll replaces the old backend SSE stream.
   useEffect(() => {
@@ -115,7 +117,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
           await api.completeClientAction(action.id, action.lease_token, result)
           await removeCachedActionResult(action.id)
         } catch (e) {
-          const message = e instanceof Error ? e.message : String(e)
+          const message = errorMessage(e)
           const retryable = e instanceof ApiError && (e.status === 502 || e.status === 503 || e.status === 504)
           const failed = await api.failClientAction(action.id, action.lease_token, message, retryable).catch(() => null)
           if (failed?.status === 'succeeded' && wallet.address) {

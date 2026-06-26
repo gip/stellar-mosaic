@@ -10,6 +10,7 @@
 import { rpc, scValToNative } from "@stellar/stellar-sdk";
 import type { NetworkConfig } from "./ports.js";
 import type { Amount, Field, Fill, TreeEvent } from "./types.js";
+import { getMosaicLogger, type MosaicLogger } from "./logging.js";
 
 function hex(value: unknown): Field {
   const bytes =
@@ -46,7 +47,7 @@ function eventTxHash(event: rpc.Api.EventResponse): string {
 }
 
 /** Parse one contract event into a {@link TreeEvent}, or null if it doesn't affect the tree. */
-function parseTreeEvent(event: rpc.Api.EventResponse): TreeEvent | null {
+export function parseTreeEvent(event: rpc.Api.EventResponse): TreeEvent | null {
   const topic = scValToNative(event.topic[0]) as string;
   if (topic !== "shielded" && topic !== "noteins" && topic !== "settled") return null;
   const f = scValToNative(event.value) as unknown[];
@@ -87,6 +88,12 @@ interface ContractState {
   fills: Fill[];
 }
 
+export interface ChainEventSnapshot {
+  cursor?: string;
+  treeEvents: TreeEvent[];
+  fills: Fill[];
+}
+
 /** Stateful, incremental reader of a desk's note-tree events. Keeps a per-contract cursor and the
  * accumulated insertion-ordered list, so repeated `events()` calls only fetch new pages. Use as the
  * {@link LocalPathProvider} event source. */
@@ -94,10 +101,12 @@ export class ChainEventSource {
   private readonly server: rpc.Server;
   private readonly startLedger?: number;
   private readonly state = new Map<string, ContractState>();
+  private readonly logger: MosaicLogger;
 
-  constructor(opts: { network: NetworkConfig; startLedger?: number }) {
+  constructor(opts: { network: NetworkConfig; startLedger?: number; logger?: MosaicLogger }) {
     this.server = new rpc.Server(opts.network.rpcUrl);
     this.startLedger = opts.startLedger;
+    this.logger = opts.logger ?? getMosaicLogger();
   }
 
   /** Fetch any new events for a contract and return the full insertion-ordered tree-event list. */
@@ -105,25 +114,42 @@ export class ChainEventSource {
     const st = this.state.get(contractId) ?? { acc: [], fills: [] };
     this.state.set(contractId, st);
     const filters = [{ type: "contract" as const, contractIds: [contractId] }];
-    for (;;) {
-      let page: rpc.Api.GetEventsResponse;
-      if (st.cursor) {
-        page = await this.server.getEvents({ filters, cursor: st.cursor, limit: 1000 });
-      } else {
-        const from = startLedger ?? this.startLedger;
-        if (from === undefined) {
-          throw new Error("ChainEventSource needs a startLedger for the first read of a contract");
+    try {
+      for (;;) {
+        let page: rpc.Api.GetEventsResponse;
+        const beforeTree = st.acc.length;
+        const beforeFills = st.fills.length;
+        if (st.cursor) {
+          this.logger.debug("chain events fetch page", { contractId, cursor: st.cursor });
+          page = await this.server.getEvents({ filters, cursor: st.cursor, limit: 1000 });
+        } else {
+          const from = startLedger ?? this.startLedger;
+          if (from === undefined) {
+            throw new Error("ChainEventSource needs a startLedger for the first read of a contract");
+          }
+          this.logger.debug("chain events fetch from ledger", { contractId, startLedger: from });
+          page = await this.server.getEvents({ filters, startLedger: from, limit: 1000 });
         }
-        page = await this.server.getEvents({ filters, startLedger: from, limit: 1000 });
+        for (const ev of page.events) {
+          const t = parseTreeEvent(ev);
+          if (t) st.acc.push(t);
+          const fill = parseFillEvent(ev);
+          if (fill) st.fills.push(fill);
+        }
+        st.cursor = page.cursor;
+        this.logger.debug("chain events page fetched", {
+          contractId,
+          ledger: page.latestLedger,
+          eventCount: page.events.length,
+          treeEvents: st.acc.length - beforeTree,
+          fills: st.fills.length - beforeFills,
+          cursor: st.cursor,
+        });
+        if (page.events.length < 1000) break;
       }
-      for (const ev of page.events) {
-        const t = parseTreeEvent(ev);
-        if (t) st.acc.push(t);
-        const fill = parseFillEvent(ev);
-        if (fill) st.fills.push(fill);
-      }
-      st.cursor = page.cursor;
-      if (page.events.length < 1000) break;
+    } catch (error) {
+      this.logger.error("chain events fetch failed", { contractId, error });
+      throw error;
     }
     return st.acc;
   }
@@ -132,5 +158,16 @@ export class ChainEventSource {
   async fills(contractId: string, startLedger?: number): Promise<Fill[]> {
     await this.events(contractId, startLedger);
     return [...(this.state.get(contractId)?.fills ?? [])];
+  }
+
+  /** Fetch all currently available parsed events for a contract and return a coherent snapshot. */
+  async snapshot(contractId: string, startLedger?: number): Promise<ChainEventSnapshot> {
+    await this.events(contractId, startLedger);
+    const st = this.state.get(contractId);
+    return {
+      cursor: st?.cursor,
+      treeEvents: [...(st?.acc ?? [])],
+      fills: [...(st?.fills ?? [])],
+    };
   }
 }

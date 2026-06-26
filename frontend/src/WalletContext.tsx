@@ -1,9 +1,9 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { connect as fxConnect, currentAddress, network as currentNetwork } from './wallet'
 import { reconcileDirectSubmissions } from './directTransaction'
 import { Networks } from '@stellar/stellar-sdk'
 import { api } from './api'
-import { ensureBackendSession } from './auth'
 
 const DISCONNECTED_KEY = 'stellar-mosaic.wallet-disconnected'
 
@@ -87,14 +87,13 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       if (nextNetwork?.networkPassphrase !== Networks.TESTNET) {
         throw new Error('Switch Freighter to Stellar Testnet to sign in.')
       }
-      await ensureBackendSession(nextAddress, nextNetwork.networkPassphrase)
       disconnected.current = false
       storeDisconnected(false)
       setAddress(nextAddress)
       setNetworkPassphrase(nextNetwork.networkPassphrase)
       setReady(true)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setConnecting(false)
     }

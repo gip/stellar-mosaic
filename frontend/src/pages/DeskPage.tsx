@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { errorMessage } from '@mosaic/sdk'
 import { api, type Asset, type Desk } from '../api'
 import { NATIVE_EVM_SENTINEL } from '../baseDeployment'
 import { useWallet } from '../WalletContext'
@@ -51,7 +52,7 @@ export default function DeskPage() {
 
   useEffect(() => {
     if (!deskId) return
-    api.getDesk(deskId).then(setDesk).catch((e) => setError(String(e)))
+    api.getDesk(deskId).then(setDesk).catch((e) => setError(errorMessage(e)))
     reloadNotes()
   }, [deskId, reloadNotes])
 

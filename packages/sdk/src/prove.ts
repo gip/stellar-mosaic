@@ -8,6 +8,7 @@ import { UltraHonkBackend } from "@aztec/bb.js";
 import { toField32 } from "./field.js";
 import type { CircuitProvider } from "./circuits.js";
 import type { Field } from "./types.js";
+import { initNoirRuntime, type NoirRuntimeOptions } from "./noirRuntime.js";
 
 /** Pack noir_js public-input field strings as the contract's `public_inputs`: 32-byte BE each. */
 export function packPublicInputs(publicInputs: string[]): Uint8Array {
@@ -98,11 +99,12 @@ export interface Prover {
 }
 
 /** Build the prover over an injected circuit provider. */
-export function makeProver(circuits: CircuitProvider): Prover {
+export function makeProver(circuits: CircuitProvider, opts?: NoirRuntimeOptions): Prover {
   async function run(
     name: string,
     inputs: Record<string, unknown>,
   ): Promise<ProofBundle> {
+    await initNoirRuntime(opts);
     const compiled = await circuits(name);
     const noir = new Noir(compiled);
     const { witness } = await noir.execute(inputs as never);

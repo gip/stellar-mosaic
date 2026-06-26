@@ -1,6 +1,7 @@
 import { openDB, type DBSchema } from 'idb'
 import { Buffer } from 'buffer'
 import { Keypair } from '@stellar/stellar-sdk'
+import { errorMessage } from '@mosaic/sdk'
 import { ApiError, api, type WalletBackupEnvelope } from './api'
 import { signRecoveryMessage } from './wallet'
 import {
@@ -453,5 +454,5 @@ function webBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
 }
 
 function message(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+  return errorMessage(e)
 }

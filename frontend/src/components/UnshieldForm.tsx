@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { StrKey } from '@stellar/stellar-sdk'
 import type { Desk } from '../api'
 import { toRaw, formatAmount } from '../amount'
@@ -91,7 +92,7 @@ export default function UnshieldForm({
       setStatus(`Queued · ${operation.id.slice(0, 8)}`)
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
       setStatus(null)
     } finally {
       setBusy(false)

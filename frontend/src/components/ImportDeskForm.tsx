@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { api } from '../api'
 
 const ASSETS_TEMPLATE = `[
@@ -39,7 +40,7 @@ export default function ImportDeskForm({ onDone }: { onDone: () => void }) {
       setSponsor('')
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setBusy(false)
     }

@@ -3,6 +3,7 @@ import { useWallet } from './WalletContext'
 import RecoveryPanel from './components/RecoveryPanel'
 import ActivityDrawer from './components/ActivityDrawer'
 import { useEthereumWallet } from './EthereumWalletContext'
+import { useMosaicServer } from './MosaicServerContext'
 
 function short(addr: string): string {
   return addr.length > 12 ? `${addr.slice(0, 5)}…${addr.slice(-4)}` : addr
@@ -11,6 +12,7 @@ function short(addr: string): string {
 export default function App() {
   const { address, connect, disconnect, connecting, error } = useWallet()
   const ethereum = useEthereumWallet()
+  const mosaicServer = useMosaicServer()
   return (
     <>
       <header className="topbar">
@@ -38,6 +40,21 @@ export default function App() {
             )}
           </div>
           <div className="wallet-chain">
+            <span className="chain-label">Mosaic Server</span>
+            <div className="wallet-controls">
+              <button
+                className="trust-toggle"
+                type="button"
+                aria-pressed={mosaicServer.trusted}
+                disabled={!address || mosaicServer.connecting}
+                title={address ? 'Sign a Mosaic Server challenge with Freighter' : 'Connect Stellar first'}
+                onClick={() => void (mosaicServer.trusted ? mosaicServer.disconnect() : mosaicServer.trust())}
+              >
+                {mosaicServer.connecting ? 'Connecting…' : mosaicServer.trusted ? 'Trusted' : 'Trust server'}
+              </button>
+            </div>
+          </div>
+          <div className="wallet-chain">
             <span className="chain-label">Base Sepolia</span>
             {ethereum.address ? (
               <div className="wallet-controls">
@@ -54,6 +71,7 @@ export default function App() {
             )}
           </div>
           {error && <span className="err">{error}</span>}
+          {mosaicServer.error && <span className="err">{mosaicServer.error}</span>}
           {ethereum.error && <span className="err">{ethereum.error}</span>}
         </div>
       </header>

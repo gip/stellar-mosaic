@@ -24,8 +24,14 @@ importers:
       '@mosaic/sdk':
         specifier: workspace:*
         version: link:../packages/sdk
+      '@noir-lang/acvm_js':
+        specifier: ^1.0.0-beta.9
+        version: 1.0.0-beta.9
       '@noir-lang/noir_js':
         specifier: 1.0.0-beta.9
+        version: 1.0.0-beta.9
+      '@noir-lang/noirc_abi':
+        specifier: ^1.0.0-beta.9
         version: 1.0.0-beta.9
       '@stellar/freighter-api':
         specifier: ^6.0.1

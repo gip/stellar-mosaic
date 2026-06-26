@@ -3,10 +3,11 @@
 // of './prove' keep working.
 import { makeProver } from '@mosaic/sdk'
 import { circuitProvider } from '@mosaic/sdk/assets/browser'
+import { initNoirWasm } from './noirWasm'
 
 export { b64 } from '@mosaic/sdk'
 export type { LiftInputs, UnshieldInputs, JoinInputs, CancelInputs, ProofBundle } from '@mosaic/sdk'
 
-const prover = makeProver(circuitProvider)
+const prover = makeProver(circuitProvider, { initNoir: initNoirWasm })
 
 export const { proveLift, proveUnshield, proveJoin, proveCancel } = prover
