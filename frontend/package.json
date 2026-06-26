@@ -11,6 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@mosaic/sdk": "*",
     "@aztec/bb.js": "^0.87.0",
     "@noir-lang/noir_js": "^1.0.0-beta.9",
     "@stellar/freighter-api": "^6.0.1",

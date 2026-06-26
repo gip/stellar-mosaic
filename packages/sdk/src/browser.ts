@@ -1,0 +1,77 @@
+// @mosaic/sdk/browser — browser client factory. Wires the core to browser-native adapters for
+// fully-local operation: a caller-supplied StellarSigner (e.g. a Freighter-backed one) and NoteStore
+// (e.g. IndexedDB), plus DirectSubmitter, LocalPathProvider over the on-chain ChainEventSource, the
+// fetched circuit provider, and a Friendbot funder. Signing and storage are injected because they
+// depend on app-level packages (the Freighter extension, idb) that the SDK does not pull in.
+//
+// This makes a backend OPTIONAL in the browser. An McpClient can be supplied for the Base flow.
+
+import { Noir } from "@noir-lang/noir_js";
+import { MosaicClient } from "./client.js";
+import { DirectSubmitter } from "./submit.js";
+import { ChainEventSource } from "./chainEvents.js";
+import { LocalPathProvider } from "./localPathProvider.js";
+import { makeNoirCompressor } from "./noirCompressor.js";
+import { StaticDeskProvider } from "./deskRegistry.js";
+import { FriendbotFunder } from "./friendbot.js";
+import { circuitProvider } from "./assets.browser.js";
+import type { McpClient, NetworkConfig, NoteStore, StellarSigner } from "./ports.js";
+import type { DeskConfig } from "./types.js";
+
+export interface BrowserClientOptions {
+  network: NetworkConfig;
+  /** App-supplied signer (e.g. a Freighter-backed StellarSigner). */
+  signer: StellarSigner;
+  /** App-supplied note store (e.g. an IndexedDB-backed NoteStore). */
+  store: NoteStore;
+  /** Desks to pre-register. */
+  desks?: DeskConfig[];
+  /** First ledger to read note-tree events from. */
+  startLedger?: number;
+  /** Notified after note mutations (e.g. dispatch a DOM event to refresh React). */
+  onNotesChanged?: () => void;
+  /** Optional MCP for the Base→Stellar shield flow. */
+  mcp?: McpClient;
+}
+
+export interface BrowserClient {
+  client: MosaicClient;
+  desks: StaticDeskProvider;
+}
+
+/** Build a fully-local browser {@link MosaicClient}. Returns the client and its desk registry. */
+export function createBrowserClient(opts: BrowserClientOptions): BrowserClient {
+  const desks = new StaticDeskProvider(opts.desks ?? []);
+  const submitter = new DirectSubmitter({ network: opts.network, signer: opts.signer });
+  const chain = new ChainEventSource({ network: opts.network, startLedger: opts.startLedger });
+
+  let compressNoir: Noir | undefined;
+  const compress = makeNoirCompressor({
+    execute: async (inputs) => {
+      compressNoir ??= new Noir(await circuitProvider("compress"));
+      return compressNoir.execute(inputs as never);
+    },
+  });
+  const source = new LocalPathProvider({
+    compress,
+    events: async (deskId) => chain.events((await desks.get(deskId)).contractId),
+  });
+
+  const funder = opts.network.friendbotUrl
+    ? new FriendbotFunder(opts.network.friendbotUrl)
+    : undefined;
+
+  const client = new MosaicClient({
+    network: opts.network,
+    signer: opts.signer,
+    store: opts.store,
+    source,
+    submitter,
+    desks,
+    circuits: circuitProvider,
+    funder,
+    onNotesChanged: opts.onNotesChanged,
+    mcp: opts.mcp,
+  });
+  return { client, desks };
+}

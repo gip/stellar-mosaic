@@ -1,0 +1,26 @@
+{
+  "name": "@mosaic/cli",
+  "version": "0.0.0",
+  "description": "Headless CLI for Stellar Mosaic — drive the privacy DEX (fund, deploy, shield, order, unshield, cancel, watch) fully locally with your own key. Built on @mosaic/sdk.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "mosaic": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@mosaic/sdk": "*",
+    "@stellar/stellar-sdk": "^16.0.1",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.3",
+    "typescript": "~6.0.2"
+  }
+}

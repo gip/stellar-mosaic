@@ -1,0 +1,25 @@
+{
+  "name": "stellar-mosaic-x",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Stellar Mosaic — privacy-preserving DEX on Stellar/Soroban. Monorepo root for the TypeScript SDK, CLI, and MCP server.",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "frontend"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "build:sdk": "npm -w @mosaic/sdk run build",
+    "clean": "tsc -b --clean",
+    "typecheck": "tsc -b"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2"
+  },
+  "comment:overrides": "Pin the proving toolchain across ALL workspaces to the versions nargo 1.0.0-beta.9 / bb 0.87.0 emit. A newer @noir-lang/acvm_js cannot deserialize beta.9 ACIR, and bb proof formats differ across versions — see CLAUDE.md 'Toolchain / version pinning'.",
+  "overrides": {
+    "@noir-lang/noir_js": "1.0.0-beta.9",
+    "@aztec/bb.js": "0.87.0"
+  }
+}
