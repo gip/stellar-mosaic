@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { errorMessage } from '@mosaic/sdk'
 import { api, type Asset, type Desk } from '../api'
@@ -37,6 +37,32 @@ function assetTokenCell(a: Asset, desk: Desk) {
   return <span className="muted">Represented — no Stellar token</span>
 }
 
+function sameDeskProjection(a: Desk | null, b: Desk): boolean {
+  if (!a || a.id !== b.id || a.assets.length !== b.assets.length || a.pairs.length !== b.pairs.length) {
+    return false
+  }
+  return (
+    a.assets.every((asset, i) => {
+      const other = b.assets[i]
+      return (
+        asset.asset_id === other.asset_id &&
+        asset.token === other.token &&
+        asset.symbol === other.symbol &&
+        asset.decimals === other.decimals &&
+        asset.kind === other.kind
+      )
+    }) &&
+    a.pairs.every((pair, i) => {
+      const other = b.pairs[i]
+      return (
+        pair.pair_id === other.pair_id &&
+        pair.base_asset === other.base_asset &&
+        pair.quote_asset === other.quote_asset
+      )
+    })
+  )
+}
+
 export default function DeskPage() {
   const { deskId } = useParams()
   const { address, networkPassphrase } = useWallet()
@@ -47,7 +73,31 @@ export default function DeskPage() {
   const [error, setError] = useState<string | null>(null)
   const [noteIndexError, setNoteIndexError] = useState<string | null>(null)
   const [submitMode, setSubmitMode] = useState<'direct' | 'sponsored'>(submissionMode())
+  const [lastVerifiedDesk, setLastVerifiedDesk] = useState<Desk | null>(null)
   const bookIndex = useBookIndex(desk, networkPassphrase)
+
+  const currentVerifiedDesk = useMemo<Desk | null>(() => {
+    if (!desk || bookIndex.status !== 'synced') return null
+    const authoritativeAssets = bookIndex.assets.map((chain) => {
+      const display = desk.assets.find((asset) => asset.asset_id === chain.asset_id)
+      return {
+        asset_id: chain.asset_id,
+        token: chain.token,
+        symbol: display?.symbol ?? `#${chain.asset_id}`,
+        decimals: display?.decimals ?? 7,
+        kind: chain.kind, // authoritative: the on-chain AssetKind from the assetreg event
+      }
+    })
+    const authoritativePairs = bookIndex.pairs
+      .map(({ pair_id, base_asset, quote_asset }) => ({ pair_id, base_asset, quote_asset }))
+      .sort((a, b) => a.pair_id - b.pair_id)
+    return { ...desk, assets: authoritativeAssets, pairs: authoritativePairs }
+  }, [desk, bookIndex.status, bookIndex.assets, bookIndex.pairs])
+
+  useEffect(() => {
+    if (!currentVerifiedDesk) return
+    setLastVerifiedDesk((prev) => (sameDeskProjection(prev, currentVerifiedDesk) ? prev : currentVerifiedDesk))
+  }, [currentVerifiedDesk])
 
   const reloadNotes = useCallback(() => {
     if (deskId) notesForDesk(deskId, address).then(setNotes)
@@ -168,20 +218,7 @@ export default function DeskPage() {
   if (error) return <p className="err">{error}</p>
   if (!desk) return <p className="muted">Loading…</p>
 
-  const authoritativeAssets = bookIndex.assets.map((chain) => {
-    const display = desk.assets.find((asset) => asset.asset_id === chain.asset_id)
-    return {
-      asset_id: chain.asset_id,
-      token: chain.token,
-      symbol: display?.symbol ?? `#${chain.asset_id}`,
-      decimals: display?.decimals ?? 7,
-      kind: chain.kind, // authoritative: the on-chain AssetKind from the assetreg event
-    }
-  })
-  const authoritativePairs = bookIndex.pairs
-    .map(({ pair_id, base_asset, quote_asset }) => ({ pair_id, base_asset, quote_asset }))
-    .sort((a, b) => a.pair_id - b.pair_id)
-  const verifiedDesk: Desk = { ...desk, assets: authoritativeAssets, pairs: authoritativePairs }
+  const verifiedDesk = currentVerifiedDesk ?? lastVerifiedDesk ?? desk
   const fundActionsDisabled =
     bookIndex.status === 'synced'
       ? null
@@ -190,7 +227,12 @@ export default function DeskPage() {
         : bookIndex.error
           ? `Contract verification is retrying: ${bookIndex.error}`
           : 'Contract verification and event replay are still in progress.'
-  const displayDesk = bookIndex.status === 'synced' ? verifiedDesk : desk
+  const displayDesk = currentVerifiedDesk ?? desk
+  const orderDesk = currentVerifiedDesk ?? lastVerifiedDesk ?? desk
+  const orderDisabledReason =
+    address && orderDesk && bookIndex.status !== 'synced'
+      ? (fundActionsDisabled ?? 'Waiting for verified book synchronization.')
+      : null
   const sym = (id: number) => verifiedDesk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
   const dec = (id: number) => verifiedDesk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
 
@@ -282,18 +324,23 @@ export default function DeskPage() {
       />
 
       <h2>Place limit order</h2>
-      {address && bookIndex.status === 'synced' ? (
+      {address && orderDesk && orderDesk.pairs.length > 0 ? (
         <OrderForm
-          desk={verifiedDesk}
+          desk={orderDesk}
           notes={notes}
           bookIndex={bookIndex}
           userPubkey={address}
           trustless={trustlessDesk}
+          disabledReason={orderDisabledReason}
           onDone={reloadNotes}
         />
       ) : (
         <p className="muted">
-          {address ? 'Waiting for verified book synchronization.' : 'Connect your wallet to place orders.'}
+          {address
+            ? bookIndex.status === 'synced'
+              ? 'No pairs registered.'
+              : 'Waiting for verified book synchronization.'
+            : 'Connect your wallet to place orders.'}
         </p>
       )}
 

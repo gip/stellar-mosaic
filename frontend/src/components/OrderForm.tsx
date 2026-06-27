@@ -67,6 +67,7 @@ export default function OrderForm({
   bookIndex,
   userPubkey,
   trustless = false,
+  disabledReason,
   onDone,
 }: {
   desk: Desk
@@ -74,6 +75,7 @@ export default function OrderForm({
   bookIndex: BookIndexSnapshot
   userPubkey: string
   trustless?: boolean
+  disabledReason?: string | null
   onDone: () => void
 }) {
   const [pairId, setPairId] = useState(desk.pairs[0]?.pair_id ?? 0)
@@ -147,6 +149,7 @@ export default function OrderForm({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    if (disabledReason) return
     if (amountInRaw == null || minOutRaw == null || plan == null) return
     if (plan.kind === 'impossible') {
       setError(plan.reason)
@@ -237,9 +240,10 @@ export default function OrderForm({
           partial
         </label>
       </div>
-      <button type="submit" disabled={busy || !valid || !recoveryReady}>
+      <button type="submit" disabled={busy || !valid || !recoveryReady || !!disabledReason}>
         {busy ? 'Working…' : recoveryReady ? 'Place order' : 'Enable / repair recovery first'}
       </button>
+      {disabledReason && <span className="muted">{disabledReason}</span>}
       {willCross && valid && !busy && !error && (
         <span className="warn">
           ⚠ Crosses the book — this order will match a resting {side === 'SELL' ? 'bid' : 'ask'} and

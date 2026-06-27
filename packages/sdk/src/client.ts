@@ -166,7 +166,12 @@ export class MosaicClient {
   }
 
   /** Poll the chain, reconcile, and return the note once it is active + indexed. */
-  private async waitForConfirm(deskId: string, noteId: string, timeoutMs = 120_000): Promise<Note> {
+  private async waitForConfirm(
+    deskId: string,
+    noteId: string,
+    walletAddress?: string,
+    timeoutMs = 120_000,
+  ): Promise<Note> {
     const start = Date.now();
     for (;;) {
       try {
@@ -174,7 +179,7 @@ export class MosaicClient {
       } catch {
         /* transient; retry */
       }
-      const n = (await this.notes.forDesk(deskId)).find((x) => x.id === noteId);
+      const n = (await this.notes.forDesk(deskId, walletAddress)).find((x) => x.id === noteId);
       if (n?.status === "active" && n.indexed) return n;
       if (Date.now() - start > timeoutMs) throw new Error("Timed out waiting for note confirmation.");
       await sleep(3_000);
@@ -259,7 +264,7 @@ export class MosaicClient {
       });
       this.logger.info("shield transaction submitted", { deskId: desk.id, noteId, txHash: res.txHash });
       try {
-        await this.waitForConfirm(desk.id, note.id, 30_000);
+        await this.waitForConfirm(desk.id, note.id, wallet, 30_000);
         await this.recordActivity({
           kind: "user_action",
           action: "shield",
@@ -287,7 +292,7 @@ export class MosaicClient {
         });
         /* shield is final; leave it pending until the loop reconciles it */
       }
-      return { note: (await this.notes.forDesk(desk.id)).find((n) => n.id === note.id) ?? note };
+      return { note: (await this.notes.forDesk(desk.id, wallet)).find((n) => n.id === note.id) ?? note };
     } catch (error) {
       this.logger.error("shield failed", {
         deskId: params.deskId,
@@ -324,7 +329,7 @@ export class MosaicClient {
       metadata: { action_id: actionId, asset_id, target },
     });
     try {
-      const all = await this.notes.forDesk(deskId);
+      const all = await this.notes.forDesk(deskId, wallet);
       const plan = planAssembly(all, asset_id, BigInt(target));
       if (plan.kind === "impossible") throw new Error(plan.reason);
       if (plan.kind === "direct") {
@@ -342,7 +347,7 @@ export class MosaicClient {
         });
         return { note };
       }
-      const note = await this.runAssembly(deskId, plan.steps, all);
+      const note = await this.runAssembly(deskId, plan.steps, all, wallet);
       await this.recordActivity({
         kind: "user_action",
         action: "assemble",
@@ -368,7 +373,12 @@ export class MosaicClient {
     }
   }
 
-  private async runAssembly(deskId: string, steps: AssemblyStep[], pool: Note[]): Promise<Note> {
+  private async runAssembly(
+    deskId: string,
+    steps: AssemblyStep[],
+    pool: Note[],
+    walletAddress?: string,
+  ): Promise<Note> {
     const byId = new Map(pool.map((n) => [n.id, n]));
     const resolve = (ref: JoinInputRef, prev: Note | null) =>
       ref.type === "prev" ? prev : byId.get(ref.id) ?? null;
@@ -378,7 +388,7 @@ export class MosaicClient {
       const b = step.op === "join" ? resolve(step.b, prev) : null;
       if (!a || (step.op === "join" && !b)) throw new Error("A note is no longer available; please retry.");
       const { target } = await this.executeJoin(deskId, a, b, BigInt(step.targetRaw), BigInt(step.changeRaw));
-      prev = await this.waitForConfirm(deskId, target.id);
+      prev = await this.waitForConfirm(deskId, target.id, walletAddress);
     }
     if (!prev) throw new Error("Empty assembly plan.");
     return prev;
@@ -552,7 +562,7 @@ export class MosaicClient {
       const assetOut = params.side === SIDE_SELL ? pair.quote_asset : pair.base_asset;
 
       const offer = (await this.assemble(params.deskId, assetIn, params.amountIn)).note;
-      await this.waitForConfirm(params.deskId, offer.id);
+      await this.waitForConfirm(params.deskId, offer.id, wallet);
       const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
 
       const expiry = params.expiry ?? nowSeconds() + 7 * 86400;
@@ -686,7 +696,7 @@ export class MosaicClient {
     try {
       const desk = await this.p.desks.get(params.deskId);
       const offer = (await this.assemble(params.deskId, params.asset_id, params.amount)).note;
-      await this.waitForConfirm(params.deskId, offer.id);
+      await this.waitForConfirm(params.deskId, offer.id, wallet);
       const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
 
       const [nullifier, recipient] = await Promise.all([
@@ -766,7 +776,7 @@ export class MosaicClient {
     });
     try {
       const desk = await this.p.desks.get(params.deskId);
-      const note = (await this.notes.forDesk(params.deskId)).find((n) => n.id === params.noteId);
+      const note = (await this.notes.forDesk(params.deskId, wallet)).find((n) => n.id === params.noteId);
       const c = note?.cancel;
       if (!note || !c || note.status !== "active") throw new Error("The order is no longer cancellable.");
 

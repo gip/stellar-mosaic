@@ -13,11 +13,11 @@ const desk = {
   pairs: [],
 };
 
-function makeClient() {
+function makeClient(address) {
   const store = new MemoryStore();
   const ports = {
     network: { rpcUrl: "", networkPassphrase: "" },
-    signer: {},
+    signer: address ? { address: async () => address } : {},
     store,
     source: {},
     submitter: {},
@@ -52,6 +52,28 @@ test("assemble returns an existing exact note directly (no network)", async () =
   const { note: got } = await c.assemble("d", 1, "100");
   assert.equal(got.id, n.id);
   assert.equal(got.amount, "100");
+});
+
+test("assemble uses recovery-scoped notes for the active wallet", async () => {
+  const c = makeClient("GA");
+  const n = note({ amount: "100", wallet_address: "GA", recovery_version: 1 });
+  await c.noteManager.add(n);
+  const { note: got } = await c.assemble("d", 1, "100");
+  assert.equal(got.id, n.id);
+});
+
+test("assemble does not spend notes scoped to another wallet", async () => {
+  const c = makeClient("GA");
+  await c.noteManager.add(note({ amount: "100", wallet_address: "GB", recovery_version: 1 }));
+  await assert.rejects(() => c.assemble("d", 1, "100"), /exceeds/);
+});
+
+test("assemble still uses legacy unscoped notes for a scoped wallet", async () => {
+  const c = makeClient("GA");
+  const n = note({ amount: "100" });
+  await c.noteManager.add(n);
+  const { note: got } = await c.assemble("d", 1, "100");
+  assert.equal(got.id, n.id);
 });
 
 test("assemble throws when balance is insufficient", async () => {
