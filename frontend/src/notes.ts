@@ -5,22 +5,36 @@
 import { NoteManager } from '@mosaic/sdk'
 import type { ChainNote, Note } from '@mosaic/sdk'
 import { IndexedDbStore } from './sdk/indexedDbStore'
+import type { StorageMode } from './StorageModeContext'
 
 export type { Note, NoteRole, NoteStatus, RecoveryState, OrderCancelInfo, ChainNote } from '@mosaic/sdk'
 
-const manager = new NoteManager(new IndexedDbStore(), () => {
-  if (typeof window !== 'undefined') window.dispatchEvent(new Event('mosaic-notes-changed'))
-})
+const managers = new Map<StorageMode, NoteManager>()
 
-export const addNote = (note: Note): Promise<void> => manager.add(note)
-export const notesForDesk = (deskId: string, walletAddress?: string | null): Promise<Note[]> =>
-  manager.forDesk(deskId, walletAddress)
-export const updateNote = (id: string, patch: Partial<Note>): Promise<void> => manager.update(id, patch)
-export const removeNote = (id: string): Promise<void> => manager.remove(id)
-export const recoveryNotes = (walletAddress: string): Promise<Note[]> => manager.recoveryNotes(walletAddress)
-export const markRecoveryProtected = (walletAddress: string): Promise<void> =>
-  manager.markRecoveryProtected(walletAddress)
-export const mergeRecoveryNotes = (walletAddress: string, incoming: Note[]): Promise<void> =>
-  manager.mergeRecoveryNotes(walletAddress, incoming)
-export const reconcile = (deskId: string, chain: ChainNote[]): Promise<boolean> =>
-  manager.reconcile(deskId, chain)
+function managerFor(mode: StorageMode): NoteManager {
+  let manager = managers.get(mode)
+  if (!manager) {
+    manager = new NoteManager(new IndexedDbStore(mode), () => {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('mosaic-notes-changed', { detail: { mode } }))
+      }
+    })
+    managers.set(mode, manager)
+  }
+  return manager
+}
+
+export const addNote = (mode: StorageMode, note: Note): Promise<void> => managerFor(mode).add(note)
+export const notesForDesk = (mode: StorageMode, deskId: string, walletAddress?: string | null): Promise<Note[]> =>
+  managerFor(mode).forDesk(deskId, walletAddress)
+export const updateNote = (mode: StorageMode, id: string, patch: Partial<Note>): Promise<void> =>
+  managerFor(mode).update(id, patch)
+export const removeNote = (mode: StorageMode, id: string): Promise<void> => managerFor(mode).remove(id)
+export const recoveryNotes = (mode: StorageMode, walletAddress: string): Promise<Note[]> =>
+  managerFor(mode).recoveryNotes(walletAddress)
+export const markRecoveryProtected = (mode: StorageMode, walletAddress: string): Promise<void> =>
+  managerFor(mode).markRecoveryProtected(walletAddress)
+export const mergeRecoveryNotes = (mode: StorageMode, walletAddress: string, incoming: Note[]): Promise<void> =>
+  managerFor(mode).mergeRecoveryNotes(walletAddress, incoming)
+export const reconcile = (mode: StorageMode, deskId: string, chain: ChainNote[]): Promise<boolean> =>
+  managerFor(mode).reconcile(deskId, chain)

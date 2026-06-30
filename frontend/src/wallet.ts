@@ -5,8 +5,27 @@ import {
   requestAccess,
   getAddress,
   getNetwork,
+  getNetworkDetails,
   signMessage,
 } from '@stellar/freighter-api'
+import { Networks } from '@stellar/stellar-sdk'
+
+function normalizeNetworkPassphrase(network: string | undefined, networkPassphrase: string | undefined): string {
+  if (networkPassphrase) return networkPassphrase
+
+  const normalized = (network ?? '').trim().toLowerCase().replace(/[\s_-]+/g, '')
+  if (normalized === 'testnet' || normalized === 'test') return Networks.TESTNET
+  if (normalized === 'public' || normalized === 'pubnet' || normalized === 'mainnet' || normalized === 'main') {
+    return Networks.PUBLIC
+  }
+  return ''
+}
+
+function normalizedNetworkResult(network: string | undefined, networkPassphrase: string | undefined) {
+  const normalizedPassphrase = normalizeNetworkPassphrase(network, networkPassphrase)
+  if (!normalizedPassphrase) return null
+  return { network: network ?? '', networkPassphrase: normalizedPassphrase }
+}
 
 export async function walletInstalled(): Promise<boolean> {
   try {
@@ -38,9 +57,15 @@ export async function currentAddress(): Promise<string | null> {
 
 export async function network(): Promise<{ network: string; networkPassphrase: string } | null> {
   try {
-    const r = await getNetwork()
-    if (r.error || !r.networkPassphrase) return null
-    return { network: r.network ?? '', networkPassphrase: r.networkPassphrase }
+    const details = await getNetworkDetails()
+    if (!details.error) {
+      const result = normalizedNetworkResult(details.network, details.networkPassphrase)
+      if (result) return result
+    }
+
+    const fallback = await getNetwork()
+    if (fallback.error) return null
+    return normalizedNetworkResult(fallback.network, fallback.networkPassphrase)
   } catch {
     return null
   }

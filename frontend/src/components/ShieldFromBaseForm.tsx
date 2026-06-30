@@ -76,7 +76,7 @@ export default function ShieldFromBaseForm({
   useEffect(() => {
     let active = true
     api
-      .listCatalogAssets(true)
+      .listCatalogAssets('trusted')
       .then((all) => {
         if (active)
           setBaseSymbols(
@@ -162,7 +162,7 @@ export default function ShieldFromBaseForm({
 
       // Persist the private note locally; it becomes spendable once the worker mints it and the
       // indexer reconciles it by owner_tag (stamping its leaf_index).
-      await addNote({
+      await addNote('trusted', {
         id: crypto.randomUUID(),
         deskId: desk.id,
         role: 'asset',

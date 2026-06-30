@@ -4,6 +4,7 @@ import { errorMessage, parseLedgerRangeError } from '@mosaic/sdk'
 import type { AssetKind, Desk } from './api'
 import { Buffer } from 'buffer'
 import { SOROBAN_RPC_URL } from './config'
+import type { StorageMode } from './StorageModeContext'
 
 export const BOOK_SCHEMA_VERSION = 1
 
@@ -104,8 +105,8 @@ function database(): Promise<IDBPDatabase<BookDB>> {
   return dbPromise
 }
 
-function scopeOf(networkPassphrase: string, contractId: string): string {
-  return `${networkPassphrase}\u0000${contractId}`
+function scopeOf(mode: StorageMode, networkPassphrase: string, contractId: string): string {
+  return `${mode}\u0000${networkPassphrase}\u0000${contractId}`
 }
 
 function bookKey(scope: string, pair: number, side: number): string {
@@ -662,13 +663,14 @@ async function recoverLiveBookIndex(
 }
 
 export async function syncBookIndex(
+  mode: StorageMode,
   desk: Desk,
   sourceAccount: string,
   networkPassphrase: string = Networks.TESTNET,
   eventStartLedger?: number | null,
 ): Promise<BookIndexSnapshot> {
   const contractId = desk.contract_id
-  const scope = scopeOf(networkPassphrase, contractId)
+  const scope = scopeOf(mode, networkPassphrase, contractId)
   const server = new rpc.Server(SOROBAN_RPC_URL)
   const transient = async (error: unknown) => ({
     ...(await snapshot(scope)),
@@ -751,8 +753,8 @@ export function compareOrders(a: IndexedOrder, b: IndexedOrder, side: number): n
   return ap < bp ? -1 : ap > bp ? 1 : 0
 }
 
-export async function clearBookIndex(desk: Desk, networkPassphrase: string = Networks.TESTNET): Promise<void> {
-  const scope = scopeOf(networkPassphrase, desk.contract_id)
+export async function clearBookIndex(mode: StorageMode, desk: Desk, networkPassphrase: string = Networks.TESTNET): Promise<void> {
+  const scope = scopeOf(mode, networkPassphrase, desk.contract_id)
   const db = await database()
   const tx = db.transaction(['meta', 'orders', 'assets', 'pairs', 'processed'], 'readwrite')
   await tx.objectStore('meta').delete(scope)

@@ -29,8 +29,8 @@ function trustlessClient(desk: Desk, address: string) {
   return createBrowserClient({
     network: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase: Networks.TESTNET },
     signer: new FreighterSigner(address),
-    store: new IndexedDbStore(),
-    activity: browserActivityStore,
+    store: new IndexedDbStore('trustless'),
+    activity: browserActivityStore('trustless'),
     desks: [deskConfig(desk)],
     startLedger: desk.event_start_ledger ?? 0,
     prepareNotes: stageRecoverableNotes,

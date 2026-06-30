@@ -13,6 +13,7 @@ import DeskPage from './pages/DeskPage'
 import AssetsPage from './pages/AssetsPage'
 import { WalletProvider } from './WalletContext'
 import { MosaicServerProvider } from './MosaicServerContext'
+import { StorageModeProvider } from './StorageModeContext'
 import { RecoveryProvider } from './RecoveryContext'
 import { ActivityProvider } from './ActivityContext'
 import { EthereumWalletProvider } from './EthereumWalletContext'
@@ -21,15 +22,17 @@ import { EthereumWalletProvider } from './EthereumWalletContext'
 function AppRoute() {
   return (
     <WalletProvider>
-      <MosaicServerProvider>
-        <EthereumWalletProvider>
-          <RecoveryProvider>
-            <ActivityProvider>
-              <App />
-            </ActivityProvider>
-          </RecoveryProvider>
-        </EthereumWalletProvider>
-      </MosaicServerProvider>
+      <StorageModeProvider>
+        <MosaicServerProvider>
+          <EthereumWalletProvider>
+            <RecoveryProvider>
+              <ActivityProvider>
+                <App />
+              </ActivityProvider>
+            </RecoveryProvider>
+          </EthereumWalletProvider>
+        </MosaicServerProvider>
+      </StorageModeProvider>
     </WalletProvider>
   )
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Networks } from '@stellar/stellar-sdk'
 import type { Desk } from './api'
 import { clearBookIndex, syncBookIndex, type BookIndexSnapshot } from './bookIndexer'
+import type { StorageMode } from './StorageModeContext'
 
 const EMPTY: BookIndexSnapshot = {
   status: 'syncing',
@@ -17,9 +18,9 @@ export interface BookIndexState extends BookIndexSnapshot {
   recheck: () => Promise<void>
 }
 
-export function useBookIndex(desk: Desk | null, networkPassphrase: string | null): BookIndexState {
+export function useBookIndex(mode: StorageMode, desk: Desk | null, networkPassphrase: string | null): BookIndexState {
   const network = networkPassphrase ?? Networks.TESTNET
-  const scope = desk ? `${network}\u0000${desk.contract_id}` : ''
+  const scope = desk ? `${mode}\u0000${network}\u0000${desk.contract_id}` : ''
   const [stored, setStored] = useState<{ scope: string; snapshot: BookIndexSnapshot }>({
     scope: '',
     snapshot: EMPTY,
@@ -28,10 +29,10 @@ export function useBookIndex(desk: Desk | null, networkPassphrase: string | null
   const state = stored.scope === scope ? stored.snapshot : EMPTY
   const recheck = useCallback(async () => {
     if (!desk) return
-    await clearBookIndex(desk, network)
+    await clearBookIndex(mode, desk, network)
     setStored({ scope, snapshot: EMPTY })
     setGeneration((value) => value + 1)
-  }, [desk, network, scope])
+  }, [mode, desk, network, scope])
 
   useEffect(() => {
     if (!desk) return
@@ -42,6 +43,7 @@ export function useBookIndex(desk: Desk | null, networkPassphrase: string | null
       running = true
       try {
         const next = await syncBookIndex(
+          mode,
           desk,
           desk.sponsor_pubkey,
           network,
@@ -58,6 +60,6 @@ export function useBookIndex(desk: Desk | null, networkPassphrase: string | null
       alive = false
       window.clearInterval(interval)
     }
-  }, [desk, network, generation, scope])
+  }, [mode, desk, network, generation, scope])
   return { ...state, recheck }
 }

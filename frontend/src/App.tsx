@@ -4,6 +4,7 @@ import RecoveryPanel from './components/RecoveryPanel'
 import ActivityDrawer from './components/ActivityDrawer'
 import { useEthereumWallet } from './EthereumWalletContext'
 import { useMosaicServer } from './MosaicServerContext'
+import { useStorageMode } from './StorageModeContext'
 
 function short(addr: string): string {
   return addr.length > 12 ? `${addr.slice(0, 5)}…${addr.slice(-4)}` : addr
@@ -13,6 +14,13 @@ export default function App() {
   const { address, connect, disconnect, connecting, error } = useWallet()
   const ethereum = useEthereumWallet()
   const mosaicServer = useMosaicServer()
+  const storageMode = useStorageMode()
+
+  async function logOutStellar() {
+    await mosaicServer.disconnect().catch(() => {})
+    await disconnect()
+  }
+
   return (
     <>
       <header className="topbar">
@@ -31,7 +39,7 @@ export default function App() {
                 <button className="address-button mono" type="button" title={`Copy ${address}`} onClick={() => void navigator.clipboard.writeText(address)}>
                   {short(address)}
                 </button>
-                <button type="button" onClick={() => void disconnect()}>Log out</button>
+                <button type="button" onClick={() => void logOutStellar()}>Log out</button>
               </div>
             ) : (
               <button type="button" onClick={() => void connect()} disabled={connecting}>
@@ -40,17 +48,25 @@ export default function App() {
             )}
           </div>
           <div className="wallet-chain">
-            <span className="chain-label">Mosaic Server</span>
-            <div className="wallet-controls">
+            <span className="chain-label">Data mode</span>
+            <div className="wallet-controls segmented">
               <button
-                className="trust-toggle"
                 type="button"
-                aria-pressed={mosaicServer.trusted}
-                disabled={!address || mosaicServer.connecting}
-                title={address ? 'Sign a Mosaic Server challenge with Freighter' : 'Connect Stellar first'}
-                onClick={() => void (mosaicServer.trusted ? mosaicServer.disconnect() : mosaicServer.trust())}
+                aria-pressed={storageMode.mode === 'trustless'}
+                disabled={!address || storageMode.connecting}
+                title={address ? 'Use browser-local desk data and self-submitted workflows' : 'Connect Stellar first'}
+                onClick={() => void storageMode.setMode('trustless')}
               >
-                {mosaicServer.connecting ? 'Connecting…' : mosaicServer.trusted ? 'Trusted' : 'Trust server'}
+                Trustless
+              </button>
+              <button
+                type="button"
+                aria-pressed={storageMode.mode === 'trusted'}
+                disabled={!address || mosaicServer.connecting}
+                title={address ? 'Use Mosaic Server SQLite-backed data and sponsored workflows' : 'Connect Stellar first'}
+                onClick={() => void mosaicServer.trust()}
+              >
+                {mosaicServer.connecting && storageMode.mode !== 'trusted' ? 'Connecting…' : 'Trusted'}
               </button>
             </div>
           </div>

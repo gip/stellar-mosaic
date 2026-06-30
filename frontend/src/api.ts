@@ -30,11 +30,22 @@ import { circuitProvider } from '@mosaic/sdk/assets/browser'
 import { createMcpClient } from '@mosaic/sdk/mcp-client'
 import type { Abi, Hex } from 'viem'
 import { FreighterSigner } from './sdk/freighterSigner'
-import { browserActivityStore, browserEventCache, getLocalDesk, IndexedDbStore, listLocalDesks, putLocalDesk } from './sdk/indexedDbStore'
+import {
+  browserActivityStore,
+  browserEventCache,
+  getLocalCatalogAsset,
+  getLocalDesk,
+  IndexedDbStore,
+  listLocalCatalogAssets,
+  listLocalDesks,
+  putLocalCatalogAsset,
+  putLocalDesk,
+} from './sdk/indexedDbStore'
 import { currentAddress } from './wallet'
-import { defaultCatalogAssets } from './defaultCatalog'
+import { defaultCatalogAssets, mergeCatalogAssets } from './defaultCatalog'
 import { initNoirWasm } from './noirWasm'
 import { MCP_URL, SOROBAN_RPC_URL } from './config'
+import type { StorageMode } from './StorageModeContext'
 
 export type AssetKind = 'Stellar' | 'Dual' | 'BaseRepresented'
 export type Asset = AssetDef & { token: string | null }
@@ -60,13 +71,8 @@ export class ApiError extends Error {
 }
 
 const mcp = createMcpClient({ url: MCP_URL })
-const deskCache = new Map<string, Desk>()
-const chain = new ChainEventSource({
-  network: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase: Networks.TESTNET },
-  startLedger: 0,
-  cache: browserEventCache,
-  activity: browserActivityStore,
-})
+const deskCaches = new Map<StorageMode, Map<string, Desk>>()
+const sources = new Map<StorageMode, LocalPathProvider>()
 
 let compressNoir: Noir | undefined
 const compress = makeNoirCompressor({
@@ -76,22 +82,6 @@ const compress = makeNoirCompressor({
     return compressNoir.execute(inputs as never)
   },
 })
-const source = new LocalPathProvider({
-  compress,
-  events: async (deskId) => {
-    const desk = await getDesk(deskId)
-    return chain.events(desk.contract_id, desk.event_start_ledger ?? 0, {
-      validateReplay: (events) => validateReplayRoot(desk, events),
-    })
-  },
-  fills: async (deskId) => {
-    const desk = await getDesk(deskId)
-    return chain.fills(desk.contract_id, desk.event_start_ledger ?? 0, {
-      validateReplay: (events) => validateReplayRoot(desk, events),
-    })
-  },
-})
-
 let activeClientAction: ClientAction | null = null
 
 function lease() {
@@ -109,17 +99,61 @@ async function wrap<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-async function getDesk(id: string): Promise<Desk> {
-  const cached = deskCache.get(id)
+function deskCache(mode: StorageMode): Map<string, Desk> {
+  let cache = deskCaches.get(mode)
+  if (!cache) {
+    cache = new Map()
+    deskCaches.set(mode, cache)
+  }
+  return cache
+}
+
+function sourceFor(mode: StorageMode): LocalPathProvider {
+  const cached = sources.get(mode)
   if (cached) return cached
-  const local = await getLocalDesk(id)
-  if (local) {
+  const chain = new ChainEventSource({
+    network: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase: Networks.TESTNET },
+    startLedger: 0,
+    cache: browserEventCache(mode),
+    activity: browserActivityStore(mode),
+  })
+  const source = new LocalPathProvider({
+    compress,
+    events: async (deskId) => {
+      const desk = await getDesk(mode, deskId)
+      return chain.events(desk.contract_id, desk.event_start_ledger ?? 0, {
+        validateReplay: (events) => validateReplayRoot(desk, events),
+      })
+    },
+    fills: async (deskId) => {
+      const desk = await getDesk(mode, deskId)
+      return chain.fills(desk.contract_id, desk.event_start_ledger ?? 0, {
+        validateReplay: (events) => validateReplayRoot(desk, events),
+      })
+    },
+  })
+  sources.set(mode, source)
+  return source
+}
+
+export function resetApiCaches(): void {
+  deskCaches.clear()
+  sources.clear()
+}
+
+async function getDesk(mode: StorageMode, id: string): Promise<Desk> {
+  const cache = deskCache(mode)
+  const cached = cache.get(id)
+  if (cached) return cached
+  if (mode === 'trustless') {
+    const local = await getLocalDesk(mode, id)
+    if (!local) throw new ApiError(404, `desk ${id} not found in trustless mode`)
     const desk = local as Desk
-    deskCache.set(id, desk)
+    cache.set(id, desk)
     return desk
   }
   const desk = (await mcp.getDesk(id)) as Desk
-  deskCache.set(id, desk)
+  cache.set(id, desk)
   return desk
 }
 
@@ -154,11 +188,30 @@ async function validateReplayRoot(desk: Desk, events: TreeEvent[]): Promise<void
   }
 }
 
-function mergeDesks(remote: Desk[], local: Desk[]): Desk[] {
-  const byId = new Map<string, Desk>()
-  for (const desk of remote) byId.set(desk.id, desk)
-  for (const desk of local) byId.set(desk.id, desk)
-  return [...byId.values()]
+async function localCatalog(mode: StorageMode): Promise<CatalogAsset[]> {
+  return mergeCatalogAssets(await listLocalCatalogAssets(mode) as CatalogAsset[])
+}
+
+async function putTrustlessCatalogAsset(asset: CatalogAsset): Promise<CatalogAsset> {
+  await putLocalCatalogAsset('trustless', asset)
+  return asset
+}
+
+function catalogAssetFromProposal(body: ProposeAssetBody): CatalogAsset {
+  return {
+    id: crypto.randomUUID(),
+    symbol: body.symbol.trim().toUpperCase(),
+    stellar_token: body.stellar_token ?? null,
+    stellar_decimals: body.stellar_decimals ?? null,
+    base_chain_id: body.base_chain_id ?? null,
+    base_token: body.base_token ?? null,
+    base_decimals: body.base_decimals ?? null,
+    proposer_address: null,
+    is_default: false,
+    created_at: Date.now(),
+    trust_count: 0,
+    trusted_by_me: true,
+  } as CatalogAsset
 }
 
 /** Mutation relays are accepted only while a leased durable client action is active. */
@@ -174,12 +227,11 @@ export async function withClientAction<T>(action: ClientAction, run: () => Promi
 
 export const api = {
   mcp: () => mcp,
-  listDesks: (includeRemote = false) => wrap(async () => mergeDesks(
-    includeRemote ? await mcp.listDesks().catch(() => [] as Desk[]) : [],
-    (await listLocalDesks()) as Desk[],
-  )),
-  getDesk: (id: string) => wrap(() => getDesk(id)),
-  getRoot: (id: string) => wrap(async () => ({ root: await readContractRoot(await getDesk(id)) })),
+  listDesks: (mode: StorageMode) => wrap(async () =>
+    mode === 'trusted' ? (await mcp.listDesks()) as Desk[] : (await listLocalDesks(mode)) as Desk[],
+  ),
+  getDesk: (mode: StorageMode, id: string) => wrap(() => getDesk(mode, id)),
+  getRoot: (mode: StorageMode, id: string) => wrap(async () => ({ root: await readContractRoot(await getDesk(mode, id)) })),
   importDesk: (body: {
     name: string
     contract_id: string
@@ -188,7 +240,7 @@ export const api = {
     pairs: Pair[]
   }) => wrap(async () => {
     const desk = (await mcp.importDesk(body)) as Desk
-    deskCache.set(desk.id, desk)
+    deskCache('trusted').set(desk.id, desk)
     return desk
   }),
   createDesk: (body: {
@@ -198,7 +250,7 @@ export const api = {
     base_deployment?: { deployer_address: string }
   }) => wrap(async () => {
     const desk = (await mcp.createDesk(body)) as Desk
-    deskCache.set(desk.id, desk)
+    deskCache('trusted').set(desk.id, desk)
     return desk
   }),
   createDeskSelfFunded: (body: {
@@ -212,8 +264,8 @@ export const api = {
     const { client } = createBrowserClient({
       network: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase: Networks.TESTNET },
       signer,
-      store: new IndexedDbStore(),
-      activity: browserActivityStore,
+      store: new IndexedDbStore('trustless'),
+      activity: browserActivityStore('trustless'),
       initNoir: initNoirWasm,
       // No persistent eventCache: this one-shot deploy client must not seed the long-lived reconcile
       // source's cache scope with a cursor (which would later resume reads past freshly-shielded notes).
@@ -240,24 +292,39 @@ export const api = {
       event_start_ledger: startLedger,
       base_deployment: null,
     } as Desk
-    await putLocalDesk(desk)
-    deskCache.set(desk.id, desk)
+    await putLocalDesk('trustless', desk)
+    deskCache('trustless').set(desk.id, desk)
     return desk
   }),
   getBaseDeploymentConfig: () => wrap(async () => (await mcp.baseDeploymentConfig()) as BaseDeploymentConfig),
   completeBaseDeployment: (id: string, body: { tx_hash: string; bridge_address: string }) =>
     wrap(async () => {
       const desk = (await mcp.completeBaseDeployment(id, body)) as Desk
-      deskCache.set(desk.id, desk)
+      deskCache('trusted').set(desk.id, desk)
       return desk
     }),
-  listCatalogAssets: (includeRemote = false) =>
-    wrap(() => includeRemote ? mcp.listAssets() : Promise.resolve(defaultCatalogAssets())),
-  proposeAsset: (body: ProposeAssetBody) => wrap(() => mcp.proposeAsset(body)),
-  trustAsset: (id: string) => wrap(() => mcp.trustAsset(id)),
-  untrustAsset: (id: string) => wrap(() => mcp.untrustAsset(id)),
-  getNotes: (id: string) => wrap(async () => ({ notes: await source.notes(id) })),
-  getFills: (id: string) => wrap(async () => ({ fills: await source.fills(id) })),
+  listCatalogAssets: (mode: StorageMode) =>
+    wrap(() => mode === 'trusted' ? mcp.listAssets() : localCatalog(mode)),
+  proposeAsset: (mode: StorageMode, body: ProposeAssetBody) =>
+    wrap(() => mode === 'trusted' ? mcp.proposeAsset(body) : putTrustlessCatalogAsset(catalogAssetFromProposal(body))),
+  trustAsset: (mode: StorageMode, id: string) => wrap(async () => {
+    if (mode === 'trusted') return mcp.trustAsset(id)
+    const existing = await getLocalCatalogAsset(mode, id)
+      ?? (defaultCatalogAssets() as CatalogAsset[]).find((asset) => asset.id === id)
+    if (!existing) throw new ApiError(404, `asset ${id} not found in trustless mode`)
+    await putLocalCatalogAsset(mode, { ...existing, trusted_by_me: true } as CatalogAsset)
+    return { ok: true }
+  }),
+  untrustAsset: (mode: StorageMode, id: string) => wrap(async () => {
+    if (mode === 'trusted') return mcp.untrustAsset(id)
+    const existing = await getLocalCatalogAsset(mode, id)
+      ?? (defaultCatalogAssets() as CatalogAsset[]).find((asset) => asset.id === id)
+    if (!existing) throw new ApiError(404, `asset ${id} not found in trustless mode`)
+    await putLocalCatalogAsset(mode, { ...existing, trusted_by_me: false } as CatalogAsset)
+    return { ok: true }
+  }),
+  getNotes: (mode: StorageMode, id: string) => wrap(async () => ({ notes: await sourceFor(mode).notes(id) })),
+  getFills: (mode: StorageMode, id: string) => wrap(async () => ({ fills: await sourceFor(mode).fills(id) })),
   getBaseShieldConfig: (id: string) => wrap(() => mcp.baseShieldConfig(id)),
   enqueueBaseShield: (id: string, body: { expected_bridge: string; deposit_id: number }) =>
     wrap(() => mcp.enqueueBaseShield(id, body)),
@@ -267,7 +334,7 @@ export const api = {
       const result = await mcp.relayShield(id, tx_xdr, lease())
       return { ok: true, result: result.txHash }
     }),
-  getNoteProof: (id: string, ownerTag: string) => wrap(() => source.notePath(id, ownerTag)),
+  getNoteProof: (mode: StorageMode, id: string, ownerTag: string) => wrap(() => sourceFor(mode).notePath(id, ownerTag)),
   relayOrder: (id: string, proof_b64: string, public_inputs_b64: string) =>
     wrap(async () => {
       const result = await mcp.relayOrder(id, proof_b64, public_inputs_b64, lease())

@@ -4,15 +4,20 @@ import { Link } from 'react-router-dom'
 import { api, type Desk } from '../api'
 import { useWallet } from '../WalletContext'
 import { useMosaicServer } from '../MosaicServerContext'
+import { useStorageMode, type StorageMode } from '../StorageModeContext'
 import CreateDeskForm from '../components/CreateDeskForm'
 import ImportDeskForm from '../components/ImportDeskForm'
 import BaseDeploymentPanel from '../components/BaseDeploymentPanel'
 
 const HIDDEN_DESKS_KEY = 'mosaic.hiddenDesks'
 
-function readHiddenDesks(): string[] {
+function hiddenDesksKey(mode: StorageMode) {
+  return `${HIDDEN_DESKS_KEY}.${mode}`
+}
+
+function readHiddenDesks(mode: StorageMode): string[] {
   try {
-    const raw = localStorage.getItem(HIDDEN_DESKS_KEY)
+    const raw = localStorage.getItem(hiddenDesksKey(mode))
     const parsed: unknown = raw ? JSON.parse(raw) : []
     return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
   } catch {
@@ -20,9 +25,9 @@ function readHiddenDesks(): string[] {
   }
 }
 
-function writeHiddenDesks(ids: string[]) {
+function writeHiddenDesks(mode: StorageMode, ids: string[]) {
   try {
-    localStorage.setItem(HIDDEN_DESKS_KEY, JSON.stringify(ids))
+    localStorage.setItem(hiddenDesksKey(mode), JSON.stringify(ids))
   } catch {
     // Keep the in-memory state even if browser storage is unavailable.
   }
@@ -31,8 +36,9 @@ function writeHiddenDesks(ids: string[]) {
 export default function Home() {
   const { address } = useWallet()
   const mosaicServer = useMosaicServer()
+  const storageMode = useStorageMode()
   const [desks, setDesks] = useState<Desk[] | null>(null)
-  const [hiddenDeskIds, setHiddenDeskIds] = useState<string[]>(readHiddenDesks)
+  const [hiddenDeskIds, setHiddenDeskIds] = useState<string[]>(() => readHiddenDesks(storageMode.mode))
   const [error, setError] = useState<string | null>(null)
   const hiddenDeskSet = useMemo(() => new Set(hiddenDeskIds), [hiddenDeskIds])
   const visibleDesks = desks?.filter((desk) => !hiddenDeskSet.has(desk.id)) ?? null
@@ -42,7 +48,7 @@ export default function Home() {
     setHiddenDeskIds((current) => {
       if (current.includes(id)) return current
       const next = [...current, id]
-      writeHiddenDesks(next)
+      writeHiddenDesks(storageMode.mode, next)
       return next
     })
   }
@@ -50,14 +56,14 @@ export default function Home() {
   function showDesk(id: string) {
     setHiddenDeskIds((current) => {
       const next = current.filter((deskId) => deskId !== id)
-      writeHiddenDesks(next)
+      writeHiddenDesks(storageMode.mode, next)
       return next
     })
   }
 
   async function load() {
     try {
-      setDesks(await api.listDesks(mosaicServer.trusted))
+      setDesks(await api.listDesks(storageMode.mode))
       setError(null)
     } catch (e) {
       setError(errorMessage(e))
@@ -66,8 +72,14 @@ export default function Home() {
 
   useEffect(() => {
     let active = true
+    queueMicrotask(() => {
+      if (!active) return
+      setDesks(null)
+      setError(null)
+      setHiddenDeskIds(readHiddenDesks(storageMode.mode))
+    })
     api
-      .listDesks(mosaicServer.trusted)
+      .listDesks(storageMode.mode)
       .then((next) => {
         if (!active) return
         setDesks(next)
@@ -77,7 +89,7 @@ export default function Home() {
     return () => {
       active = false
     }
-  }, [mosaicServer.trusted])
+  }, [storageMode.mode])
 
   return (
     <>
@@ -142,10 +154,10 @@ export default function Home() {
           {!mosaicServer.trusted && (
             <p className="muted">
               Trustless mode deploys from this browser with Freighter and stores desk metadata locally.
-              Trust Mosaic Server only if you want sponsored deployment or shared import/catalog workflows.
+              Switch to Trusted mode only if you want sponsored deployment or server-backed workflows.
             </p>
           )}
-          <CreateDeskForm onDone={load} allowSponsored={mosaicServer.trusted} />
+          <CreateDeskForm mode={storageMode.mode} onDone={load} allowSponsored={mosaicServer.trusted} />
 
           {mosaicServer.trusted && (
             <details style={{ marginTop: 24 }}>

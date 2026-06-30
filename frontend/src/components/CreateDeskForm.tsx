@@ -7,6 +7,7 @@ import { displayEth, estimateBridgeDeployment } from '../base'
 import type { Address } from 'viem'
 import BaseDeploymentPanel from './BaseDeploymentPanel'
 import { assetKindOf, baseTokenAddress, eligibleBaseAssets, hasEnoughEth } from '../baseDeployment'
+import type { StorageMode } from '../StorageModeContext'
 
 interface PairRow {
   base: string
@@ -21,9 +22,11 @@ interface PairRow {
  * defaults are always trusted). New assets are proposed and trusted on the Assets page.
  */
 export default function CreateDeskForm({
+  mode,
   onDone,
   allowSponsored = true,
 }: {
+  mode: StorageMode
   onDone: () => void
   allowSponsored?: boolean
 }) {
@@ -45,13 +48,13 @@ export default function CreateDeskForm({
     let active = true
     api
       // Desks are Stellar settlement contracts, so only assets with a Stellar side are selectable.
-      .listCatalogAssets(allowSponsored)
+      .listCatalogAssets(mode)
       .then((all) => active && setCatalog(all.filter((a) => a.trusted_by_me && a.stellar_token)))
       .catch((e) => active && setError(errorMessage(e)))
     return () => {
       active = false
     }
-  }, [allowSponsored])
+  }, [mode])
 
   useEffect(() => {
     if (!allowSponsored) return

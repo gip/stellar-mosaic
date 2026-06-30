@@ -15,7 +15,7 @@ import { isRecoveryUnlocked, syncRecoveryNow } from '../recovery'
 import { ordersFor, type BookIndexSnapshot } from '../bookIndexer'
 import { useBookIndex } from '../useBookIndex'
 import { setSubmissionMode, submissionMode } from '../directTransaction'
-import { hasLocalDesk } from '../sdk/indexedDbStore'
+import { useStorageMode } from '../StorageModeContext'
 
 /** Canonical 32-byte hex tag for comparison: drop any `0x`, lowercase, left-pad to 64. */
 function normTag(h: string): string {
@@ -66,15 +66,16 @@ function sameDeskProjection(a: Desk | null, b: Desk): boolean {
 export default function DeskPage() {
   const { deskId } = useParams()
   const { address, networkPassphrase } = useWallet()
+  const storageMode = useStorageMode()
   const [desk, setDesk] = useState<Desk | null>(null)
   const [root, setRoot] = useState<string | null>(null)
   const [notes, setNotes] = useState<Note[]>([])
-  const [trustlessDesk, setTrustlessDesk] = useState(false)
+  const trustlessDesk = storageMode.mode === 'trustless'
   const [error, setError] = useState<string | null>(null)
   const [noteIndexError, setNoteIndexError] = useState<string | null>(null)
   const [submitMode, setSubmitMode] = useState<'direct' | 'sponsored'>(submissionMode())
   const [lastVerifiedDesk, setLastVerifiedDesk] = useState<Desk | null>(null)
-  const bookIndex = useBookIndex(desk, networkPassphrase)
+  const bookIndex = useBookIndex(storageMode.mode, desk, networkPassphrase)
 
   const currentVerifiedDesk = useMemo<Desk | null>(() => {
     if (!desk || bookIndex.status !== 'synced') return null
@@ -96,28 +97,45 @@ export default function DeskPage() {
 
   useEffect(() => {
     if (!currentVerifiedDesk) return
-    setLastVerifiedDesk((prev) => (sameDeskProjection(prev, currentVerifiedDesk) ? prev : currentVerifiedDesk))
+    queueMicrotask(() => {
+      setLastVerifiedDesk((prev) => (sameDeskProjection(prev, currentVerifiedDesk) ? prev : currentVerifiedDesk))
+    })
   }, [currentVerifiedDesk])
 
   const reloadNotes = useCallback(() => {
-    if (deskId) notesForDesk(deskId, address).then(setNotes)
-  }, [deskId, address])
+    if (deskId) notesForDesk(storageMode.mode, deskId, address).then(setNotes)
+  }, [storageMode.mode, deskId, address])
 
   useEffect(() => {
     if (!deskId) return
-    Promise.all([api.getDesk(deskId), hasLocalDesk(deskId)])
-      .then(([nextDesk, isLocal]) => {
+    let active = true
+    queueMicrotask(() => {
+      if (!active) return
+      setDesk(null)
+      setRoot(null)
+      setNotes([])
+      setError(null)
+      setNoteIndexError(null)
+      setLastVerifiedDesk(null)
+    })
+    Promise.all([api.getDesk(storageMode.mode, deskId)])
+      .then(([nextDesk]) => {
+        if (!active) return
         setDesk(nextDesk)
-        setTrustlessDesk(isLocal)
       })
-      .catch((e) => setError(errorMessage(e)))
+      .catch((e) => active && setError(errorMessage(e)))
     reloadNotes()
-  }, [deskId, reloadNotes])
+    return () => { active = false }
+  }, [storageMode.mode, deskId, reloadNotes])
 
   useEffect(() => {
-    window.addEventListener('mosaic-notes-changed', reloadNotes)
-    return () => window.removeEventListener('mosaic-notes-changed', reloadNotes)
-  }, [reloadNotes])
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ mode?: string }>).detail
+      if (!detail?.mode || detail.mode === storageMode.mode) reloadNotes()
+    }
+    window.addEventListener('mosaic-notes-changed', handler)
+    return () => window.removeEventListener('mosaic-notes-changed', handler)
+  }, [storageMode.mode, reloadNotes])
 
   // Auto-refresh the on-chain root every 5s as a liveness signal.
   useEffect(() => {
@@ -125,7 +143,7 @@ export default function DeskPage() {
     let alive = true
     const tick = () =>
       api
-        .getRoot(deskId)
+        .getRoot(storageMode.mode, deskId)
         .then((r) => alive && setRoot(r.root))
         .catch(() => {})
     tick()
@@ -134,7 +152,7 @@ export default function DeskPage() {
       alive = false
       clearInterval(h)
     }
-  }, [deskId])
+  }, [storageMode.mode, deskId])
 
   // Reconcile local notes against on-chain state every 7s so filled proceeds appear.
   useEffect(() => {
@@ -142,11 +160,11 @@ export default function DeskPage() {
     let alive = true
     const tick = () =>
       api
-        .getNotes(deskId)
+        .getNotes(storageMode.mode, deskId)
         .then(async (r) => {
           if (!alive) return
           setNoteIndexError(null)
-          if (await reconcile(deskId, r.notes)) {
+          if (await reconcile(storageMode.mode, deskId, r.notes)) {
             if (isRecoveryUnlocked(address ?? undefined)) syncRecoveryNow().catch(() => {})
             reloadNotes()
           }
@@ -160,7 +178,7 @@ export default function DeskPage() {
       alive = false
       clearInterval(h)
     }
-  }, [deskId, address, reloadNotes])
+  }, [storageMode.mode, deskId, address, reloadNotes])
 
   // Live confirmation toasts (e.g. "your order filled").
   const [toasts, setToasts] = useState<ToastItem[]>([])
@@ -181,12 +199,14 @@ export default function DeskPage() {
   const fillsSeeded = useRef(false)
   useEffect(() => {
     if (!deskId || !desk) return
+    seenFills.current = new Set()
+    fillsSeeded.current = false
     const symOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
     const decOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
     let alive = true
     const tick = () =>
       api
-        .getFills(deskId)
+        .getFills(storageMode.mode, deskId)
         .then((r) => {
           if (!alive) return
           const fills = r.fills ?? []
@@ -213,7 +233,7 @@ export default function DeskPage() {
       alive = false
       clearInterval(h)
     }
-  }, [deskId, desk])
+  }, [storageMode.mode, deskId, desk])
 
   if (error) return <p className="err">{error}</p>
   if (!desk) return <p className="muted">Loading…</p>

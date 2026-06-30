@@ -47,3 +47,12 @@ export function defaultCatalogAssets(): CatalogAsset[] {
     },
   ]
 }
+
+export function mergeCatalogAssets(local: CatalogAsset[]): CatalogAsset[] {
+  const byId = new Map<string, CatalogAsset>()
+  for (const asset of defaultCatalogAssets()) byId.set(asset.id, asset)
+  for (const asset of local) byId.set(asset.id, asset)
+  return [...byId.values()].sort((a, b) =>
+    Number(b.is_default) - Number(a.is_default) || a.created_at - b.created_at || a.symbol.localeCompare(b.symbol),
+  )
+}

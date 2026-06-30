@@ -14,6 +14,7 @@ import { Buffer } from 'buffer'
 import { submissionMode, submitContractCall, submitDirectOrSponsored } from './directTransaction'
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+const MODE = 'trusted' as const
 
 /** The durable event indexer trails a successful transaction by a few seconds. Treat a missing
  * path as a readiness state, not as a failed order, and retry boundedly before proving. */
@@ -25,7 +26,7 @@ async function waitForNoteProof(
   const started = Date.now()
   for (;;) {
     try {
-      return await api.getNoteProof(deskId, ownerTag)
+      return await api.getNoteProof(MODE, deskId, ownerTag)
     } catch (error) {
       if (!(error instanceof ApiError) || error.status !== 404) throw error
       if (Date.now() - started >= timeoutMs) {
@@ -42,7 +43,7 @@ async function waitForNoteProof(
  * enter the returned result; only the existing proof/XDR relay calls cross the boundary. */
 export async function executeClientAction(action: ClientAction): Promise<Record<string, unknown>> {
   return withClientAction(action, async () => {
-    const desk = await api.getDesk(action.payload.desk_id)
+    const desk = await api.getDesk(MODE, action.payload.desk_id)
     switch (action.payload.kind) {
       case 'shield': return executeShield(desk, action.payload, action.operation_id)
       case 'place_order': return executeOrder(desk, action.payload, action.operation_id)
@@ -56,12 +57,12 @@ export async function executeClientAction(action: ClientAction): Promise<Record<
  * be selected by a later operation after their outputs are indexed. */
 export async function rollbackClientAction(action: ClientAction): Promise<void> {
   const address = (await api.getAuthSession()).address
-  const notes = await notesForDesk(action.payload.desk_id, address)
+  const notes = await notesForDesk(MODE, action.payload.desk_id, address)
   for (const note of notes.filter((item) => item.operation_id === action.operation_id)) {
     if (note.operation_state === 'reserved') {
-      await updateNote(note.id, { operation_id: undefined, operation_state: undefined })
+      await updateNote(MODE, note.id, { operation_id: undefined, operation_state: undefined })
     } else if (note.operation_state === 'pending-output' && !note.indexed) {
-      await removeNote(note.id)
+      await removeNote(MODE, note.id)
     }
   }
   await syncRecoveryNow()
@@ -73,24 +74,24 @@ export async function reconcileOperationJournals(operations: Operation[], addres
   let changed = false
   for (const deskId of new Set(operations.map((operation) => operation.desk_id))) {
     const deskOperations = new Map(operations.filter((operation) => operation.desk_id === deskId).map((operation) => [operation.id, operation]))
-    for (const note of await notesForDesk(deskId, address)) {
+    for (const note of await notesForDesk(MODE, deskId, address)) {
       if (!note.operation_id || !note.operation_state || note.operation_state === 'committed') continue
       const operation = deskOperations.get(note.operation_id)
       if (!operation) continue
       if (operation.status === 'succeeded') {
         if (note.operation_state === 'reserved') {
-          await updateNote(note.id, {
+          await updateNote(MODE, note.id, {
             status: operation.kind === 'cancel_order' ? 'cancelled' : 'spent',
             cancelledAt: operation.kind === 'cancel_order' ? nowMs() : note.cancelledAt,
             operation_state: 'committed',
           })
         } else {
-          await updateNote(note.id, { operation_state: 'committed' })
+          await updateNote(MODE, note.id, { operation_state: 'committed' })
         }
         changed = true
       } else if (operation.status === 'failed' || operation.status === 'cancelled') {
-        if (note.operation_state === 'pending-output' && !note.indexed) await removeNote(note.id)
-        else await updateNote(note.id, { operation_id: undefined, operation_state: undefined })
+        if (note.operation_state === 'pending-output' && !note.indexed) await removeNote(MODE, note.id)
+        else await updateNote(MODE, note.id, { operation_id: undefined, operation_state: undefined })
         changed = true
       }
     }
@@ -112,7 +113,7 @@ async function executeShield(
     symbol: asset.symbol, amount: request.amount, sk, rho, owner_tag, status: 'active', indexed: false,
     createdAt: nowMs(), operation_id: operationId, operation_state: 'pending-output',
   }
-  await stageRecoverableNote(note)
+  await stageRecoverableNote(note, MODE)
   let transaction: string
   if (submissionMode() === 'direct') {
     transaction = await submitContractCall(desk.contract_id, 'shield', [
@@ -131,10 +132,10 @@ async function executeShield(
   // Transaction success does not mean the path server has ingested the new leaf yet. Keep the note
   // unspendable until reconciliation observes the actual event, preventing an immediate order from
   // requesting a membership path that cannot exist locally yet.
-  await updateNoteAndSync(note.id, { txHash: transaction, operation_state: 'committed' })
+  await updateNoteAndSync(note.id, { txHash: transaction, operation_state: 'committed' }, MODE)
   let indexed = false
   try {
-    await waitForConfirm(desk.id, note.id, session.address, { timeoutMs: 30_000, intervalMs: 1_500 })
+    await waitForConfirm(MODE, desk.id, note.id, session.address, { timeoutMs: 30_000, intervalMs: 1_500 })
     await syncRecoveryNow()
     indexed = true
   } catch {
@@ -144,7 +145,7 @@ async function executeShield(
 }
 
 async function exactInput(desk: Desk, assetId: number, amount: bigint): Promise<Note> {
-  const notes = await notesForDesk(desk.id, (await api.getAuthSession()).address)
+  const notes = await notesForDesk(MODE, desk.id, (await api.getAuthSession()).address)
   const plan = planAssembly(notes, assetId, amount)
   if (plan.kind === 'impossible') throw new Error(plan.reason)
   if (plan.kind === 'direct') {
@@ -152,7 +153,7 @@ async function exactInput(desk: Desk, assetId: number, amount: bigint): Promise<
     if (!note) throw new Error('The selected private note is no longer available.')
     return note
   }
-  return runAssembly(desk, plan.steps, notes)
+  return runAssembly(MODE, desk, plan.steps, notes)
 }
 
 async function executeOrder(
@@ -168,7 +169,7 @@ async function executeOrder(
   const quote = desk.assets.find((a) => a.asset_id === pair.quote_asset)
   const offer = await exactInput(desk, assetIn, BigInt(request.amount_in))
   const membership = await waitForNoteProof(desk.id, offer.owner_tag)
-  await updateNote(offer.id, { operation_id: operationId, operation_state: 'reserved' })
+  await updateNote(MODE, offer.id, { operation_id: operationId, operation_state: 'reserved' })
 
   const expiry = nowSeconds() + 7 * 86400
   const rho_out = randomField(); const rho_ord = randomField()
@@ -198,7 +199,7 @@ async function executeOrder(
       amount_in: offer.amount,
     },
   }
-  await stageRecoverableNote(output)
+  await stageRecoverableNote(output, MODE)
   await submitDirectOrSponsored(
     desk.contract_id,
     'submit_order',
@@ -208,8 +209,8 @@ async function executeOrder(
     ],
     () => api.relayOrder(desk.id, b64(bundle.proof), b64(bundle.publicInputs)),
   )
-  await updateNote(offer.id, { status: 'spent', operation_state: 'committed' })
-  await updateNote(output.id, { operation_state: 'committed' })
+  await updateNote(MODE, offer.id, { status: 'spent', operation_state: 'committed' })
+  await updateNote(MODE, output.id, { operation_state: 'committed' })
   await syncRecoveryNow()
   return {
     output_tag: terms.output_owner_tag,
@@ -235,9 +236,9 @@ async function executeUnshieldOperation(
   operationId: string,
 ) {
   const note = await exactInput(desk, request.asset_id, BigInt(request.amount))
-  await updateNote(note.id, { operation_id: operationId, operation_state: 'reserved' })
-  await executeUnshield(desk, note, request.recipient)
-  await updateNote(note.id, { operation_state: 'committed' })
+  await updateNote(MODE, note.id, { operation_id: operationId, operation_state: 'reserved' })
+  await executeUnshield(MODE, desk, note, request.recipient)
+  await updateNote(MODE, note.id, { operation_state: 'committed' })
   await syncRecoveryNow()
   return {
     recipient: request.recipient,
@@ -252,11 +253,11 @@ async function executeCancel(
   request: Extract<OperationRequest, { kind: 'cancel_order' }>,
   operationId: string,
 ) {
-  const notes = await notesForDesk(desk.id, (await api.getAuthSession()).address)
+  const notes = await notesForDesk(MODE, desk.id, (await api.getAuthSession()).address)
   const note = notes.find((n) => n.id === request.wallet_note_id)
   const c = note?.cancel
   if (!note || !c || note.status !== 'active') throw new Error('The order is no longer cancellable.')
-  await updateNote(note.id, { operation_id: operationId, operation_state: 'reserved' })
+  await updateNote(MODE, note.id, { operation_id: operationId, operation_state: 'reserved' })
   const rho_return = randomField(); const return_owner_tag = await noteTag(note.sk, rho_return)
   const bundle = await proveCancel({ sk_o: note.sk, rho_ord: c.rho_ord, order_leaf: c.order_leaf, cancel_owner_tag: c.cancel_owner_tag, return_owner_tag })
   const refund: Note = {
@@ -265,7 +266,7 @@ async function executeCancel(
     status: 'active', indexed: false, createdAt: nowMs(), operation_id: operationId,
     operation_state: 'pending-output',
   }
-  await stageRecoverableNote(refund)
+  await stageRecoverableNote(refund, MODE)
   await submitDirectOrSponsored(
     desk.contract_id,
     'cancel_order',
@@ -277,8 +278,8 @@ async function executeCancel(
     ],
     () => api.relayCancel(desk.id, c.pairId, c.side, b64(bundle.proof), b64(bundle.publicInputs)),
   )
-  await updateNote(note.id, { status: 'cancelled', cancelledAt: nowMs(), operation_state: 'committed' })
-  await updateNote(refund.id, { operation_state: 'committed' })
+  await updateNote(MODE, note.id, { status: 'cancelled', cancelledAt: nowMs(), operation_state: 'committed' })
+  await updateNote(MODE, refund.id, { operation_state: 'committed' })
   await syncRecoveryNow()
   return {
     return_owner_tag,

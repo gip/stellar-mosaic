@@ -100,6 +100,11 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function actionClaimable(action: { status: string; lease_expires_at: number }, operation?: { status: string }): boolean {
+  if (operation?.status !== "waiting_for_client") return false;
+  return action.status === "available" || (action.status === "leased" && action.lease_expires_at < now());
+}
+
 function defaultCatalog(nowMs: number): CatalogAsset[] {
   return [
     {
@@ -320,7 +325,7 @@ export class MemoryMosaicStore implements MosaicStore {
 
   async claimAction(address: string): Promise<ClientAction | null> {
     const action = [...this.actions.values()]
-      .filter((item) => item.address === address && (item.status === "available" || item.lease_expires_at < now()))
+      .filter((item) => item.address === address && actionClaimable(item, this.operations.get(item.operation_id)))
       .sort((a, b) => (this.operations.get(a.operation_id)?.created_at ?? 0) - (this.operations.get(b.operation_id)?.created_at ?? 0))[0];
     if (!action) return null;
     action.status = "leased";
@@ -675,7 +680,7 @@ export class SqliteMosaicStore implements MosaicStore {
   async claimAction(address: string): Promise<ClientAction | null> {
     const actions = (this.db.prepare("SELECT json FROM actions WHERE address = ?").all(address) as { json: string }[])
       .map((row) => JSON.parse(row.json) as StoredAction)
-      .filter((item) => item.status === "available" || item.lease_expires_at < now())
+      .filter((item) => actionClaimable(item, this.operationForAction(item)))
       .sort((a, b) => this.operationCreatedAt(a.operation_id) - this.operationCreatedAt(b.operation_id));
     const action = actions[0];
     if (!action) return null;
@@ -806,6 +811,14 @@ export class SqliteMosaicStore implements MosaicStore {
   private operationCreatedAt(id: string): number {
     const row = this.db.prepare("SELECT created_at FROM operations WHERE id = ?").get(id) as { created_at: number } | undefined;
     return row?.created_at ?? 0;
+  }
+
+  private operationForAction(action: StoredAction): Operation | undefined {
+    return parseJson<Operation>(
+      this.db.prepare("SELECT json FROM operations WHERE id = ? AND address = ?").get(action.operation_id, action.address) as
+        | { json: string }
+        | undefined,
+    );
   }
 
   private addEvent(operation: Operation, event_type: string, state: string, message: string, details: unknown): void {

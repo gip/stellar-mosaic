@@ -18,6 +18,16 @@ function asset(rel: string): string {
 
 const CONTRACT_ID = /^C[A-Z2-7]{55}$/;
 
+function commandErrorText(error: unknown): string {
+  const parts: string[] = [];
+  if (error instanceof Error) parts.push(error.message);
+  const io = error as { stdout?: unknown; stderr?: unknown };
+  for (const value of [io.stdout, io.stderr]) {
+    if (value) parts.push(Buffer.isBuffer(value) ? value.toString("utf8") : String(value));
+  }
+  return parts.join("\n");
+}
+
 export class StellarCliDeployer implements Deployer {
   private readonly net: NetworkConfig;
   private readonly source: string;
@@ -35,24 +45,49 @@ export class StellarCliDeployer implements Deployer {
     return ["--rpc-url", this.net.rpcUrl, "--network-passphrase", this.net.networkPassphrase];
   }
 
+  private assetContractId(assetName: string): string {
+    const out = this.stellar([
+      "contract",
+      "id",
+      "asset",
+      "--asset",
+      assetName,
+      ...this.netFlags(),
+    ]);
+    const id = out.split(/\s+/).find((t) => CONTRACT_ID.test(t));
+    if (!id) throw new Error(`could not resolve SAC for ${assetName}: ${out}`);
+    return id;
+  }
+
+  private ensureAssetContract(assetName: string): void {
+    if (!assetName.includes(":")) return;
+    try {
+      this.stellar([
+        "contract",
+        "asset",
+        "deploy",
+        "--asset",
+        assetName,
+        "--source-account",
+        this.source,
+        ...this.netFlags(),
+      ]);
+    } catch (error) {
+      const message = commandErrorText(error);
+      if (!message.includes("already") && !message.includes("ExistingValue")) throw error;
+    }
+  }
+
   /** Resolve a token reference to a SAC contract id. `native` -> XLM SAC; `C...` used as-is. */
   private resolveToken(token: string): string {
     if (CONTRACT_ID.test(token)) return token;
-    if (token === "native") {
-      const out = this.stellar([
-        "contract",
-        "id",
-        "asset",
-        "--asset",
-        "native",
-        ...this.netFlags(),
-      ]);
-      const id = out.split(/\s+/).find((t) => CONTRACT_ID.test(t));
-      if (!id) throw new Error(`could not resolve XLM SAC: ${out}`);
+    const assetName = token === "native" || token.includes(":") ? token : null;
+    if (assetName) {
+      const id = this.assetContractId(assetName);
+      this.ensureAssetContract(assetName);
       return id;
     }
-    // "CODE:ISSUER" or anything else: let the user pass a concrete SAC id for now.
-    throw new Error(`unsupported token "${token}"; pass a SAC contract id (C...) or "native"`);
+    throw new Error(`unsupported token "${token}"; pass "native", CODE:ISSUER, or a SAC contract id (C...)`);
   }
 
   async deploySettlement(params: {

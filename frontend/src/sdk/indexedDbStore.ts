@@ -3,6 +3,7 @@
 // existing app share one note database. Secrets never leave the device.
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import {
+  type CatalogAsset,
   isActivityTimeCursor,
   matchesActivityQuery,
   normalizeActivityEvent,
@@ -15,10 +16,12 @@ import {
   type Note,
   type NoteStore,
 } from '@mosaic/sdk'
+import type { StorageMode } from '../StorageModeContext'
 
 interface MosaicDB extends DBSchema {
   notes: { key: string; value: Note; indexes: { 'by-desk': string } }
   desks: { key: string; value: Desk }
+  catalogAssets: { key: string; value: CatalogAsset }
   eventCaches: { key: string; value: ChainEventCacheSnapshot & { scope: string } }
   activityEvents: {
     key: number
@@ -37,10 +40,16 @@ interface MosaicDB extends DBSchema {
   }
 }
 
-let dbp: Promise<IDBPDatabase<MosaicDB>> | null = null
-function db() {
+const dbPromises = new Map<StorageMode, Promise<IDBPDatabase<MosaicDB>>>()
+
+export function indexedDbName(mode: StorageMode): string {
+  return `mosaic-${mode}`
+}
+
+function db(mode: StorageMode) {
+  let dbp = dbPromises.get(mode)
   if (!dbp) {
-    dbp = openDB<MosaicDB>('mosaic', 4, {
+    dbp = openDB<MosaicDB>(indexedDbName(mode), 5, {
       upgrade(d, oldVersion) {
         if (oldVersion < 1) {
           const s = d.createObjectStore('notes', { keyPath: 'id' })
@@ -48,6 +57,11 @@ function db() {
         }
         if (oldVersion < 2) {
           d.createObjectStore('desks', { keyPath: 'id' })
+        }
+        if (oldVersion < 5) {
+          if (!d.objectStoreNames.contains('catalogAssets')) {
+            d.createObjectStore('catalogAssets', { keyPath: 'id' })
+          }
         }
         if (oldVersion < 3) {
           d.createObjectStore('eventCaches', { keyPath: 'scope' })
@@ -66,29 +80,36 @@ function db() {
         }
       },
     })
+    dbPromises.set(mode, dbp)
   }
   return dbp
 }
 
 export class IndexedDbStore implements NoteStore, ActivityStore {
+  private readonly mode: StorageMode
+
+  constructor(mode: StorageMode = 'trustless') {
+    this.mode = mode
+  }
+
   async get(id: string): Promise<Note | undefined> {
-    return (await db()).get('notes', id)
+    return (await db(this.mode)).get('notes', id)
   }
   async put(note: Note): Promise<void> {
-    await (await db()).put('notes', note)
+    await (await db(this.mode)).put('notes', note)
   }
   async delete(id: string): Promise<void> {
-    await (await db()).delete('notes', id)
+    await (await db(this.mode)).delete('notes', id)
   }
   async all(): Promise<Note[]> {
-    return (await db()).getAll('notes')
+    return (await db(this.mode)).getAll('notes')
   }
   async byDesk(deskId: string): Promise<Note[]> {
-    return (await db()).getAllFromIndex('notes', 'by-desk', deskId)
+    return (await db(this.mode)).getAllFromIndex('notes', 'by-desk', deskId)
   }
 
   async record(event: ActivityEvent): Promise<ActivityEvent> {
-    const database = await db()
+    const database = await db(this.mode)
     if (event.idempotency_key) {
       const existing = await database.getFromIndex('activityEvents', 'by-idempotency', event.idempotency_key)
       if (existing) return existing
@@ -105,7 +126,7 @@ export class IndexedDbStore implements NoteStore, ActivityStore {
   }
 
   async list(query: ActivityQuery = {}): Promise<ActivityEvent[]> {
-    const events = (await (await db()).getAll('activityEvents'))
+    const events = (await (await db(this.mode)).getAll('activityEvents'))
       .filter((event) => matchesActivityQuery(event, query))
       .sort((a, b) => (a.cursor ?? 0) - (b.cursor ?? 0))
     return query.limit ? events.slice(0, query.limit) : events
@@ -122,8 +143,14 @@ export class IndexedDbStore implements NoteStore, ActivityStore {
 }
 
 export class IndexedDbEventCache implements ChainEventCache {
+  private readonly mode: StorageMode
+
+  constructor(mode: StorageMode = 'trustless') {
+    this.mode = mode
+  }
+
   async load(scope: string): Promise<ChainEventCacheSnapshot | undefined> {
-    const record = await (await db()).get('eventCaches', scope)
+    const record = await (await db(this.mode)).get('eventCaches', scope)
     if (!record) return undefined
     return {
       cursor: record.cursor,
@@ -135,25 +162,42 @@ export class IndexedDbEventCache implements ChainEventCache {
   }
 
   async save(scope: string, snapshot: ChainEventCacheSnapshot): Promise<void> {
-    await (await db()).put('eventCaches', { scope, ...snapshot })
+    await (await db(this.mode)).put('eventCaches', { scope, ...snapshot })
   }
 }
 
-export const browserEventCache = new IndexedDbEventCache()
-export const browserActivityStore = new IndexedDbStore()
-
-export async function listLocalDesks(): Promise<Desk[]> {
-  return (await db()).getAll('desks')
+export function browserEventCache(mode: StorageMode): IndexedDbEventCache {
+  return new IndexedDbEventCache(mode)
 }
 
-export async function getLocalDesk(id: string): Promise<Desk | undefined> {
-  return (await db()).get('desks', id)
+export function browserActivityStore(mode: StorageMode): IndexedDbStore {
+  return new IndexedDbStore(mode)
 }
 
-export async function hasLocalDesk(id: string): Promise<boolean> {
-  return !!(await getLocalDesk(id))
+export async function listLocalDesks(mode: StorageMode): Promise<Desk[]> {
+  return (await db(mode)).getAll('desks')
 }
 
-export async function putLocalDesk(desk: Desk): Promise<void> {
-  await (await db()).put('desks', desk)
+export async function getLocalDesk(mode: StorageMode, id: string): Promise<Desk | undefined> {
+  return (await db(mode)).get('desks', id)
+}
+
+export async function hasLocalDesk(mode: StorageMode, id: string): Promise<boolean> {
+  return !!(await getLocalDesk(mode, id))
+}
+
+export async function putLocalDesk(mode: StorageMode, desk: Desk): Promise<void> {
+  await (await db(mode)).put('desks', desk)
+}
+
+export async function listLocalCatalogAssets(mode: StorageMode): Promise<CatalogAsset[]> {
+  return (await db(mode)).getAll('catalogAssets')
+}
+
+export async function putLocalCatalogAsset(mode: StorageMode, asset: CatalogAsset): Promise<void> {
+  await (await db(mode)).put('catalogAssets', asset)
+}
+
+export async function getLocalCatalogAsset(mode: StorageMode, id: string): Promise<CatalogAsset | undefined> {
+  return (await db(mode)).get('catalogAssets', id)
 }

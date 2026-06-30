@@ -12,6 +12,7 @@ import {
   updateNote,
   type Note,
 } from './notes'
+import type { StorageMode } from './StorageModeContext'
 
 export const RECOVERY_VERSION = 1 as const
 const SIGNED_MESSAGE_PREFIX = 'Stellar Signed Message:\n'
@@ -55,7 +56,9 @@ export interface RecoveryFile extends WalletBackupEnvelope {
 
 let active: RecoverySession | null = null
 let backendEnabled = false
+let activeMode: StorageMode = 'trustless'
 let accountSelection = 0
+let syncTail: Promise<void> = Promise.resolve()
 let state: RecoveryStatus = {
   unlocked: false,
   syncing: false,
@@ -77,8 +80,8 @@ function cacheDb() {
   return cacheDbPromise
 }
 
-function sessionId(account: string, networkPassphrase: string) {
-  return `${account}\u0000${networkPassphrase}`
+function sessionId(mode: StorageMode, account: string, networkPassphrase: string) {
+  return `${mode}\u0000${account}\u0000${networkPassphrase}`
 }
 
 function publish(patch: Partial<RecoveryStatus>) {
@@ -92,6 +95,10 @@ export function recoveryStatus(): RecoveryStatus {
 
 export function setRecoveryBackendEnabled(enabled: boolean): void {
   backendEnabled = enabled
+}
+
+export function setRecoveryMode(mode: StorageMode): void {
+  activeMode = mode
 }
 
 export function subscribeRecovery(fn: (s: RecoveryStatus) => void): () => void {
@@ -114,7 +121,7 @@ export async function selectRecoveryAccount(
     networkPassphrase,
   })
   if (!account || !networkPassphrase) return
-  const cached = await (await cacheDb()).get('sessions', sessionId(account, networkPassphrase))
+  const cached = await (await cacheDb()).get('sessions', sessionId(activeMode, account, networkPassphrase))
   if (selection !== accountSelection) return
   if (!cached) return
   active = cached
@@ -150,7 +157,7 @@ export async function unlockRecovery(account: string, networkPassphrase: string)
       throw new Error('The connected Stellar account changed while recovery was unlocking.')
     }
     active = {
-      id: sessionId(account, networkPassphrase),
+      id: sessionId(activeMode, account, networkPassphrase),
       account,
       networkPassphrase,
       encryptionKey: material.encryptionKey,
@@ -175,11 +182,11 @@ export async function unlockRecovery(account: string, networkPassphrase: string)
   }
 }
 
-export async function stageRecoverableNote(note: Note): Promise<Note> {
-  return (await stageRecoverableNotes([note]))[0]
+export async function stageRecoverableNote(note: Note, mode: StorageMode = activeMode): Promise<Note> {
+  return (await stageRecoverableNotes([note], mode))[0]
 }
 
-export async function stageRecoverableNotes(notes: Note[]): Promise<Note[]> {
+export async function stageRecoverableNotes(notes: Note[], mode: StorageMode = activeMode): Promise<Note[]> {
   const s = requireSession()
   const staged = notes.map((note): Note => ({
     ...note,
@@ -188,26 +195,32 @@ export async function stageRecoverableNotes(notes: Note[]): Promise<Note[]> {
     recovery_state: 'staged',
     revision: note.revision ?? 1,
   }))
-  for (const note of staged) await addNote(note)
+  for (const note of staged) await addNote(mode, note)
   try {
     await syncRecoveryNow()
   } catch (e) {
-    for (const note of staged) await updateNote(note.id, { recovery_state: 'sync-error' })
+    for (const note of staged) await updateNote(mode, note.id, { recovery_state: 'sync-error' })
     throw e
   }
   return staged.map((note) => ({ ...note, recovery_state: 'protected' }))
 }
 
-export async function updateNoteAndSync(id: string, patch: Partial<Note>): Promise<void> {
-  await updateNote(id, patch)
+export async function updateNoteAndSync(id: string, patch: Partial<Note>, mode: StorageMode = activeMode): Promise<void> {
+  await updateNote(mode, id, patch)
   if (active) await syncRecoveryNow()
 }
 
 export async function syncRecoveryNow(): Promise<void> {
+  const run = syncTail.then(syncRecoverySnapshot, syncRecoverySnapshot)
+  syncTail = run.catch(() => {})
+  return run
+}
+
+async function syncRecoverySnapshot(): Promise<void> {
   const s = requireSession()
   if (!backendEnabled) {
     await (await cacheDb()).put('sessions', s)
-    await markRecoveryProtected(s.account)
+    await markRecoveryProtected(activeMode, s.account)
     publish({ syncing: false, error: null })
     return
   }
@@ -217,13 +230,13 @@ export async function syncRecoveryNow(): Promise<void> {
       const remote = await getRemote(s.backupId)
       if (remote) {
         const decoded = await decryptSnapshot(s, remote)
-        await mergeRecoveryNotes(s.account, decoded.notes)
+        await mergeRecoveryNotes(activeMode, s.account, decoded.notes)
         s.generation = remote.generation
       } else {
         s.generation = 0
       }
 
-      const notes = (await recoveryNotes(s.account)).map((n) => ({
+      const notes = (await recoveryNotes(activeMode, s.account)).map((n) => ({
         ...n,
         recovery_state: 'protected' as const,
       }))
@@ -236,10 +249,10 @@ export async function syncRecoveryNow(): Promise<void> {
         })
         s.generation = result.generation
         await (await cacheDb()).put('sessions', s)
-        await markRecoveryProtected(s.account)
+        await markRecoveryProtected(activeMode, s.account)
         return
       } catch (e) {
-        if (e instanceof ApiError && e.status === 409) continue
+        if (isBackupGenerationConflict(e)) continue
         throw e
       }
     }
@@ -258,7 +271,7 @@ export async function restoreFromBackend(): Promise<number> {
   const remote = await getRemote(s.backupId)
   if (!remote) return 0
   const snapshot = await decryptSnapshot(s, remote)
-  await mergeRecoveryNotes(s.account, snapshot.notes)
+  await mergeRecoveryNotes(activeMode, s.account, snapshot.notes)
   s.generation = remote.generation
   await (await cacheDb()).put('sessions', s)
   return snapshot.notes.length
@@ -267,7 +280,7 @@ export async function restoreFromBackend(): Promise<number> {
 export async function exportRecoveryFile(): Promise<RecoveryFile> {
   const s = requireSession()
   // Export is deliberately independent of backend availability: the file is the secondary copy.
-  const notes = (await recoveryNotes(s.account)).map((n) => ({
+  const notes = (await recoveryNotes(activeMode, s.account)).map((n) => ({
     ...n,
     recovery_state: 'protected' as const,
   }))
@@ -288,7 +301,7 @@ export async function importRecoveryFile(file: RecoveryFile): Promise<number> {
     throw new Error('Recovery file belongs to another Stellar account or network.')
   }
   const snapshot = await decryptSnapshot(s, file)
-  await mergeRecoveryNotes(s.account, snapshot.notes)
+  await mergeRecoveryNotes(activeMode, s.account, snapshot.notes)
   // A file must remain useful if the service backup is unavailable. A failed upload leaves the
   // restored notes local and protected by the file; recovery.error blocks future note creation.
   try {
@@ -469,4 +482,10 @@ function webBytes(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
 
 function message(e: unknown): string {
   return errorMessage(e)
+}
+
+function isBackupGenerationConflict(e: unknown): boolean {
+  if (e instanceof ApiError && e.status === 409) return true
+  const text = errorMessage(e).toLowerCase()
+  return text.includes('backup generation conflict') || text.includes('stale wallet-backup generation')
 }

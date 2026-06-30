@@ -36,11 +36,33 @@ function base64(bytes: Uint8Array): string {
 
 class HttpMcpClient implements McpClient {
   private readonly url: string;
+  private readonly sessionStorageKey: string;
   private client?: Client;
   private sessionToken?: string;
 
   constructor(url: string) {
     this.url = url;
+    this.sessionStorageKey = `mosaic.mcp.session.${url}`;
+    this.sessionToken = this.readStoredSession();
+  }
+
+  private readStoredSession(): string | undefined {
+    if (typeof localStorage === "undefined") return undefined;
+    try {
+      return localStorage.getItem(this.sessionStorageKey) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private writeStoredSession(token: string | undefined): void {
+    if (typeof localStorage === "undefined") return;
+    try {
+      if (token) localStorage.setItem(this.sessionStorageKey, token);
+      else localStorage.removeItem(this.sessionStorageKey);
+    } catch {
+      // The in-memory token still works for the current page if browser storage is unavailable.
+    }
   }
 
   private endpoint(): URL {
@@ -99,6 +121,7 @@ class HttpMcpClient implements McpClient {
       signature,
     });
     this.sessionToken = res.token;
+    this.writeStoredSession(res.token);
     return { session: res.token };
   }
 
@@ -108,9 +131,11 @@ class HttpMcpClient implements McpClient {
   }
 
   async logout(): Promise<void> {
-    if (!this.sessionToken) return;
-    await this.call("auth_logout", { session: this.sessionToken });
+    const token = this.sessionToken;
     this.sessionToken = undefined;
+    this.writeStoredSession(undefined);
+    if (!token) return;
+    await this.call("auth_logout", { session: token });
   }
 
   listDesks(): Promise<Desk[]> {
