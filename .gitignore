@@ -29,6 +29,11 @@ packages/*/dist/
 packages/sdk/assets/settlement.wasm
 packages/sdk/assets/MosaicBridge.json
 
+# MCP local SQLite runtime state
+packages/mcp/*.db
+packages/mcp/*.db-shm
+packages/mcp/*.db-wal
+
 # bridge-prover proof artifacts (seal.hex / journal.hex emitted by `host --prove`)
 bridge-prover/out/
 
