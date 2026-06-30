@@ -20,6 +20,10 @@ pnpm --filter @mosaic/mcp build
 mosaic-mcp            # stdio transport (what agents connect to)
 ```
 
+Logs are JSON lines on stderr, so they are safe with stdio MCP transport. Set `MOSAIC_LOG=debug`
+or `MOSAIC_LOG_LEVEL=debug` for verbose tool logs; supported levels are `debug`, `info`, `warn`,
+`error`, and `silent`. The default is `warn`.
+
 `base_shield` is gated by configuration; without it the tool returns a clear "not configured" error
 and only authentication is available. To enable it, set:
 

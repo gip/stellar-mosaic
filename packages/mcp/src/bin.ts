@@ -8,14 +8,18 @@ import { createMosaicMcpServer } from "./server.js";
 import { baseShieldConfigFromEnv } from "./baseShield.js";
 import { startHttpServer } from "./http.js";
 import { openMosaicStore } from "./store.js";
+import { configureMcpLogging } from "./logging.js";
+
+const logger = configureMcpLogging();
 
 if (process.argv.includes("--http")) {
-  const server = await startHttpServer({ baseShield: baseShieldConfigFromEnv() });
+  const server = await startHttpServer({ baseShield: baseShieldConfigFromEnv(), logger });
   process.stderr.write(`mosaic-mcp HTTP listening at ${server.url}\n`);
 } else {
   const server = createMosaicMcpServer({
     baseShield: baseShieldConfigFromEnv(),
     store: openMosaicStore(process.env.MOSAIC_DATABASE_URL),
+    logger,
   });
   await server.connect(new StdioServerTransport());
 }

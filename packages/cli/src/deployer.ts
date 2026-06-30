@@ -45,8 +45,6 @@ export class StellarCliDeployer implements Deployer {
         "asset",
         "--asset",
         "native",
-        "--source-account",
-        this.source,
         ...this.netFlags(),
       ]);
       const id = out.split(/\s+/).find((t) => CONTRACT_ID.test(t));

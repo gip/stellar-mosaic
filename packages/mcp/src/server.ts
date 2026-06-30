@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Desk, Operation, SubmitResult } from "@mosaic/sdk";
+import type { Desk, MosaicLogger, Operation, SubmitResult } from "@mosaic/sdk";
 import { z } from "zod";
 import { AuthService } from "./auth.js";
 import { runBaseShield, type BaseShieldConfig as RunnerBaseShieldConfig } from "./baseShield.js";
 import { SponsoredStellarDeployHandlers } from "./deploy.js";
+import { createStderrLogger } from "./logging.js";
 import { StellarCliRelayer } from "./relayer.js";
 import { MemoryMosaicStore, type MosaicStore } from "./store.js";
 
@@ -34,6 +35,7 @@ export interface MosaicMcpOptions {
   store?: MosaicStore;
   relays?: RelayHandlers;
   deploy?: DeployHandlers;
+  logger?: MosaicLogger;
   /** Legacy direct Base-shield runner; the durable queued flow is exposed separately. */
   baseShield?: RunnerBaseShieldConfig;
 }
@@ -78,6 +80,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   const auth = opts.auth ?? new AuthService(store);
   const relays = opts.relays ?? new StellarCliRelayer({ store });
   const deploy = opts.deploy ?? new SponsoredStellarDeployHandlers();
+  const logger = opts.logger ?? createStderrLogger();
   const server = new McpServer({ name: "mosaic-mcp", version: "0.0.0" });
 
   const reg = (
@@ -85,7 +88,19 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     config: { description: string; inputSchema: z.ZodRawShape },
     handler: ToolHandler,
   ): void => {
-    (server.registerTool as unknown as (n: string, c: unknown, h: ToolHandler) => void)(name, config, handler);
+    const wrapped: ToolHandler = async (args) => {
+      const started = Date.now();
+      logger.debug("mcp tool started", { tool: name });
+      try {
+        const result = await handler(args);
+        logger.info("mcp tool completed", { tool: name, duration_ms: Date.now() - started });
+        return result;
+      } catch (error) {
+        logger.error("mcp tool failed", { tool: name, duration_ms: Date.now() - started, error });
+        throw error;
+      }
+    };
+    (server.registerTool as unknown as (n: string, c: unknown, h: ToolHandler) => void)(name, config, wrapped);
   };
 
   reg(
