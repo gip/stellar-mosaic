@@ -293,8 +293,11 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   );
 
   reg("base_shield_config", { description: "Base shield readiness for a desk.", inputSchema: { desk_id: z.string() } }, async ({ desk_id }) => {
-    await store.getDesk(String(desk_id));
-    return ok({ available: !!opts.baseShield, chain_id: 84532, network: "base-sepolia", bridge: null, worker_ready: !!opts.baseShield, reason: opts.baseShield ? null : "worker_disabled" });
+    const desk = await store.getDesk(String(desk_id));
+    const bridge = desk.base_deployment?.bridge_address ?? null;
+    const workerReady = !!opts.baseShield;
+    const reason = bridge ? (workerReady ? null : "worker_disabled") : "contract_unconfigured";
+    return ok({ available: reason === null, chain_id: 84532, network: "base-sepolia", bridge, worker_ready: workerReady, reason });
   });
   reg(
     "enqueue_base_shield",
