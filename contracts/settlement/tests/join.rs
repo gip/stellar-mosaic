@@ -78,7 +78,14 @@ fn setup(env: &Env) -> Address {
 
     let id = deploy(
         env,
-        vec![env, AssetInit { asset_id: ASSET_1, token: Some(token), kind: AssetKind::Dual }],
+        vec![
+            env,
+            AssetInit {
+                asset_id: ASSET_1,
+                token: Some(token),
+                kind: AssetKind::Dual,
+            },
+        ],
     );
     let client = SettlementClient::new(env, &id);
 
@@ -153,7 +160,11 @@ fn join_rejects_tampered_output_amount() {
 
     let err = env
         .as_contract(&id, || {
-            Settlement::join(env.clone(), bytes(&env, JOIN_PROOF), Bytes::from_slice(&env, &tampered))
+            Settlement::join(
+                env.clone(),
+                bytes(&env, JOIN_PROOF),
+                Bytes::from_slice(&env, &tampered),
+            )
         })
         .expect_err("tampered output amount");
     assert_eq!(err as u32, Error::VerificationFailed as u32);

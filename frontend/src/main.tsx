@@ -12,20 +12,27 @@ import Home from './pages/Home'
 import DeskPage from './pages/DeskPage'
 import AssetsPage from './pages/AssetsPage'
 import { WalletProvider } from './WalletContext'
+import { MosaicServerProvider } from './MosaicServerContext'
+import { StorageModeProvider } from './StorageModeContext'
 import { RecoveryProvider } from './RecoveryContext'
 import { ActivityProvider } from './ActivityContext'
 import { EthereumWalletProvider } from './EthereumWalletContext'
 
+// eslint-disable-next-line react-refresh/only-export-components
 function AppRoute() {
   return (
     <WalletProvider>
-      <EthereumWalletProvider>
-        <RecoveryProvider>
-          <ActivityProvider>
-            <App />
-          </ActivityProvider>
-        </RecoveryProvider>
-      </EthereumWalletProvider>
+      <StorageModeProvider>
+        <MosaicServerProvider>
+          <EthereumWalletProvider>
+            <RecoveryProvider>
+              <ActivityProvider>
+                <App />
+              </ActivityProvider>
+            </RecoveryProvider>
+          </EthereumWalletProvider>
+        </MosaicServerProvider>
+      </StorageModeProvider>
     </WalletProvider>
   )
 }

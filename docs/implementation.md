@@ -242,18 +242,20 @@ never read back as "unspent." Worst realistic failure is **temporary inaccessibi
 pays to restore** — never loss, never double-spend — and restoration is **permissionless**.
 
 Mechanism (persistent TTLs decay and can't be extended forever):
-- **Bumps on write.** Every fund-critical write extends the entry's TTL to `max_ttl()`. The hot state
+- **Bumps on write.** Every fund-critical write extends the entry's TTL to `STORAGE_TTL_LEDGERS`
+  (120,960 ledgers, about one week at a 5s ledger cadence), capped by the network max. The hot state
   (instance, the tree singletons `TreeFilled`/`TreeNext`/`TreeRoot`, the current root marker) is
   refreshed by `bump_core` at the end of every state-changing call; nullifiers, books, pairs, assets,
   VKs are bumped where written. Cheap — ~0.04% of `submit_order`'s worst case (a flat cost, not a
   rewrite).
-- **`keep_alive()`** — permissionless heartbeat re-extending all **bounded** structural state to max.
+- **`keep_alive()`** — permissionless heartbeat re-extending all **bounded** structural state to the
+  one-week target.
 - **`keep_alive_keys(nullifiers, roots)`** — permissionless targeted heartbeat for the **unbounded**
   sets; a keeper or a user about to spend an old note refreshes exactly what they need.
 
-Operational: run a keeper calling `keep_alive()` on an interval shorter than `max_ttl` and bumping the
-instance + Wasm code entries; for the unbounded sets, sweep recent entries via `keep_alive_keys` or
-rely on permissionless restore at spend time. Test:
+Operational: run a keeper calling `keep_alive()` on an interval shorter than the one-week target and
+bumping the instance + Wasm code entries; for the unbounded sets, sweep recent entries via
+`keep_alive_keys` or rely on permissionless restore at spend time. Test:
 `contracts/settlement/tests/book.rs::critical_state_ttl_is_extended_and_kept_alive`.
 
 ## Status: what's done and what's left

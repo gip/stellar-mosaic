@@ -18,6 +18,7 @@ import {
 import { Address, xdr } from '@stellar/stellar-sdk'
 import { Buffer } from 'buffer'
 import { submitDirectOrSponsored } from './directTransaction'
+import type { StorageMode } from './StorageModeContext'
 
 export interface JoinResult {
   target: Note // the carved/accumulated output (active, but unspendable until indexed)
@@ -28,6 +29,7 @@ type Status = (s: string) => void
 
 /** Prove + relay a withdrawal of one exact, confirmed asset note to a Stellar recipient. */
 export async function executeUnshield(
+  mode: StorageMode,
   desk: Desk,
   note: Note,
   to: string,
@@ -40,7 +42,7 @@ export async function executeUnshield(
   ])
 
   onStatus?.('Fetching membership path…')
-  const membership = await api.getNoteProof(desk.id, note.owner_tag)
+  const membership = await api.getNoteProof(mode, desk.id, note.owner_tag)
 
   onStatus?.('Proving (UltraHonk, in-browser)…')
   const bundle = await proveUnshield({
@@ -69,7 +71,7 @@ export async function executeUnshield(
 
   // The relay only resolves after the sponsored transaction succeeds. Preserve the confirmed note
   // on every earlier failure so the user can retry without corrupting local wallet state.
-  await updateNoteAndSync(note.id, { status: 'spent' })
+  await updateNoteAndSync(note.id, { status: 'spent' }, mode)
 }
 
 // A null padding note: 32 zero siblings + zero index bits. The join circuit only checks note 2's
@@ -85,6 +87,7 @@ const ZERO_BITS = Array<number>(32).fill(0)
  * consumed input(s) spent and saves fresh active outputs (reconciliation makes them spendable).
  */
 export async function executeJoin(
+  mode: StorageMode,
   desk: Desk,
   a: Note,
   b: Note | null,
@@ -114,12 +117,12 @@ export async function executeJoin(
   })
 
   onStatus?.(b ? 'Fetching membership paths…' : 'Fetching membership path…')
-  const pa = await api.getNoteProof(desk.id, a.owner_tag)
+  const pa = await api.getNoteProof(mode, desk.id, a.owner_tag)
   let amount_2 = '0'
   let path_2 = ZERO_PATH
   let index_bits_2 = ZERO_BITS
   if (b) {
-    const pb = await api.getNoteProof(desk.id, b.owner_tag)
+    const pb = await api.getNoteProof(mode, desk.id, b.owner_tag)
     // Both paths must be against the same root (the circuit folds both to one).
     if (pa.root.toLowerCase() !== pb.root.toLowerCase()) {
       throw new Error('Tree advanced between path fetches; please retry.')
@@ -183,7 +186,7 @@ export async function executeJoin(
         }
       : null
   onStatus?.('Backing up output secrets…')
-  const staged = await stageRecoverableNotes(change ? [target, change] : [target])
+  const staged = await stageRecoverableNotes(change ? [target, change] : [target], mode)
   target = staged[0]
   change = change ? staged[1] : null
 
@@ -198,8 +201,8 @@ export async function executeJoin(
     () => api.relayJoin(desk.id, b64(bundle.proof), b64(bundle.publicInputs)),
   )
 
-  await updateNote(a.id, { status: 'spent' })
-  if (b) await updateNote(b.id, { status: 'spent' })
+  await updateNote(mode, a.id, { status: 'spent' })
+  if (b) await updateNote(mode, b.id, { status: 'spent' })
   await syncRecoveryNow()
   return { target, change }
 }
@@ -211,6 +214,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
  * returning the updated note. Used between join steps so the next join can prove membership.
  */
 export async function waitForConfirm(
+  mode: StorageMode,
   deskId: string,
   noteId: string,
   walletAddress?: string,
@@ -221,12 +225,12 @@ export async function waitForConfirm(
   const start = Date.now()
   for (;;) {
     try {
-      const r = await api.getNotes(deskId)
-      await reconcile(deskId, r.notes)
+      const r = await api.getNotes(mode, deskId)
+      await reconcile(mode, deskId, r.notes)
     } catch {
       /* transient; retry on the next tick */
     }
-    const n = (await notesForDesk(deskId, walletAddress)).find((x) => x.id === noteId)
+    const n = (await notesForDesk(mode, deskId, walletAddress)).find((x) => x.id === noteId)
     if (n?.status === 'active' && n.indexed) return n
     if (Date.now() - start > timeoutMs) throw new Error('Timed out waiting for note confirmation.')
     await sleep(intervalMs)
@@ -239,6 +243,7 @@ export async function waitForConfirm(
  * can be the next step's input. `notes` resolves the plan's original note references.
  */
 export async function runAssembly(
+  mode: StorageMode,
   desk: Desk,
   steps: AssemblyStep[],
   notes: Note[],
@@ -254,9 +259,9 @@ export async function runAssembly(
     const b = s.op === 'join' ? resolve(s.b, prev) : null
     if (!a || (s.op === 'join' && !b)) throw new Error('A note is no longer available; please retry.')
     onStatus?.(`Preparing note — ${s.op} ${i + 1}/${steps.length}…`)
-    const { target } = await executeJoin(desk, a, b, BigInt(s.targetRaw), BigInt(s.changeRaw), onStatus)
+    const { target } = await executeJoin(mode, desk, a, b, BigInt(s.targetRaw), BigInt(s.changeRaw), onStatus)
     onStatus?.(`Waiting for confirmation (${i + 1}/${steps.length})…`)
-    prev = await waitForConfirm(desk.id, target.id, target.wallet_address)
+    prev = await waitForConfirm(mode, desk.id, target.id, target.wallet_address)
   }
   if (!prev) throw new Error('Empty assembly plan.')
   return prev

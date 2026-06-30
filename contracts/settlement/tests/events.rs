@@ -13,8 +13,8 @@ use settlement::{
     PairRegistered, Settled, Shielded, Unshielded,
 };
 use soroban_sdk::{
-    symbol_short, testutils::Address as _, xdr::ScVal, Address, BytesN, Env, Event, FromVal, IntoVal,
-    Symbol, Val, Vec,
+    symbol_short, testutils::Address as _, xdr::ScVal, Address, BytesN, Env, Event, FromVal,
+    IntoVal, Symbol, Val, Vec,
 };
 
 fn scval(env: &Env, v: Val) -> ScVal {
@@ -30,7 +30,11 @@ fn assert_wire<E: Event>(env: &Env, ev: &E, topic: Symbol, want_data: Val) {
         scval(env, want_topics.to_val()),
         "topic mismatch",
     );
-    assert_eq!(scval(env, ev.data(env)), scval(env, want_data), "data mismatch");
+    assert_eq!(
+        scval(env, ev.data(env)),
+        scval(env, want_data),
+        "data mismatch"
+    );
 }
 
 fn tag(env: &Env, b: u8) -> BytesN<32> {
@@ -44,14 +48,22 @@ fn shielded_and_noteins_wire_format() {
 
     assert_wire(
         &env,
-        &Shielded { asset_id: 1, amount: 100, owner_tag: t.clone() },
+        &Shielded {
+            asset_id: 1,
+            amount: 100,
+            owner_tag: t.clone(),
+        },
         symbol_short!("shielded"),
         (1u32, 100i128, t.clone()).into_val(&env),
     );
     // Same shape, distinct topic.
     assert_wire(
         &env,
-        &NoteInserted { asset: 2, amount: 2000, owner_tag: t.clone() },
+        &NoteInserted {
+            asset: 2,
+            amount: 2000,
+            owner_tag: t.clone(),
+        },
         symbol_short!("noteins"),
         (2u32, 2000i128, t).into_val(&env),
     );
@@ -83,13 +95,21 @@ fn unshield_and_joined_wire_format() {
 
     assert_wire(
         &env,
-        &Unshielded { asset: 1, amount: 100, nullifier: nf.clone() },
+        &Unshielded {
+            asset: 1,
+            amount: 100,
+            nullifier: nf.clone(),
+        },
         symbol_short!("unshield"),
         (1u32, 100i128, nf).into_val(&env),
     );
     assert_wire(
         &env,
-        &Joined { asset: 1, nf1: nf1.clone(), nf2: nf2.clone() },
+        &Joined {
+            asset: 1,
+            nf1: nf1.clone(),
+            nf2: nf2.clone(),
+        },
         symbol_short!("joined"),
         (1u32, nf1, nf2).into_val(&env),
     );
@@ -133,13 +153,21 @@ fn book_initialization_and_registry_wire_format() {
     let token = Address::generate(&env);
     assert_wire(
         &env,
-        &AssetRegistered { asset_id: 7, token: token.clone(), kind: 1 },
+        &AssetRegistered {
+            asset_id: 7,
+            token: token.clone(),
+            kind: 1,
+        },
         symbol_short!("assetreg"),
         (7u32, token, 1u32).into_val(&env),
     );
     assert_wire(
         &env,
-        &PairRegistered { pair_id: 3, base_asset: 7, quote_asset: 9 },
+        &PairRegistered {
+            pair_id: 3,
+            base_asset: 7,
+            quote_asset: 9,
+        },
         symbol_short!("pairreg"),
         (3u32, 7u32, 9u32).into_val(&env),
     );
@@ -166,12 +194,31 @@ fn book_delta_wire_format() {
             partial_allowed: true,
         },
         symbol_short!("ordupsert"),
-        (11u64, 2u32, 1u32, id.clone(), 100i128, 1500i128, 44i128, output, cancel, leaf, 5000u64, true)
+        (
+            11u64,
+            2u32,
+            1u32,
+            id.clone(),
+            100i128,
+            1500i128,
+            44i128,
+            output,
+            cancel,
+            leaf,
+            5000u64,
+            true,
+        )
             .into_val(&env),
     );
     assert_wire(
         &env,
-        &OrderRemoved { sequence: 12, pair_id: 2, side: 1, order_id: id.clone(), reason: 1 },
+        &OrderRemoved {
+            sequence: 12,
+            pair_id: 2,
+            side: 1,
+            order_id: id.clone(),
+            reason: 1,
+        },
         symbol_short!("ordremove"),
         (12u64, 2u32, 1u32, id, 1u32).into_val(&env),
     );

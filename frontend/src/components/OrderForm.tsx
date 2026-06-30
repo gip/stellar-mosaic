@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import type { Desk, Pair } from '../api'
 import { ordersFor, type BookIndexSnapshot } from '../bookIndexer'
 import type { Note } from '../notes'
@@ -7,6 +8,7 @@ import { maxIn, planAssembly } from '../orderPlan'
 import { nowSeconds } from '../time'
 import { useRecovery } from '../RecoveryContext'
 import { useActivity } from '../ActivityContext'
+import { placeOrderTrustless } from '../trustless'
 
 type Side = 'SELL' | 'BUY'
 
@@ -63,11 +65,17 @@ export default function OrderForm({
   desk,
   notes,
   bookIndex,
+  userPubkey,
+  trustless = false,
+  disabledReason,
   onDone,
 }: {
   desk: Desk
   notes: Note[]
   bookIndex: BookIndexSnapshot
+  userPubkey: string
+  trustless?: boolean
+  disabledReason?: string | null
   onDone: () => void
 }) {
   const [pairId, setPairId] = useState(desk.pairs[0]?.pair_id ?? 0)
@@ -141,6 +149,7 @@ export default function OrderForm({
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    if (disabledReason) return
     if (amountInRaw == null || minOutRaw == null || plan == null) return
     if (plan.kind === 'impossible') {
       setError(plan.reason)
@@ -149,15 +158,28 @@ export default function OrderForm({
     setBusy(true)
     setError(null)
     try {
-      setStatus('Queueing order…')
-      const operation = await activity.enqueue({
-        kind: 'place_order', desk_id: desk.id, pair_id: pairId, side,
-        amount_in: amountInRaw.toString(), min_out: minOutRaw.toString(), partial_allowed: partial,
-      })
-      setStatus(`Queued · ${operation.id.slice(0, 8)}`)
+      if (trustless) {
+        setStatus('Submitting with Freighter…')
+        await placeOrderTrustless(desk, {
+          address: userPubkey,
+          pairId,
+          side: side === 'SELL' ? 1 : 0,
+          amountIn: amountInRaw.toString(),
+          minOut: minOutRaw.toString(),
+          partialAllowed: partial,
+        })
+        setStatus('Order submitted')
+      } else {
+        setStatus('Queueing order…')
+        const operation = await activity.enqueue({
+          kind: 'place_order', desk_id: desk.id, pair_id: pairId, side,
+          amount_in: amountInRaw.toString(), min_out: minOutRaw.toString(), partial_allowed: partial,
+        })
+        setStatus(`Queued · ${operation.id.slice(0, 8)}`)
+      }
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
       setStatus(null)
     } finally {
       setBusy(false)
@@ -218,9 +240,10 @@ export default function OrderForm({
           partial
         </label>
       </div>
-      <button type="submit" disabled={busy || !valid || !recoveryReady}>
+      <button type="submit" disabled={busy || !valid || !recoveryReady || !!disabledReason}>
         {busy ? 'Working…' : recoveryReady ? 'Place order' : 'Enable / repair recovery first'}
       </button>
+      {disabledReason && <span className="muted">{disabledReason}</span>}
       {willCross && valid && !busy && !error && (
         <span className="warn">
           ⚠ Crosses the book — this order will match a resting {side === 'SELL' ? 'bid' : 'ask'} and

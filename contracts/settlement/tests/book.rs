@@ -8,6 +8,7 @@
 
 use settlement::{
     AssetInit, AssetKind, DataKey, Error, OrderEntry, PairDef, Settlement, SettlementClient,
+    STORAGE_TTL_LEDGERS,
 };
 use soroban_sdk::{
     testutils::{storage::Persistent as _, Address as _, Events, Ledger},
@@ -80,7 +81,11 @@ fn fund(env: &Env, asset_id: u32, amount: i128) -> (AssetInit, Address) {
     let holder = Address::generate(env);
     StellarAssetClient::new(env, &sac.address()).mint(&holder, &amount);
     (
-        AssetInit { asset_id, token: Some(sac.address()), kind: AssetKind::Dual },
+        AssetInit {
+            asset_id,
+            token: Some(sac.address()),
+            kind: AssetKind::Dual,
+        },
         holder,
     )
 }
@@ -105,7 +110,17 @@ fn shield_book_notes(env: &Env, id: &Address, h1: &Address, h2: &Address) {
 /// Deploy with the book's two assets + canonical pair (id 0), shield the four notes, return the id.
 fn setup_book(env: &Env) -> Address {
     let (assets, h1, h2) = book_assets(env);
-    let id = deploy(env, assets, vec![env, PairDef { base_asset: A1, quote_asset: A2 }]);
+    let id = deploy(
+        env,
+        assets,
+        vec![
+            env,
+            PairDef {
+                base_asset: A1,
+                quote_asset: A2,
+            },
+        ],
+    );
     shield_book_notes(env, &id, &h1, &h2);
     id
 }
@@ -123,7 +138,11 @@ fn book_lifecycle_rest_partial_fill_cancel_prune() {
     assert_eq!(client.book_sequence(), 3, "one upsert per resting order");
     let sells = client.book(&0, &SIDE_SELL);
     assert_eq!(sells.len(), 3, "three resting sells");
-    assert_eq!(sells.get(0).unwrap().min_out, 1500, "best ask (lowest price) first");
+    assert_eq!(
+        sells.get(0).unwrap().min_out,
+        1500,
+        "best ask (lowest price) first"
+    );
     assert_eq!(sells.get(1).unwrap().min_out, 1600);
     assert_eq!(sells.get(2).unwrap().min_out, 1000); // S3, price 20 (1000/50), last
     assert!(client.book(&0, &SIDE_BUY).is_empty());
@@ -138,13 +157,20 @@ fn book_lifecycle_rest_partial_fill_cancel_prune() {
     let s2 = sells.get(0).unwrap();
     assert_eq!(s2.order_id.to_array(), pi_word_nf(PI_S2));
     assert_eq!(s2.min_out, 1600, "S2 is now best ask");
-    assert_eq!(s2.remaining_in, 44, "S2: 100 - 56 filled = 44 a1 still locked");
+    assert_eq!(
+        s2.remaining_in, 44,
+        "S2: 100 - 56 filled = 44 a1 still locked"
+    );
     let s3 = sells.get(1).unwrap();
     assert_eq!(s3.remaining_in, 50, "S3 untouched");
 
     let buys = client.book(&0, &SIDE_BUY);
     assert_eq!(buys.len(), 1, "taker remainder rests");
-    assert_eq!(buys.get(0).unwrap().remaining_in, 4, "B1: 2400 - 1500 - 896 = 4 a2 left");
+    assert_eq!(
+        buys.get(0).unwrap().remaining_in,
+        4,
+        "B1: 2400 - 1500 - 896 = 4 a2 left"
+    );
 
     // Conservation: nothing created or destroyed.
     //   a1 shielded 250 = minted(100 to taker + 56 to taker) 156 + locked(S2 44 + S3 50) 94 + buy-side a1 0
@@ -154,7 +180,12 @@ fn book_lifecycle_rest_partial_fill_cancel_prune() {
     assert_eq!(2396 + 4, 2400, "a2 conserved");
 
     // Cancel S2: returns its 44 a1 of remaining locked funds and removes the entry.
-    client.cancel_order(&0, &SIDE_SELL, &bytes(&env, CANCEL_PROOF), &bytes(&env, CANCEL_PI));
+    client.cancel_order(
+        &0,
+        &SIDE_SELL,
+        &bytes(&env, CANCEL_PROOF),
+        &bytes(&env, CANCEL_PI),
+    );
     assert_eq!(client.book_sequence(), 7, "cancel emits one removal");
     let sells = client.book(&0, &SIDE_SELL);
     assert_eq!(sells.len(), 1, "S2 cancelled");
@@ -179,7 +210,10 @@ fn book_lifecycle_rest_partial_fill_cancel_prune() {
     let removed = client.prune_expired(&0, &SIDE_SELL, &10);
     assert_eq!(client.book_sequence(), 8, "prune emits one removal");
     assert_eq!(removed, 1, "S3 pruned");
-    assert!(client.book(&0, &SIDE_SELL).is_empty(), "sell book empty after prune");
+    assert!(
+        client.book(&0, &SIDE_SELL).is_empty(),
+        "sell book empty after prune"
+    );
 }
 
 /// Decode the data payload of every `filled` event currently in the env. Returns
@@ -196,9 +230,12 @@ fn filled_events(env: &Env) -> std::vec::Vec<(u32, i128, u32, i128)> {
             match v0.topics.first() {
                 Some(ScVal::Symbol(s)) if s.to_string() == "filled" => match v0.data.clone() {
                     ScVal::Vec(Some(v)) => match (&v[0], &v[1], &v[2], &v[3]) {
-                        (ScVal::U32(ai), ScVal::I128(amt_in), ScVal::U32(ao), ScVal::I128(amt_out)) => {
-                            Some((*ai, i128_of(amt_in), *ao, i128_of(amt_out)))
-                        }
+                        (
+                            ScVal::U32(ai),
+                            ScVal::I128(amt_in),
+                            ScVal::U32(ao),
+                            ScVal::I128(amt_out),
+                        ) => Some((*ai, i128_of(amt_in), *ao, i128_of(amt_out))),
                         _ => None,
                     },
                     _ => None,
@@ -219,14 +256,25 @@ fn crossing_order_emits_filled_event_with_amounts_and_currencies() {
     client.submit_order(&bytes(&env, P_S1), &bytes(&env, PI_S1));
     client.submit_order(&bytes(&env, P_S2), &bytes(&env, PI_S2));
     client.submit_order(&bytes(&env, P_S3), &bytes(&env, PI_S3));
-    assert!(filled_events(&env).is_empty(), "resting orders emit no `filled` event");
+    assert!(
+        filled_events(&env).is_empty(),
+        "resting orders emit no `filled` event"
+    );
 
     // The buy taker crosses S1 (full) + S2 (partial): exactly one taker-perspective summary.
     client.submit_order(&bytes(&env, P_B1), &bytes(&env, PI_B1));
     let filled = filled_events(&env);
-    assert_eq!(filled.len(), 1, "one `filled` event from the crossing taker");
+    assert_eq!(
+        filled.len(),
+        1,
+        "one `filled` event from the crossing taker"
+    );
     // BUY spends quote (a2) to receive base (a1): in 1500+896=2396 a2, out 100+56=156 a1.
-    assert_eq!(filled[0], (A2, 2396, A1, 156), "filled summary: asset_in/amount_in/asset_out/amount_out");
+    assert_eq!(
+        filled[0],
+        (A2, 2396, A1, 156),
+        "filled summary: asset_in/amount_in/asset_out/amount_out"
+    );
 }
 
 #[test]
@@ -243,7 +291,10 @@ fn submit_order_fits_cpu_budget() {
     client.submit_order(&bytes(&env, P_B1), &bytes(&env, PI_B1));
     let cpu = env.cost_estimate().budget().cpu_instruction_cost();
     std::println!("submit_order (verify + 2 fills, 4 inserts) CPU (local host): {cpu}");
-    assert!(cpu < 400_000_000, "submit_order CPU {cpu} exceeds the 400M budget");
+    assert!(
+        cpu < 400_000_000,
+        "submit_order CPU {cpu} exceeds the 400M budget"
+    );
 }
 
 /// 32-byte big-endian field word for a small integer tag (matches how the fixtures encode the
@@ -316,7 +367,9 @@ fn submit_order_cost_vs_book_depth() {
                     partial_allowed: true,
                 });
             }
-            env.storage().persistent().set(&DataKey::Book(0, SIDE_SELL), &v);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Book(0, SIDE_SELL), &v);
         });
     }
 
@@ -344,13 +397,19 @@ fn submit_order_cost_vs_book_depth() {
     std::println!(
         "submit_order: FULL 64 book + MAX_FILLS cap (WORST CASE) CPU (local): {cpu}; sells left {sells_left}"
     );
-    assert_eq!(sells_left, 60, "4 of 64 asks consumed (MAX_FILLS_PER_SUBMIT)");
-    assert!(cpu < 400_000_000, "worst-case submit CPU {cpu} exceeds 400M");
+    assert_eq!(
+        sells_left, 60,
+        "4 of 64 asks consumed (MAX_FILLS_PER_SUBMIT)"
+    );
+    assert!(
+        cpu < 400_000_000,
+        "worst-case submit CPU {cpu} exceeds 400M"
+    );
 }
 
 #[test]
 fn critical_state_ttl_is_extended_and_kept_alive() {
-    // Fund-critical persistent state must be bumped to the network max TTL on write, and the
+    // Fund-critical persistent state must be bumped to the one-week TTL target on write, and the
     // permissionless keep_alive heartbeat must re-extend it after ledgers pass — so nothing archives
     // in practice (and even if it did, persistent entries are restorable, never lost).
     let env = test_env();
@@ -358,7 +417,7 @@ fn critical_state_ttl_is_extended_and_kept_alive() {
     let client = SettlementClient::new(&env, &id);
     client.submit_order(&bytes(&env, P_S1), &bytes(&env, PI_S1)); // writes Book + nullifier
 
-    let max = env.as_contract(&id, || env.storage().max_ttl());
+    let target = env.as_contract(&id, || env.storage().max_ttl().min(STORAGE_TTL_LEDGERS));
     let crit = [
         DataKey::TreeRoot,
         DataKey::TreeNext,
@@ -368,34 +427,42 @@ fn critical_state_ttl_is_extended_and_kept_alive() {
         DataKey::Book(0, SIDE_SELL),
     ];
 
-    // (1) On write, every critical entry is at (essentially) max TTL.
+    // (1) On write, every critical entry is at (essentially) the storage TTL target.
     env.as_contract(&id, || {
         for k in crit.iter() {
             let ttl = env.storage().persistent().get_ttl(k);
-            assert!(ttl >= max - 16, "fresh TTL {ttl} not ~max {max}");
+            assert!(ttl >= target - 16, "fresh TTL {ttl} not ~target {target}");
         }
     });
 
     // (2) Let many ledgers pass: TTL decays but the entry is still live.
     let elapsed = 100_000u32;
-    env.ledger().set_sequence_number(env.ledger().sequence() + elapsed);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + elapsed);
     env.as_contract(&id, || {
         let ttl = env.storage().persistent().get_ttl(&DataKey::TreeRoot);
-        assert!(ttl < max && ttl > 0, "TTL {ttl} should have decayed but stayed live");
+        assert!(
+            ttl < target && ttl > 0,
+            "TTL {ttl} should have decayed but stayed live"
+        );
     });
 
-    // (3) keep_alive re-extends everything structural back to max.
+    // (3) keep_alive re-extends everything structural back to the storage TTL target.
     client.keep_alive();
     env.as_contract(&id, || {
         for k in crit.iter() {
             let ttl = env.storage().persistent().get_ttl(k);
-            assert!(ttl >= max - 16, "after keep_alive TTL {ttl} not back to ~max {max}");
+            assert!(
+                ttl >= target - 16,
+                "after keep_alive TTL {ttl} not back to ~target {target}"
+            );
         }
     });
 
     // (4) keep_alive_keys re-extends a specific nullifier + root (the unbounded sets).
     let onchain_root = client.root();
-    env.ledger().set_sequence_number(env.ledger().sequence() + elapsed);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + elapsed);
     let nf = BytesN::from_array(&env, &pi_word_nf(PI_S1));
     let mut nfs = soroban_sdk::Vec::new(&env);
     nfs.push_back(nf.clone());
@@ -403,8 +470,13 @@ fn critical_state_ttl_is_extended_and_kept_alive() {
     roots.push_back(onchain_root.clone());
     client.keep_alive_keys(&nfs, &roots);
     env.as_contract(&id, || {
-        assert!(env.storage().persistent().get_ttl(&DataKey::Nullifier(nf)) >= max - 16);
-        assert!(env.storage().persistent().get_ttl(&DataKey::Root(onchain_root)) >= max - 16);
+        assert!(env.storage().persistent().get_ttl(&DataKey::Nullifier(nf)) >= target - 16);
+        assert!(
+            env.storage()
+                .persistent()
+                .get_ttl(&DataKey::Root(onchain_root))
+                >= target - 16
+        );
     });
 }
 

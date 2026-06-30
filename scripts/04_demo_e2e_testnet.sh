@@ -78,7 +78,7 @@ note "native XLM SAC" "$XLM_SAC"
 endstage
 
 echo ">>> [build] settlement contract -> wasm"
-( cd "$CONTRACT" && stellar contract build >/dev/null 2>&1 )
+( cd "$CONTRACT" && stellar contract build --optimize >/dev/null 2>&1 )
 WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
 
 echo ">>> [deploy] with the order/lift VK + admin + assets 1,2 -> XLM SAC (Dual, constructor-only)"

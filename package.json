@@ -1,0 +1,16 @@
+{
+  "name": "stellar-mosaic-x",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Stellar Mosaic — privacy-preserving DEX on Stellar/Soroban. Monorepo root for the TypeScript SDK, CLI, and MCP server.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "build:sdk": "pnpm --filter @mosaic/sdk run build",
+    "clean": "tsc -b --clean",
+    "typecheck": "tsc -b"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2"
+  }
+}

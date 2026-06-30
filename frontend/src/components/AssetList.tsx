@@ -1,6 +1,8 @@
 import { useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { api, type CatalogAsset } from '../api'
 import { useWallet } from '../WalletContext'
+import type { StorageMode } from '../StorageModeContext'
 
 function short(addr: string): string {
   return addr.length > 12 ? `${addr.slice(0, 5)}…${addr.slice(-4)}` : addr
@@ -14,9 +16,11 @@ function chainName(id: number | null): string {
 /** Renders the asset catalog as cards, each with its cross-chain sides, proposer, trust count, and
  * a trust/untrust toggle. Defaults are always trusted and cannot be toggled. */
 export default function AssetList({
+  mode,
   assets,
   onChange,
 }: {
+  mode: StorageMode
   assets: CatalogAsset[]
   onChange: () => void
 }) {
@@ -28,11 +32,11 @@ export default function AssetList({
     setBusy(a.id)
     setError(null)
     try {
-      if (a.trusted_by_me) await api.untrustAsset(a.id)
-      else await api.trustAsset(a.id)
+      if (a.trusted_by_me) await api.untrustAsset(mode, a.id)
+      else await api.trustAsset(mode, a.id)
       onChange()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setBusy(null)
     }

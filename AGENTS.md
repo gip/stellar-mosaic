@@ -80,13 +80,13 @@ cargo run   # listens on 127.0.0.1:8787
 Config via env: `MOSAIC_BIND`, `MOSAIC_NETWORK` (default `testnet`), `MOSAIC_DATABASE_URL`
 (`postgres://...` or `sqlite://...`), `MOSAIC_ARTIFACTS`, `MOSAIC_READ_IDENTITY` (default `m0`).
 
-**Frontend:**
+**Frontend:** (the repo is a **pnpm workspace** — `pnpm install` once at the root; never `npm install`)
 ```bash
-cd frontend
-npm run dev       # vite dev server
-npm run build     # tsc -b && vite build
-npm run lint      # eslint
+pnpm --filter frontend dev     # vite dev server
+pnpm --filter frontend build   # tsc -b && vite build
+pnpm --filter frontend lint    # eslint
 ```
+The TypeScript packages (`@mosaic/sdk`, `@mosaic/cli`, `@mosaic/mcp`) build with `pnpm -r build`.
 
 **EVM (Foundry):** `cd evm && forge build && forge test`. Needs `BASE_SEPOLIA_RPC_URL` /
 `BASESCAN_API_KEY` env for `base_sepolia` RPC/etherscan.
@@ -117,8 +117,9 @@ deployed contracts/addresses to `.e2e/state.env`. See `docs/e2e-testing.md`.
   `poseidon2_permutation` with `soroban-poseidon` BN254 t=4 constants, unit-tested against Noir. The
   indexer reuses the exact same hash; the cross-check test asserts indexer root == on-chain root ==
   the root the committed proofs were generated against. Don't touch one side of this without the others.
-- **Fund-critical state is persistent/instance storage only** (never temporary), TTL bumped to max
-  on write, with permissionless `keep_alive` heartbeats. See `docs/implementation.md`.
+- **Fund-critical state is persistent/instance storage only** (never temporary), TTL bumped to a
+  one-week target on write, with permissionless `keep_alive` heartbeats. See
+  `docs/implementation.md`.
 
 ## Toolchain / version pinning
 

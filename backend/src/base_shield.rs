@@ -33,6 +33,57 @@ pub async fn run(state: Arc<AppState>) {
     }
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct BaseDepositProof {
+    pub seal_hex: String,
+    pub journal_hex: String,
+    pub block_number: i64,
+    pub block_hash: String,
+}
+
+/// Prove a Base deposit and return only the artifacts. The caller owns finality waiting and Stellar
+/// submission. This is the MCP-facing boundary for the shrunk backend.
+pub async fn prove_base_deposit(
+    config: &crate::config::Config,
+    bridge: String,
+    deposit_id: i64,
+) -> AppResult<BaseDepositProof> {
+    let rpc = config
+        .base_rpc
+        .clone()
+        .ok_or_else(|| AppError::BadRequest("base_rpc not configured".into()))?;
+    let cast = config.cast_bin.clone();
+    let prover_dir = config.prover_dir.clone();
+    let out_dir = prover_dir
+        .join("out")
+        .join(format!("prove-only-{deposit_id}-{}", uuid::Uuid::new_v4()));
+    tokio::task::spawn_blocking(move || -> AppResult<BaseDepositProof> {
+        let head = cast_number(&cast, &rpc, &["block-number"]).map_err(AppError::Other)?;
+        let out = out_dir.to_string_lossy().to_string();
+        let status = prover_command(&prover_dir, &rpc, &bridge, deposit_id, head, &out)
+            .status()
+            .map_err(|e| AppError::Other(e.into()))?;
+        if !status.success() {
+            return Err(AppError::Other(anyhow::anyhow!(
+                "prover exited with {status}"
+            )));
+        }
+        let seal = std::fs::read(out_dir.join("seal.bin")).map_err(|e| AppError::Other(e.into()))?;
+        let journal =
+            std::fs::read(out_dir.join("journal.bin")).map_err(|e| AppError::Other(e.into()))?;
+        let (block_number, block_hash) = parse_journal_block(&journal)
+            .ok_or_else(|| AppError::Other(anyhow::anyhow!("journal not 256 bytes")))?;
+        Ok(BaseDepositProof {
+            seal_hex: hex::encode(seal),
+            journal_hex: hex::encode(journal),
+            block_number: block_number as i64,
+            block_hash,
+        })
+    })
+    .await
+    .map_err(|e| AppError::Other(e.into()))?
+}
+
 async fn tick(state: &Arc<AppState>) -> AppResult<()> {
     let Some(job) = state.db.next_base_shield().await? else {
         return Ok(());

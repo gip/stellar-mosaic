@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { api } from '../api'
+import type { StorageMode } from '../StorageModeContext'
 
 const BASE_SEPOLIA_USDC = '0x036CbD53842c5426634e7929541eC2318f3dCF7e'
 
@@ -13,7 +15,7 @@ type BaseType = 'native' | 'erc20'
  * This is metadata only — it records the cross-chain definition so a desk deployment can register
  * matching asset ids on both chains. It does not touch any chain.
  */
-export default function AddAssetForm({ onDone }: { onDone: () => void }) {
+export default function AddAssetForm({ mode, onDone }: { mode: StorageMode; onDone: () => void }) {
   const [onStellar, setOnStellar] = useState(true)
   const [onBase, setOnBase] = useState(false)
   const [symbol, setSymbol] = useState('')
@@ -48,7 +50,7 @@ export default function AddAssetForm({ onDone }: { onDone: () => void }) {
       if (onStellar && stellarType === 'represented' && !onBase) {
         throw new Error('A represented Stellar asset must also be on Base (it is Base-backed).')
       }
-      const body: Parameters<typeof api.proposeAsset>[0] = { symbol: effectiveSymbol }
+      const body: Parameters<typeof api.proposeAsset>[1] = { symbol: effectiveSymbol }
       if (onStellar) {
         body.stellar_token =
           stellarType === 'native'
@@ -64,13 +66,13 @@ export default function AddAssetForm({ onDone }: { onDone: () => void }) {
         body.base_token = baseType === 'native' ? 'native' : baseToken
         body.base_decimals = baseType === 'native' ? 18 : Number(baseDecimals)
       }
-      await api.proposeAsset(body)
+      await api.proposeAsset(mode, body)
       setSymbol('')
       setStellarToken('')
       setBaseToken('')
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setBusy(false)
     }

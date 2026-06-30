@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { bytesToHex } from 'viem'
 import { api, type BaseShieldConfig, type BaseShieldJob, type Desk } from '../api'
 import { toRaw } from '../amount'
@@ -75,7 +76,7 @@ export default function ShieldFromBaseForm({
   useEffect(() => {
     let active = true
     api
-      .listCatalogAssets()
+      .listCatalogAssets('trusted')
       .then((all) => {
         if (active)
           setBaseSymbols(
@@ -161,7 +162,7 @@ export default function ShieldFromBaseForm({
 
       // Persist the private note locally; it becomes spendable once the worker mints it and the
       // indexer reconciles it by owner_tag (stamping its leaf_index).
-      await addNote({
+      await addNote('trusted', {
         id: crypto.randomUUID(),
         deskId: desk.id,
         role: 'asset',
@@ -186,7 +187,7 @@ export default function ShieldFromBaseForm({
       setJob(created)
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setBusy(false)
       setStatus(null)

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'react-router-dom'
+import { errorMessage } from '@mosaic/sdk'
 import { api, type Asset, type Desk } from '../api'
 import { NATIVE_EVM_SENTINEL } from '../baseDeployment'
 import { useWallet } from '../WalletContext'
@@ -14,6 +15,7 @@ import { isRecoveryUnlocked, syncRecoveryNow } from '../recovery'
 import { ordersFor, type BookIndexSnapshot } from '../bookIndexer'
 import { useBookIndex } from '../useBookIndex'
 import { setSubmissionMode, submissionMode } from '../directTransaction'
+import { useStorageMode } from '../StorageModeContext'
 
 /** Canonical 32-byte hex tag for comparison: drop any `0x`, lowercase, left-pad to 64. */
 function normTag(h: string): string {
@@ -35,30 +37,105 @@ function assetTokenCell(a: Asset, desk: Desk) {
   return <span className="muted">Represented — no Stellar token</span>
 }
 
+function sameDeskProjection(a: Desk | null, b: Desk): boolean {
+  if (!a || a.id !== b.id || a.assets.length !== b.assets.length || a.pairs.length !== b.pairs.length) {
+    return false
+  }
+  return (
+    a.assets.every((asset, i) => {
+      const other = b.assets[i]
+      return (
+        asset.asset_id === other.asset_id &&
+        asset.token === other.token &&
+        asset.symbol === other.symbol &&
+        asset.decimals === other.decimals &&
+        asset.kind === other.kind
+      )
+    }) &&
+    a.pairs.every((pair, i) => {
+      const other = b.pairs[i]
+      return (
+        pair.pair_id === other.pair_id &&
+        pair.base_asset === other.base_asset &&
+        pair.quote_asset === other.quote_asset
+      )
+    })
+  )
+}
+
 export default function DeskPage() {
   const { deskId } = useParams()
   const { address, networkPassphrase } = useWallet()
+  const storageMode = useStorageMode()
   const [desk, setDesk] = useState<Desk | null>(null)
   const [root, setRoot] = useState<string | null>(null)
   const [notes, setNotes] = useState<Note[]>([])
+  const trustlessDesk = storageMode.mode === 'trustless'
   const [error, setError] = useState<string | null>(null)
+  const [noteIndexError, setNoteIndexError] = useState<string | null>(null)
   const [submitMode, setSubmitMode] = useState<'direct' | 'sponsored'>(submissionMode())
-  const bookIndex = useBookIndex(desk, networkPassphrase)
+  const [lastVerifiedDesk, setLastVerifiedDesk] = useState<Desk | null>(null)
+  const bookIndex = useBookIndex(storageMode.mode, desk, networkPassphrase)
+
+  const currentVerifiedDesk = useMemo<Desk | null>(() => {
+    if (!desk || bookIndex.status !== 'synced') return null
+    const authoritativeAssets = bookIndex.assets.map((chain) => {
+      const display = desk.assets.find((asset) => asset.asset_id === chain.asset_id)
+      return {
+        asset_id: chain.asset_id,
+        token: chain.token,
+        symbol: display?.symbol ?? `#${chain.asset_id}`,
+        decimals: display?.decimals ?? 7,
+        kind: chain.kind, // authoritative: the on-chain AssetKind from the assetreg event
+      }
+    })
+    const authoritativePairs = bookIndex.pairs
+      .map(({ pair_id, base_asset, quote_asset }) => ({ pair_id, base_asset, quote_asset }))
+      .sort((a, b) => a.pair_id - b.pair_id)
+    return { ...desk, assets: authoritativeAssets, pairs: authoritativePairs }
+  }, [desk, bookIndex.status, bookIndex.assets, bookIndex.pairs])
+
+  useEffect(() => {
+    if (!currentVerifiedDesk) return
+    queueMicrotask(() => {
+      setLastVerifiedDesk((prev) => (sameDeskProjection(prev, currentVerifiedDesk) ? prev : currentVerifiedDesk))
+    })
+  }, [currentVerifiedDesk])
 
   const reloadNotes = useCallback(() => {
-    if (deskId) notesForDesk(deskId, address).then(setNotes)
-  }, [deskId, address])
+    if (deskId) notesForDesk(storageMode.mode, deskId, address).then(setNotes)
+  }, [storageMode.mode, deskId, address])
 
   useEffect(() => {
     if (!deskId) return
-    api.getDesk(deskId).then(setDesk).catch((e) => setError(String(e)))
+    let active = true
+    queueMicrotask(() => {
+      if (!active) return
+      setDesk(null)
+      setRoot(null)
+      setNotes([])
+      setError(null)
+      setNoteIndexError(null)
+      setLastVerifiedDesk(null)
+    })
+    Promise.all([api.getDesk(storageMode.mode, deskId)])
+      .then(([nextDesk]) => {
+        if (!active) return
+        setDesk(nextDesk)
+      })
+      .catch((e) => active && setError(errorMessage(e)))
     reloadNotes()
-  }, [deskId, reloadNotes])
+    return () => { active = false }
+  }, [storageMode.mode, deskId, reloadNotes])
 
   useEffect(() => {
-    window.addEventListener('mosaic-notes-changed', reloadNotes)
-    return () => window.removeEventListener('mosaic-notes-changed', reloadNotes)
-  }, [reloadNotes])
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ mode?: string }>).detail
+      if (!detail?.mode || detail.mode === storageMode.mode) reloadNotes()
+    }
+    window.addEventListener('mosaic-notes-changed', handler)
+    return () => window.removeEventListener('mosaic-notes-changed', handler)
+  }, [storageMode.mode, reloadNotes])
 
   // Auto-refresh the on-chain root every 5s as a liveness signal.
   useEffect(() => {
@@ -66,7 +143,7 @@ export default function DeskPage() {
     let alive = true
     const tick = () =>
       api
-        .getRoot(deskId)
+        .getRoot(storageMode.mode, deskId)
         .then((r) => alive && setRoot(r.root))
         .catch(() => {})
     tick()
@@ -75,7 +152,7 @@ export default function DeskPage() {
       alive = false
       clearInterval(h)
     }
-  }, [deskId])
+  }, [storageMode.mode, deskId])
 
   // Reconcile local notes against on-chain state every 7s so filled proceeds appear.
   useEffect(() => {
@@ -83,22 +160,25 @@ export default function DeskPage() {
     let alive = true
     const tick = () =>
       api
-        .getNotes(deskId)
+        .getNotes(storageMode.mode, deskId)
         .then(async (r) => {
           if (!alive) return
-          if (await reconcile(deskId, r.notes)) {
+          setNoteIndexError(null)
+          if (await reconcile(storageMode.mode, deskId, r.notes)) {
             if (isRecoveryUnlocked(address ?? undefined)) syncRecoveryNow().catch(() => {})
             reloadNotes()
           }
         })
-        .catch(() => {})
+        .catch((e) => {
+          if (alive) setNoteIndexError(errorMessage(e))
+        })
     tick()
     const h = setInterval(tick, 7000)
     return () => {
       alive = false
       clearInterval(h)
     }
-  }, [deskId, address, reloadNotes])
+  }, [storageMode.mode, deskId, address, reloadNotes])
 
   // Live confirmation toasts (e.g. "your order filled").
   const [toasts, setToasts] = useState<ToastItem[]>([])
@@ -119,12 +199,14 @@ export default function DeskPage() {
   const fillsSeeded = useRef(false)
   useEffect(() => {
     if (!deskId || !desk) return
+    seenFills.current = new Set()
+    fillsSeeded.current = false
     const symOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
     const decOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
     let alive = true
     const tick = () =>
       api
-        .getFills(deskId)
+        .getFills(storageMode.mode, deskId)
         .then((r) => {
           if (!alive) return
           const fills = r.fills ?? []
@@ -151,25 +233,12 @@ export default function DeskPage() {
       alive = false
       clearInterval(h)
     }
-  }, [deskId, desk])
+  }, [storageMode.mode, deskId, desk])
 
   if (error) return <p className="err">{error}</p>
   if (!desk) return <p className="muted">Loading…</p>
 
-  const authoritativeAssets = bookIndex.assets.map((chain) => {
-    const display = desk.assets.find((asset) => asset.asset_id === chain.asset_id)
-    return {
-      asset_id: chain.asset_id,
-      token: chain.token,
-      symbol: display?.symbol ?? `#${chain.asset_id}`,
-      decimals: display?.decimals ?? 7,
-      kind: chain.kind, // authoritative: the on-chain AssetKind from the assetreg event
-    }
-  })
-  const authoritativePairs = bookIndex.pairs
-    .map(({ pair_id, base_asset, quote_asset }) => ({ pair_id, base_asset, quote_asset }))
-    .sort((a, b) => a.pair_id - b.pair_id)
-  const verifiedDesk: Desk = { ...desk, assets: authoritativeAssets, pairs: authoritativePairs }
+  const verifiedDesk = currentVerifiedDesk ?? lastVerifiedDesk ?? desk
   const fundActionsDisabled =
     bookIndex.status === 'synced'
       ? null
@@ -178,7 +247,12 @@ export default function DeskPage() {
         : bookIndex.error
           ? `Contract verification is retrying: ${bookIndex.error}`
           : 'Contract verification and event replay are still in progress.'
-  const displayDesk = bookIndex.status === 'synced' ? verifiedDesk : desk
+  const displayDesk = currentVerifiedDesk ?? desk
+  const orderDesk = currentVerifiedDesk ?? lastVerifiedDesk ?? desk
+  const orderDisabledReason =
+    address && orderDesk && bookIndex.status !== 'synced'
+      ? (fundActionsDisabled ?? 'Waiting for verified book synchronization.')
+      : null
   const sym = (id: number) => verifiedDesk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
   const dec = (id: number) => verifiedDesk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
 
@@ -223,17 +297,21 @@ export default function DeskPage() {
           <tr>
             <th>Submission</th>
             <td>
-              <select
-                value={submitMode}
-                onChange={(event) => {
-                  const mode = event.target.value as 'direct' | 'sponsored'
-                  setSubmissionMode(mode)
-                  setSubmitMode(mode)
-                }}
-              >
-                <option value="direct">Self-submit (you pay network fees)</option>
-                <option value="sponsored">Desk sponsor</option>
-              </select>
+              {trustlessDesk ? (
+                <span>Self-submit (you pay network fees)</span>
+              ) : (
+                <select
+                  value={submitMode}
+                  onChange={(event) => {
+                    const mode = event.target.value as 'direct' | 'sponsored'
+                    setSubmissionMode(mode)
+                    setSubmitMode(mode)
+                  }}
+                >
+                  <option value="direct">Self-submit (you pay network fees)</option>
+                  <option value="sponsored">Desk sponsor</option>
+                </select>
+              )}
             </td>
           </tr>
           <tr>
@@ -260,16 +338,29 @@ export default function DeskPage() {
         notes={notes}
         userPubkey={address}
         disabledReason={fundActionsDisabled}
+        trustless={trustlessDesk}
         onRecheck={bookIndex.status === 'error' ? bookIndex.recheck : undefined}
         onDone={reloadNotes}
       />
 
       <h2>Place limit order</h2>
-      {address && bookIndex.status === 'synced' ? (
-        <OrderForm desk={verifiedDesk} notes={notes} bookIndex={bookIndex} onDone={reloadNotes} />
+      {address && orderDesk && orderDesk.pairs.length > 0 ? (
+        <OrderForm
+          desk={orderDesk}
+          notes={notes}
+          bookIndex={bookIndex}
+          userPubkey={address}
+          trustless={trustlessDesk}
+          disabledReason={orderDisabledReason}
+          onDone={reloadNotes}
+        />
       ) : (
         <p className="muted">
-          {address ? 'Waiting for verified book synchronization.' : 'Connect your wallet to place orders.'}
+          {address
+            ? bookIndex.status === 'synced'
+              ? 'No pairs registered.'
+              : 'Waiting for verified book synchronization.'
+            : 'Connect your wallet to place orders.'}
         </p>
       )}
 
@@ -295,6 +386,9 @@ export default function DeskPage() {
                 dec={dec}
                 desk={verifiedDesk}
                 bookIndex={bookIndex}
+                noteIndexError={noteIndexError}
+                userPubkey={address ?? ''}
+                trustless={trustlessDesk}
                 onDone={reloadNotes}
               />
             </details>
@@ -307,6 +401,9 @@ export default function DeskPage() {
                 dec={dec}
                 desk={verifiedDesk}
                 bookIndex={bookIndex}
+                noteIndexError={noteIndexError}
+                userPubkey={address ?? ''}
+                trustless={trustlessDesk}
                 onDone={reloadNotes}
               />
             </details>
@@ -335,6 +432,8 @@ export default function DeskPage() {
               notes={notes}
               orders={ordersFor(bookIndex, p.pair_id, 1)}
               bookIndex={bookIndex}
+              userPubkey={address ?? ''}
+              trustless={trustlessDesk}
               onCancel={reloadNotes}
             />
             <BookView
@@ -350,6 +449,8 @@ export default function DeskPage() {
               notes={notes}
               orders={ordersFor(bookIndex, p.pair_id, 0)}
               bookIndex={bookIndex}
+              userPubkey={address ?? ''}
+              trustless={trustlessDesk}
               onCancel={reloadNotes}
             />
           </div>
@@ -370,12 +471,18 @@ function NotesTable({
   dec,
   desk,
   bookIndex,
+  noteIndexError,
+  userPubkey,
+  trustless,
   onDone,
 }: {
   notes: Note[]
   dec: (id: number) => number
   desk: Desk
   bookIndex: BookIndexSnapshot
+  noteIndexError: string | null
+  userPubkey: string
+  trustless: boolean
   onDone: () => void
 }) {
   return (
@@ -400,11 +507,17 @@ function NotesTable({
             <td>{formatAmount(n.amount, dec(n.asset_id))}</td>
             <td className="mono">{n.owner_tag.slice(0, 14)}…</td>
             <td className={n.status === 'active' ? 'ok' : 'muted'}>
-              {noteDisplayStatus(n, bookIndex)}
+              {noteDisplayStatus(n, bookIndex, noteIndexError)}
             </td>
             <td>
-              {n.status === 'active' && n.cancel && (
-                <CancelOrderButton desk={desk} note={n} onDone={onDone} />
+              {n.status === 'active' && n.cancel && userPubkey && (
+                <CancelOrderButton
+                  desk={desk}
+                  note={n}
+                  userPubkey={userPubkey}
+                  trustless={trustless}
+                  onDone={onDone}
+                />
               )}
             </td>
           </tr>
@@ -414,8 +527,12 @@ function NotesTable({
   )
 }
 
-function noteDisplayStatus(n: Note, bookIndex: BookIndexSnapshot): string {
+function noteDisplayStatus(n: Note, bookIndex: BookIndexSnapshot, noteIndexError: string | null): string {
   if (n.status !== 'active' || n.indexed) return n.status
+  if (noteIndexError?.includes('trustless note history unavailable')) return 'active · index history unavailable'
+  // Any other reconcile failure is a real error, not normal indexing latency — surface it distinctly
+  // rather than reusing "pending index", so a wedged event reader doesn't look like healthy waiting.
+  if (noteIndexError) return 'active · index error'
   if (!n.cancel) return 'active · pending index'
   if (bookIndex.status !== 'synced') return 'order submitted · syncing book'
   const resting = bookIndex.orders.some(

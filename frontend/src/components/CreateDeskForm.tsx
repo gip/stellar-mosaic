@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { Link } from 'react-router-dom'
 import { api, type BaseDeploymentConfig, type CatalogAsset, type Desk } from '../api'
 import { useEthereumWallet } from '../EthereumWalletContext'
@@ -6,6 +7,7 @@ import { displayEth, estimateBridgeDeployment } from '../base'
 import type { Address } from 'viem'
 import BaseDeploymentPanel from './BaseDeploymentPanel'
 import { assetKindOf, baseTokenAddress, eligibleBaseAssets, hasEnoughEth } from '../baseDeployment'
+import type { StorageMode } from '../StorageModeContext'
 
 interface PairRow {
   base: string
@@ -19,7 +21,15 @@ interface PairRow {
  * Assets are chosen from the catalog, restricted to ones the current user trusts (the built-in
  * defaults are always trusted). New assets are proposed and trusted on the Assets page.
  */
-export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
+export default function CreateDeskForm({
+  mode,
+  onDone,
+  allowSponsored = true,
+}: {
+  mode: StorageMode
+  onDone: () => void
+  allowSponsored?: boolean
+}) {
   const [name, setName] = useState('')
   const [catalog, setCatalog] = useState<CatalogAsset[] | null>(null)
   const [selected, setSelected] = useState<string[]>([])
@@ -30,23 +40,26 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
   const [deploymentConfig, setDeploymentConfig] = useState<BaseDeploymentConfig | null>(null)
   const [estimatedFee, setEstimatedFee] = useState<bigint | null>(null)
   const [createdDesk, setCreatedDesk] = useState<Desk | null>(null)
+  const [stellarDeployment, setStellarDeployment] = useState<'sponsored' | 'self-funded'>('self-funded')
   const ethereum = useEthereumWallet()
+  const effectiveStellarDeployment = allowSponsored ? stellarDeployment : 'self-funded'
 
   useEffect(() => {
     let active = true
     api
       // Desks are Stellar settlement contracts, so only assets with a Stellar side are selectable.
-      .listCatalogAssets()
+      .listCatalogAssets(mode)
       .then((all) => active && setCatalog(all.filter((a) => a.trusted_by_me && a.stellar_token)))
-      .catch((e) => active && setError(e instanceof Error ? e.message : String(e)))
+      .catch((e) => active && setError(errorMessage(e)))
     return () => {
       active = false
     }
-  }, [])
+  }, [mode])
 
   useEffect(() => {
+    if (!allowSponsored) return
     api.getBaseDeploymentConfig().then(setDeploymentConfig).catch(() => setDeploymentConfig(null))
-  }, [])
+  }, [allowSponsored])
 
   // Selected catalog entries become desk assets, with asset_id assigned by selection order (1-based).
   const chosen = useMemo(() => selected
@@ -54,18 +67,19 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
     .filter((a): a is CatalogAsset => !!a), [selected, catalog])
   const assetIdOf = useCallback((catalogId: string) => selected.indexOf(catalogId) + 1, [selected])
   const baseAssets = useMemo(() => eligibleBaseAssets(chosen), [chosen])
+  const effectiveDeploymentConfig = allowSponsored ? deploymentConfig : null
 
   useEffect(() => {
-    if (!deployBase || !ethereum.address || !ethereum.connectedToBase || !deploymentConfig?.available || !deploymentConfig.abi || !deploymentConfig.bytecode || baseAssets.length === 0) {
+    if (!deployBase || !ethereum.address || !ethereum.connectedToBase || !effectiveDeploymentConfig?.available || !effectiveDeploymentConfig.abi || !effectiveDeploymentConfig.bytecode || baseAssets.length === 0) {
       return
     }
     estimateBridgeDeployment({
-      artifact: { abi: deploymentConfig.abi, bytecode: deploymentConfig.bytecode },
+      artifact: { abi: effectiveDeploymentConfig.abi, bytecode: effectiveDeploymentConfig.bytecode },
       account: ethereum.address,
       assetIds: baseAssets.map((asset) => assetIdOf(asset.id)),
       tokens: baseAssets.map((asset) => baseTokenAddress(asset) as Address),
     }).then((value) => setEstimatedFee(value.maxFee)).catch(() => setEstimatedFee(null))
-  }, [deployBase, ethereum.address, ethereum.connectedToBase, deploymentConfig, baseAssets, assetIdOf])
+  }, [deployBase, ethereum.address, ethereum.connectedToBase, effectiveDeploymentConfig, baseAssets, assetIdOf])
 
   function toggleAsset(id: string) {
     const removing = selected.includes(id)
@@ -108,21 +122,27 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
       if (deployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
         throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
       }
-      const desk = await api.createDesk({
+      if (effectiveStellarDeployment === 'self-funded' && deployBase) {
+        throw new Error('Base deployment setup currently requires the Mosaic Server sponsored deployment path.')
+      }
+      const deskBody = {
         name,
         assets,
         pairs: deskPairs,
         ...(deployBase && ethereum.address
           ? { base_deployment: { deployer_address: ethereum.address } }
           : {}),
-      })
+      }
+      const desk = effectiveStellarDeployment === 'self-funded'
+        ? await api.createDeskSelfFunded({ name, assets, pairs: deskPairs })
+        : await api.createDesk(deskBody)
       setCreatedDesk(desk)
       setName('')
       setSelected([])
       setPairs([])
       onDone()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setBusy(false)
     }
@@ -241,13 +261,33 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
         </>
       )}
 
+      <label>Stellar deployment</label>
+      <div className="segmented" style={{ marginBottom: 12 }}>
+        <button
+          type="button"
+          aria-pressed={effectiveStellarDeployment === 'sponsored'}
+          disabled={!allowSponsored}
+          title={allowSponsored ? undefined : 'Trust Mosaic Server in the header to enable sponsorship'}
+          onClick={() => setStellarDeployment('sponsored')}
+        >
+          Mosaic Server sponsored
+        </button>
+        <button
+          type="button"
+          aria-pressed={effectiveStellarDeployment === 'self-funded'}
+          onClick={() => setStellarDeployment('self-funded')}
+        >
+          Trustless browser deploy
+        </button>
+      </div>
+
       {ethereum.address && (
         <div className="base-deployment">
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
               type="checkbox"
               checked={deployBase}
-              disabled={!ethereum.connectedToBase || !deploymentConfig?.available || baseAssets.length === 0}
+              disabled={!ethereum.connectedToBase || !effectiveDeploymentConfig?.available || baseAssets.length === 0}
               onChange={(event) => setDeployBase(event.target.checked)}
             />
             Deploy a MosaicBridge contract on Base Sepolia
@@ -255,7 +295,7 @@ export default function CreateDeskForm({ onDone }: { onDone: () => void }) {
           <p className="warn">
             Optional and unchecked by default. Your MetaMask account pays Base Sepolia ETH for deployment gas.
           </p>
-          {!deploymentConfig?.available && <p className="muted">{deploymentConfig?.reason ?? 'Base deployment configuration is unavailable.'}</p>}
+          {!effectiveDeploymentConfig?.available && <p className="muted">{effectiveDeploymentConfig?.reason ?? 'Base deployment configuration is unavailable.'}</p>}
           {baseAssets.length === 0 && <p className="muted">Select an asset with a Base Sepolia ERC-20 mapping to enable deployment.</p>}
           {baseAssets.length > 0 && <p className="muted">Will register: {baseAssets.map((asset) => `${asset.symbol} (#${assetIdOf(asset.id)})`).join(', ')}</p>}
           {deployBase && ethereum.balance !== null && <div>Base balance: {displayEth(ethereum.balance)} ETH</div>}

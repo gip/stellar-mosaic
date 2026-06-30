@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// A trading desk = one deployed `settlement` contract + its sponsor ("main") account + the
 /// assets and pairs registered on it.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Desk {
     pub id: String,
     pub name: String,
@@ -103,7 +103,7 @@ fn default_decimals() -> u32 {
 /// An entry in the app-wide asset catalog: a cross-chain asset definition linking a Stellar side
 /// (always present) to an optional Base side. This is off-chain metadata; actual on-chain support
 /// is still configured at contract deployment on both chains.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CatalogAsset {
     pub id: String,
     pub symbol: String,

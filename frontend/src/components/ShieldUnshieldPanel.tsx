@@ -12,6 +12,7 @@ export default function ShieldUnshieldPanel({
   notes,
   userPubkey,
   disabledReason,
+  trustless = false,
   onRecheck,
   onDone,
 }: {
@@ -19,10 +20,12 @@ export default function ShieldUnshieldPanel({
   notes: Note[]
   userPubkey: string | null
   disabledReason: string | null
+  trustless?: boolean
   onRecheck?: () => Promise<void>
   onDone: () => void
 }) {
   const [mode, setMode] = useState<TransferMode>('shield')
+  const activeMode = trustless && mode === 'base' ? 'shield' : mode
 
   return (
     <>
@@ -44,32 +47,34 @@ export default function ShieldUnshieldPanel({
       <div className="tabs" role="tablist" aria-label="Shield or unshield assets">
         <button
           type="button"
-          className={`tab${mode === 'shield' ? ' active' : ''}`}
+          className={`tab${activeMode === 'shield' ? ' active' : ''}`}
           role="tab"
           id="shield-tab"
-          aria-selected={mode === 'shield'}
+          aria-selected={activeMode === 'shield'}
           aria-controls="asset-transfer-panel"
           onClick={() => setMode('shield')}
         >
           From Stellar
         </button>
+        {!trustless && (
+          <button
+            type="button"
+            className={`tab${activeMode === 'base' ? ' active' : ''}`}
+            role="tab"
+            id="base-tab"
+            aria-selected={activeMode === 'base'}
+            aria-controls="asset-transfer-panel"
+            onClick={() => setMode('base')}
+          >
+            From Base
+          </button>
+        )}
         <button
           type="button"
-          className={`tab${mode === 'base' ? ' active' : ''}`}
-          role="tab"
-          id="base-tab"
-          aria-selected={mode === 'base'}
-          aria-controls="asset-transfer-panel"
-          onClick={() => setMode('base')}
-        >
-          From Base
-        </button>
-        <button
-          type="button"
-          className={`tab${mode === 'unshield' ? ' active' : ''}`}
+          className={`tab${activeMode === 'unshield' ? ' active' : ''}`}
           role="tab"
           id="unshield-tab"
-          aria-selected={mode === 'unshield'}
+          aria-selected={activeMode === 'unshield'}
           aria-controls="asset-transfer-panel"
           onClick={() => setMode('unshield')}
         >
@@ -80,10 +85,10 @@ export default function ShieldUnshieldPanel({
       <div
         id="asset-transfer-panel"
         role="tabpanel"
-        aria-labelledby={`${mode}-tab`}
+        aria-labelledby={`${activeMode}-tab`}
         className="tab-panel"
       >
-        {mode === 'base' ? (
+        {activeMode === 'base' ? (
           <ShieldFromBaseForm
             desk={desk}
             userPubkey={userPubkey}
@@ -91,11 +96,12 @@ export default function ShieldUnshieldPanel({
             onDone={onDone}
           />
         ) : userPubkey ? (
-          mode === 'shield' ? (
+          activeMode === 'shield' ? (
             <ShieldForm
               desk={desk}
               userPubkey={userPubkey}
               disabledReason={disabledReason}
+              trustless={trustless}
               onDone={onDone}
             />
           ) : (
@@ -105,11 +111,12 @@ export default function ShieldUnshieldPanel({
               notes={notes}
               userPubkey={userPubkey}
               disabledReason={disabledReason}
+              trustless={trustless}
               onDone={onDone}
             />
           )
         ) : (
-          <p className="muted">Connect your wallet to {mode} assets.</p>
+          <p className="muted">Connect your wallet to {activeMode} assets.</p>
         )}
       </div>
     </>

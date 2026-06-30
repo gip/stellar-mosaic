@@ -1,0 +1,60 @@
+{
+  "name": "@mosaic/sdk",
+  "version": "0.0.0",
+  "description": "Portable TypeScript SDK for Stellar Mosaic — shield/unshield, orders, note tracking, and proving. Runs in the browser and in Node behind environment adapters (Signer, Storage, Rpc, PathProvider, Submitter).",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser.d.ts",
+      "import": "./dist/browser.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
+    },
+    "./mcp-client": {
+      "types": "./dist/mcp-client.d.ts",
+      "import": "./dist/mcp-client.js"
+    },
+    "./assets": {
+      "types": "./dist/assets.node.d.ts",
+      "browser": "./dist/assets.browser.js",
+      "node": "./dist/assets.node.js",
+      "default": "./dist/assets.node.js"
+    },
+    "./assets/node": {
+      "types": "./dist/assets.node.d.ts",
+      "import": "./dist/assets.node.js"
+    },
+    "./assets/browser": {
+      "types": "./dist/assets.browser.d.ts",
+      "import": "./dist/assets.browser.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "assets"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "tsc -b && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@aztec/bb.js": "0.87.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@noir-lang/noir_js": "1.0.0-beta.9",
+    "@stellar/stellar-sdk": "^16.0.1",
+    "buffer": "^6.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.3",
+    "typescript": "~6.0.2"
+  }
+}

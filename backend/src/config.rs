@@ -29,6 +29,8 @@ pub struct Config {
     pub cast_bin: String,
     /// Directory of the `bridge-prover` workspace (must contain the `run-host` launcher).
     pub prover_dir: PathBuf,
+    /// Bearer token required by internal prove-only endpoints. If unset, prove endpoints reject.
+    pub prover_token: Option<String>,
     /// Pinned Stellar verifier and RISC Zero/Steel identifiers used when attaching a Base bridge.
     pub base_router: String,
     pub base_image_id: String,
@@ -75,6 +77,9 @@ impl Config {
                 "MOSAIC_PROVER_DIR",
                 cwd.join("bridge-prover").to_string_lossy().as_ref(),
             )),
+            prover_token: std::env::var("MOSAIC_PROVER_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
             base_router: env(
                 "MOSAIC_BASE_ROUTER",
                 "CB3ISULTPMQXHUH6BVRO7VQIQE3TTDRGSHWBJ72V7GRO6VF63BMGNWOU",

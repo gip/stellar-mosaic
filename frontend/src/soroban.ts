@@ -16,20 +16,13 @@ import {
 } from '@stellar/stellar-sdk'
 import { signAuthEntry } from '@stellar/freighter-api'
 import { Buffer } from 'buffer'
-import { toField32 } from './crypto'
+import { SOROBAN_RPC_URL } from './config'
 
-const RPC_URL = import.meta.env.VITE_SOROBAN_RPC ?? 'https://soroban-testnet.stellar.org'
+// recipientField now lives in @mosaic/sdk (single source of truth); re-export it so existing
+// imports of './soroban' keep working.
+export { recipientField } from '@mosaic/sdk'
+
 const PASSPHRASE = Networks.TESTNET
-
-/** Map a Stellar address to the field value bound by the unshield circuit and contract. */
-export async function recipientField(to: string): Promise<string> {
-  // `Address::to_xdr` in soroban-sdk serializes the address as a ScVal. Copy the SDK Buffer into a
-  // plain Uint8Array so Web Crypto receives an ArrayBuffer-backed BufferSource in every browser.
-  const xdrBytes = Uint8Array.from(Address.fromString(to).toScVal().toXDR())
-  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', xdrBytes))
-  hash[0] = 0 // keep the big-endian value below 2^248, matching the contract
-  return toField32(BigInt(`0x${Buffer.from(hash).toString('hex')}`))
-}
 
 /**
  * Build a sponsored shield transaction: source = sponsor, op authorized by a user-signed auth
@@ -43,7 +36,7 @@ export async function buildSponsoredShield(
   amount: string,
   ownerTagBytes: Uint8Array,
 ): Promise<string> {
-  const srv = new rpc.Server(RPC_URL)
+  const srv = new rpc.Server(SOROBAN_RPC_URL)
   const args = [
     new Address(userPubkey).toScVal(),
     nativeToScVal(assetId, { type: 'u32' }),

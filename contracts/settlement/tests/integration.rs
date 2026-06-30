@@ -98,7 +98,11 @@ fn funded_asset(env: &Env, asset_id: u32, amount: i128) -> (AssetInit, Address, 
     let holder = Address::generate(env);
     StellarAssetClient::new(env, &token).mint(&holder, &amount);
     (
-        AssetInit { asset_id, token: Some(token.clone()), kind: AssetKind::Dual },
+        AssetInit {
+            asset_id,
+            token: Some(token.clone()),
+            kind: AssetKind::Dual,
+        },
         token,
         holder,
     )
@@ -106,10 +110,7 @@ fn funded_asset(env: &Env, asset_id: u32, amount: i128) -> (AssetInit, Address, 
 
 /// Convenience for the common two-asset desk (ASSET_1 + ASSET_2 as `Dual`, funded holders). Returns
 /// (id, holder_1, holder_2, token_1, token_2). `pairs` is passed straight to the constructor.
-fn deploy_two(
-    env: &Env,
-    pairs: Vec<PairDef>,
-) -> (Address, Address, Address, Address, Address) {
+fn deploy_two(env: &Env, pairs: Vec<PairDef>) -> (Address, Address, Address, Address, Address) {
     let (a1, t1, h1) = funded_asset(env, ASSET_1, AMOUNT_A);
     let (a2, t2, h2) = funded_asset(env, ASSET_2, AMOUNT_B);
     let (id, _admin) = deploy_cfg(env, vec![env, a1, a2], pairs);
@@ -256,7 +257,13 @@ fn constructor_assigns_pair_ids_for_canonical_pairs() {
     let (id, _admin) = deploy_cfg(
         &env,
         vec![&env, a1, a2],
-        vec![&env, PairDef { base_asset: ASSET_1, quote_asset: ASSET_2 }],
+        vec![
+            &env,
+            PairDef {
+                base_asset: ASSET_1,
+                quote_asset: ASSET_2,
+            },
+        ],
     );
     assert_eq!(SettlementClient::new(&env, &id).pair_count(), 1);
 }
@@ -273,8 +280,14 @@ fn constructor_rejects_noncanonical_duplicate_pair() {
         vec![&env, a1, a2],
         vec![
             &env,
-            PairDef { base_asset: ASSET_1, quote_asset: ASSET_2 },
-            PairDef { base_asset: ASSET_2, quote_asset: ASSET_1 },
+            PairDef {
+                base_asset: ASSET_1,
+                quote_asset: ASSET_2,
+            },
+            PairDef {
+                base_asset: ASSET_2,
+                quote_asset: ASSET_1,
+            },
         ],
     );
 }
@@ -288,7 +301,13 @@ fn constructor_rejects_pair_with_unregistered_asset() {
     deploy_cfg(
         &env,
         vec![&env, a1],
-        vec![&env, PairDef { base_asset: ASSET_1, quote_asset: ASSET_2 }],
+        vec![
+            &env,
+            PairDef {
+                base_asset: ASSET_1,
+                quote_asset: ASSET_2,
+            },
+        ],
     );
 }
 
@@ -300,7 +319,13 @@ fn constructor_rejects_self_pair() {
     deploy_cfg(
         &env,
         vec![&env, a1],
-        vec![&env, PairDef { base_asset: ASSET_1, quote_asset: ASSET_1 }],
+        vec![
+            &env,
+            PairDef {
+                base_asset: ASSET_1,
+                quote_asset: ASSET_1,
+            },
+        ],
     );
 }
 
@@ -342,8 +367,16 @@ fn settle_exact_accepts_exact_reverse() {
     // A and B are exact reverses: A gives 100 asset1 / wants 2000 asset2; B gives 2000 asset2 /
     // wants 100 asset1. Both proofs are made against the root produced by shielding the two notes.
     let env = test_env();
-    let (id, h1, h2, _t1, _t2) =
-        deploy_two(&env, vec![&env, PairDef { base_asset: ASSET_1, quote_asset: ASSET_2 }]);
+    let (id, h1, h2, _t1, _t2) = deploy_two(
+        &env,
+        vec![
+            &env,
+            PairDef {
+                base_asset: ASSET_1,
+                quote_asset: ASSET_2,
+            },
+        ],
+    );
     let client = SettlementClient::new(&env, &id);
     client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_EXA));
     client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_EXB));
@@ -376,8 +409,16 @@ fn settle_exact_rejects_inexact_reverse() {
     // The committed fixtures cross (A wants >=1500 for 100; B wants >=50 for 2000) but are NOT exact
     // reverses, so settle_exact rejects them with NotCompatible even though both proofs verify.
     let env = test_env();
-    let (id, h1, h2, _t1, _t2) =
-        deploy_two(&env, vec![&env, PairDef { base_asset: ASSET_1, quote_asset: ASSET_2 }]);
+    let (id, h1, h2, _t1, _t2) = deploy_two(
+        &env,
+        vec![
+            &env,
+            PairDef {
+                base_asset: ASSET_1,
+                quote_asset: ASSET_2,
+            },
+        ],
+    );
     let client = SettlementClient::new(&env, &id);
     client.shield(&h1, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
     client.shield(&h2, &ASSET_2, &AMOUNT_B, &tag(&env, OTAG_B));
@@ -458,7 +499,14 @@ fn shield_rejects_base_represented_asset() {
     let user = Address::generate(&env);
     let (id, _admin) = deploy_cfg(
         &env,
-        vec![&env, AssetInit { asset_id: ASSET_1, token: None, kind: AssetKind::BaseRepresented }],
+        vec![
+            &env,
+            AssetInit {
+                asset_id: ASSET_1,
+                token: None,
+                kind: AssetKind::BaseRepresented,
+            },
+        ],
         Vec::new(&env),
     );
     let err = env
@@ -476,7 +524,14 @@ fn constructor_rejects_stellar_asset_without_token() {
     let env = test_env();
     deploy_cfg(
         &env,
-        vec![&env, AssetInit { asset_id: ASSET_1, token: None, kind: AssetKind::Stellar }],
+        vec![
+            &env,
+            AssetInit {
+                asset_id: ASSET_1,
+                token: None,
+                kind: AssetKind::Stellar,
+            },
+        ],
         Vec::new(&env),
     );
 }
@@ -614,8 +669,16 @@ fn indexer_reproduces_onchain_root_and_serves_valid_paths() {
     // (2) ...and equals the membership root BOTH committed order proofs were generated against
     //     (public input field [1] = root). This is the whole point: a wallet using the indexer's
     //     view proves against exactly the root the contract will accept.
-    assert_eq!(pi_word(PI_A, 1), onchain_root, "order A proof root == on-chain root");
-    assert_eq!(pi_word(PI_B, 1), onchain_root, "order B proof root == on-chain root");
+    assert_eq!(
+        pi_word(PI_A, 1),
+        onchain_root,
+        "order A proof root == on-chain root"
+    );
+    assert_eq!(
+        pi_word(PI_B, 1),
+        onchain_root,
+        "order B proof root == on-chain root"
+    );
 
     // (3) Every leaf's indexer-derived path folds (with the circuit's membership algorithm) back to
     //     the root, so a proof built from that witness satisfies the lift circuit's membership
@@ -643,8 +706,16 @@ fn indexer_reproduces_unshield_root() {
     let mut tree = NoteTree::new(&env);
     tree.ingest_shielded(ASSET_1, AMOUNT_U, OTAG_U.try_into().unwrap());
 
-    assert_eq!(u256_to_word(&tree.root()), onchain_root, "indexer root == on-chain root");
-    assert_eq!(pi_word(UNSHIELD_PI, 1), onchain_root, "unshield proof root == on-chain root");
+    assert_eq!(
+        u256_to_word(&tree.root()),
+        onchain_root,
+        "indexer root == on-chain root"
+    );
+    assert_eq!(
+        pi_word(UNSHIELD_PI, 1),
+        onchain_root,
+        "unshield proof root == on-chain root"
+    );
 
     let leaf = tree.leaf(0).unwrap();
     let p = tree.path(0);
@@ -676,5 +747,8 @@ fn settle_fits_cpu_budget() {
     );
     let cpu = env.cost_estimate().budget().cpu_instruction_cost();
     std::println!("atomic settle + 2 tree inserts CPU (local host): {cpu}");
-    assert!(cpu < 400_000_000, "settle CPU {cpu} exceeds the 400M budget");
+    assert!(
+        cpu < 400_000_000,
+        "settle CPU {cpu} exceeds the 400M budget"
+    );
 }

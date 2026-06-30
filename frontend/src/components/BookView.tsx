@@ -22,6 +22,8 @@ export default function BookView({
   notes,
   orders,
   bookIndex,
+  userPubkey,
+  trustless = false,
   onCancel,
 }: {
   desk: Desk
@@ -41,6 +43,8 @@ export default function BookView({
   notes: Note[]
   orders: IndexedOrder[]
   bookIndex: BookIndexSnapshot
+  userPubkey: string
+  trustless?: boolean
   onCancel: () => void
 }) {
   // Our still-cancellable orders, keyed by on-chain order_leaf, so we can offer a cancel button on
@@ -87,7 +91,15 @@ export default function BookView({
                   <td>{formatAmount(BigInt(o.remaining_in), inDecimals)}</td>
                   <td>{o.partial_allowed ? 'Y' : 'N'}</td>
                   <td>
-                    {own && <CancelOrderButton desk={desk} note={own} onDone={onCancel} />}
+                    {own && userPubkey && (
+                      <CancelOrderButton
+                        desk={desk}
+                        note={own}
+                        userPubkey={userPubkey}
+                        trustless={trustless}
+                        onDone={onCancel}
+                      />
+                    )}
                   </td>
                 </tr>
               )

@@ -72,7 +72,7 @@ XLM_SAC=$(stellar contract id asset --asset native --network "$NETWORK")
 echo "    admin/holder = $ADMIN ; native XLM SAC = $XLM_SAC"
 
 echo ">>> [build] settlement contract -> wasm"
-( cd "$CONTRACT" && stellar contract build >/dev/null 2>&1 )
+( cd "$CONTRACT" && stellar contract build --optimize >/dev/null 2>&1 )
 WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
 
 echo ">>> [deploy] order/lift VK + admin + assets 1,2 (Dual -> XLM SAC) + canonical pair (id 0)"

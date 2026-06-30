@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { errorMessage } from '@mosaic/sdk'
 import { useWallet } from '../WalletContext'
 import { useRecovery } from '../RecoveryContext'
 
@@ -17,7 +18,7 @@ export default function RecoveryPanel() {
     try {
       await fn()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     }
   }
 

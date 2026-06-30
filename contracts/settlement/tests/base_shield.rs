@@ -7,7 +7,9 @@
 //! independently of a live verifier. The journal layout is built word-by-word and cross-checked
 //! against the exact bytes alloy's `abi_encode` produced (see bridge-prover fixture printer).
 
-use settlement::{AssetInit, AssetKind, DataKey, Error, Settlement, SettlementClient};
+use settlement::{
+    AssetInit, AssetKind, DataKey, Error, Settlement, SettlementClient, STORAGE_TTL_LEDGERS,
+};
 use soroban_sdk::{
     contract, contracterror, contractimpl,
     testutils::{storage::Persistent as _, Address as _, Events, Ledger},
@@ -99,9 +101,16 @@ fn deploy_cfg(env: &Env, assets: Vec<AssetInit>) -> (Address, Address) {
 fn bridge_asset(env: &Env, asset_id: u32, kind: AssetKind) -> AssetInit {
     let token = match kind {
         AssetKind::BaseRepresented => None,
-        _ => Some(env.register_stellar_asset_contract_v2(Address::generate(env)).address()),
+        _ => Some(
+            env.register_stellar_asset_contract_v2(Address::generate(env))
+                .address(),
+        ),
     };
-    AssetInit { asset_id, token, kind }
+    AssetInit {
+        asset_id,
+        token,
+        kind,
+    }
 }
 
 /// Build the 8-word (256-byte) ABI journal exactly as the guest commits it.
@@ -130,7 +139,14 @@ fn build_journal(
 
 fn fixture_journal() -> [u8; 256] {
     build_journal(
-        BLOCK_NUMBER, &BLOCK_HASH, &CONFIG_ID, &BRIDGE20, DEPOSIT_ID, ASSET_ID, AMOUNT, &OWNER_TAG,
+        BLOCK_NUMBER,
+        &BLOCK_HASH,
+        &CONFIG_ID,
+        &BRIDGE20,
+        DEPOSIT_ID,
+        ASSET_ID,
+        AMOUNT,
+        &OWNER_TAG,
     )
 }
 
@@ -165,7 +181,9 @@ fn journal_bytes(env: &Env, j: &[u8; 256]) -> Bytes {
 
 /// Direct (non-panicking) invocation, for typed-error assertions.
 fn call(env: &Env, id: &Address, seal: Bytes, journal: Bytes) -> Result<(), Error> {
-    env.as_contract(id, || Settlement::shield_from_base(env.clone(), seal, journal))
+    env.as_contract(id, || {
+        Settlement::shield_from_base(env.clone(), seal, journal)
+    })
 }
 
 // ===========================================================================
@@ -205,15 +223,23 @@ fn shield_from_base_rejects_invalid_proof() {
     // Bad seal -> mock router returns Err -> the cross-call traps -> the whole call fails.
     let bad = Bytes::from_array(&env, &[0u8]);
     let res = client.try_shield_from_base(&bad, &journal_bytes(&env, &fixture_journal()));
-    assert!(res.is_err(), "an invalid proof must make shield_from_base fail");
+    assert!(
+        res.is_err(),
+        "an invalid proof must make shield_from_base fail"
+    );
 }
 
 #[test]
 fn shield_from_base_requires_configuration() {
     let env = test_env();
     let (id, _admin) = deploy(&env); // not configured
-    let err = call(&env, &id, good_seal(&env), journal_bytes(&env, &fixture_journal()))
-        .expect_err("unconfigured");
+    let err = call(
+        &env,
+        &id,
+        good_seal(&env),
+        journal_bytes(&env, &fixture_journal()),
+    )
+    .expect_err("unconfigured");
     assert_eq!(err as u32, Error::BaseBridgeNotConfigured as u32);
 }
 
@@ -221,7 +247,9 @@ fn shield_from_base_requires_configuration() {
 fn base_bridge_config_reports_only_complete_configuration() {
     let env = test_env();
     let (unconfigured, _admin) = deploy(&env);
-    assert!(SettlementClient::new(&env, &unconfigured).base_bridge_config().is_none());
+    assert!(SettlementClient::new(&env, &unconfigured)
+        .base_bridge_config()
+        .is_none());
 
     let (configured, router) = setup(&env);
     let config = SettlementClient::new(&env, &configured)
@@ -244,17 +272,18 @@ fn keep_alive_refreshes_base_bridge_configuration() {
         DataKey::BaseConfigId,
         DataKey::BaseBridgeAddr,
     ];
-    let max = env.as_contract(&id, || env.storage().max_ttl());
-    env.ledger().set_sequence_number(env.ledger().sequence() + 100_000);
+    let target = env.as_contract(&id, || env.storage().max_ttl().min(STORAGE_TTL_LEDGERS));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 100_000);
     env.as_contract(&id, || {
         for key in keys.iter() {
-            assert!(env.storage().persistent().get_ttl(key) < max);
+            assert!(env.storage().persistent().get_ttl(key) < target);
         }
     });
     client.keep_alive();
     env.as_contract(&id, || {
         for key in keys.iter() {
-            assert!(env.storage().persistent().get_ttl(key) >= max - 16);
+            assert!(env.storage().persistent().get_ttl(key) >= target - 16);
         }
     });
 }
@@ -325,8 +354,13 @@ fn shield_from_base_rejects_stellar_only_asset() {
     // a registered, valid asset and the proof/config all check out.
     let env = test_env();
     let (id, _router) = setup_kind(&env, AssetKind::Stellar);
-    let err = call(&env, &id, good_seal(&env), journal_bytes(&env, &fixture_journal()))
-        .expect_err("stellar-only asset bridged");
+    let err = call(
+        &env,
+        &id,
+        good_seal(&env),
+        journal_bytes(&env, &fixture_journal()),
+    )
+    .expect_err("stellar-only asset bridged");
     assert_eq!(err as u32, Error::AssetNotBridgeable as u32);
 }
 
@@ -339,7 +373,11 @@ fn shield_from_base_mints_represented_asset() {
     let client = SettlementClient::new(&env, &id);
     let root_before = client.root();
     client.shield_from_base(&good_seal(&env), &journal_bytes(&env, &fixture_journal()));
-    assert_ne!(client.root(), root_before, "represented note minted into the tree");
+    assert_ne!(
+        client.root(),
+        root_before,
+        "represented note minted into the tree"
+    );
 }
 
 // ---- WS5: a bridged note is discoverable + spendable via the off-chain indexer ----
@@ -366,7 +404,11 @@ fn base_minted_note_reconstructs_and_membership_path_folds() {
     assert_eq!(idx, 0, "the base mint is the first leaf");
 
     // (1) off-chain reconstruction reproduces the on-chain root exactly.
-    assert_eq!(u256_to_word(&tree.root()), onchain_root, "indexer root == on-chain root");
+    assert_eq!(
+        u256_to_word(&tree.root()),
+        onchain_root,
+        "indexer root == on-chain root"
+    );
     // (2) the reconstructed membership path folds (via the circuit's algorithm) to that root, so a
     //     lift/unshield proof built from this witness will satisfy the membership constraint.
     let leaf = tree.leaf(0).unwrap();
@@ -389,7 +431,14 @@ fn base_and_native_notes_coexist_in_one_tree() {
     let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
     let (id, _admin) = deploy_cfg(
         &env,
-        vec![&env, AssetInit { asset_id: ASSET_ID, token: Some(sac.address()), kind: AssetKind::Dual }],
+        vec![
+            &env,
+            AssetInit {
+                asset_id: ASSET_ID,
+                token: Some(sac.address()),
+                kind: AssetKind::Dual,
+            },
+        ],
     );
     let router = env.register(MockRouter, ());
     let client = SettlementClient::new(&env, &id);
@@ -408,7 +457,12 @@ fn base_and_native_notes_coexist_in_one_tree() {
     StellarAssetClient::new(&env, &sac.address()).mint(&holder, &native_amount);
 
     // leaf 0 = native shield; leaf 1 = bridged mint.
-    client.shield(&holder, &ASSET_ID, &native_amount, &BytesN::from_array(&env, &native_tag));
+    client.shield(
+        &holder,
+        &ASSET_ID,
+        &native_amount,
+        &BytesN::from_array(&env, &native_tag),
+    );
     client.shield_from_base(&good_seal(&env), &journal_bytes(&env, &fixture_journal()));
     let onchain_root = client.root().to_array();
 
@@ -418,7 +472,11 @@ fn base_and_native_notes_coexist_in_one_tree() {
     tree.ingest_shielded(ASSET_ID, native_amount, &native_tag);
     tree.ingest_shielded(ASSET_ID, AMOUNT, &OWNER_TAG);
 
-    assert_eq!(u256_to_word(&tree.root()), onchain_root, "mixed tree root == on-chain root");
+    assert_eq!(
+        u256_to_word(&tree.root()),
+        onchain_root,
+        "mixed tree root == on-chain root"
+    );
     for i in 0..tree.len() {
         let leaf = tree.leaf(i).unwrap();
         let path = tree.path(i);
