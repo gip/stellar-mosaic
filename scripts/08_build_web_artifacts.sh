@@ -22,7 +22,7 @@ SDK_ASSETS="$ROOT/packages/sdk/assets"
 mkdir -p "$SDK_ASSETS/circuits" "$SDK_ASSETS/vks"
 
 echo ">>> build settlement.wasm"
-( cd "$ROOT/contracts/settlement" && stellar contract build >/dev/null )
+( cd "$ROOT/contracts/settlement" && stellar contract build --optimize >/dev/null )
 mkdir -p "$ROOT/backend/artifacts"
 cp "$ROOT/contracts/settlement/target/wasm32v1-none/release/settlement.wasm" \
    "$ROOT/backend/artifacts/settlement.wasm"

@@ -8,7 +8,7 @@ in the browser; PostgreSQL/SQLite hold only public workflow state and opaque enc
 
 - `stellar` CLI (tested 26.1.0) on `PATH`.
 - A funded testnet identity for read simulations (default name `m0`), or rely on per-desk sponsors.
-- `artifacts/settlement.wasm` — `cd ../contracts/settlement && stellar contract build` then copy
+- `artifacts/settlement.wasm` — `cd ../contracts/settlement && stellar contract build --optimize` then copy
   `target/wasm32v1-none/release/settlement.wasm` to `artifacts/settlement.wasm` (git-ignored;
   rebuild on a fresh checkout).
 - `vks/{lift,unshield,cancel}_vk` — committed; copied from the contract test fixtures

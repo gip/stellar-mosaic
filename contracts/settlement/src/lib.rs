@@ -20,12 +20,12 @@
 //!   [6] min_out [7] output_owner_tag  [8] cancel_owner_tag  [9] expiry
 //!   [10] partial_allowed [11] order_leaf
 
+use soroban_poseidon::{Field, Poseidon2Config, Poseidon2Sponge};
 use soroban_sdk::{
-    contract, contractevent, contracterror, contractimpl, contracttype, crypto::bn254::Bn254Fr,
+    contract, contracterror, contractevent, contractimpl, contracttype, crypto::bn254::Bn254Fr,
     symbol_short, token::TokenClient, vec, xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Vec,
     U256,
 };
-use soroban_poseidon::{Field, Poseidon2Config, Poseidon2Sponge};
 use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
 
 // --- Events ---------------------------------------------------------------------------------------
@@ -161,6 +161,9 @@ pub const BOOK_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const REMOVE_FILLED: u32 = 0;
 pub const REMOVE_CANCELLED: u32 = 1;
 pub const REMOVE_EXPIRED: u32 = 2;
+/// Storage TTL target for fund-critical entries: one week at Stellar's nominal 5s ledger cadence.
+/// The helper caps this at the network max TTL, but current networks permit a much larger value.
+pub const STORAGE_TTL_LEDGERS: u32 = 120_960;
 
 /// Order-book limits. A pair has at most this many resting orders per side (buy / sell).
 const BOOK_CAPACITY: u32 = 64;
@@ -217,23 +220,23 @@ pub enum Error {
     UnknownRoot = 10,    // root not in the published root history
     FieldOverflow = 11,  // a field element did not fit the expected u32/i128 range
     AssetNotRegistered = 12, // no token contract mapped to this asset id
-    InvalidAmount = 13,      // shield/unshield amount must be positive
+    InvalidAmount = 13,  // shield/unshield amount must be positive
     AssetAlreadyRegistered = 14, // asset id already mapped (admin must not silently rebind)
-    RecipientMismatch = 15,  // unshield payout address does not match the proof-bound recipient
-    PairNotRegistered = 16,  // (asset_in, asset_out) is not a registered canonical pair
-    OrderExpired = 17,       // order's validity time has passed (Phase 2)
-    BookFull = 18,           // no free slot on the order's side of the book (Phase 2)
-    OrderNotFound = 19,      // cancel/match referenced an order not present in the book (Phase 2)
-    NotPartialAllowed = 20,  // order forbids partial execution but could not fully fill (Phase 2)
+    RecipientMismatch = 15, // unshield payout address does not match the proof-bound recipient
+    PairNotRegistered = 16, // (asset_in, asset_out) is not a registered canonical pair
+    OrderExpired = 17,   // order's validity time has passed (Phase 2)
+    BookFull = 18,       // no free slot on the order's side of the book (Phase 2)
+    OrderNotFound = 19,  // cancel/match referenced an order not present in the book (Phase 2)
+    NotPartialAllowed = 20, // order forbids partial execution but could not fully fill (Phase 2)
     PairAlreadyRegistered = 21, // canonical pair already defined (admin must not redefine)
     BaseBridgeNotConfigured = 22, // shield_from_base called before the Base bridge config was set
-    BadJournal = 23,            // RISC Zero journal has the wrong length / non-Block commitment
-    ConfigMismatch = 24,        // journal configID != the configured Base Sepolia chain-spec digest
-    BridgeMismatch = 25,        // journal bridgeAddress != the configured Base bridge address
-    BaseBlockNotAttested = 26,  // journal block hash is not in the relayer-attested block registry
+    BadJournal = 23,     // RISC Zero journal has the wrong length / non-Block commitment
+    ConfigMismatch = 24, // journal configID != the configured Base Sepolia chain-spec digest
+    BridgeMismatch = 25, // journal bridgeAddress != the configured Base bridge address
+    BaseBlockNotAttested = 26, // journal block hash is not in the relayer-attested block registry
     DepositAlreadyProcessed = 27, // this Base depositId has already minted a note (replay)
-    AssetNotShieldable = 28,   // shield of a BaseRepresented asset (no Stellar deposit route)
-    AssetNotBridgeable = 29,   // shield_from_base of a Stellar-only asset (no Base route)
+    AssetNotShieldable = 28, // shield of a BaseRepresented asset (no Stellar deposit route)
+    AssetNotBridgeable = 29, // shield_from_base of a Stellar-only asset (no Base route)
     AssetNotUnshieldable = 30, // unshield of a BaseRepresented asset (trade-only; no Stellar payout)
     AssetConfigInvalid = 31,   // constructor asset entry malformed (dup id, or token/kind mismatch)
 }
@@ -244,38 +247,166 @@ const TREE_DEPTH: u32 = 32;
 /// Precomputed zero-subtree hashes (zeros[i]); zeros[0]=0, zeros[i]=compress(zeros[i-1],zeros[i-1]).
 /// Hardcoded so inserts don't pay a storage read every call; verified against the circuit in tests.
 const TREE_ZEROS: [[u8; 32]; 32] = [
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-    [0x18, 0xdf, 0xb8, 0xdc, 0x9b, 0x82, 0x22, 0x9c, 0xff, 0x97, 0x4e, 0xfe, 0xfc, 0x8d, 0xf7, 0x8b, 0x1c, 0xe9, 0x6d, 0x9d, 0x84, 0x42, 0x36, 0xb4, 0x96, 0x78, 0x5c, 0x69, 0x8b, 0xc6, 0x73, 0x2e],
-    [0x2c, 0x0d, 0x18, 0x4f, 0xc7, 0xa2, 0x5c, 0x12, 0x4a, 0x27, 0xa6, 0x7b, 0x2c, 0x46, 0x22, 0x0b, 0x03, 0x9b, 0x1a, 0x50, 0x72, 0xc3, 0xb6, 0x93, 0xa1, 0x8f, 0xfe, 0xe4, 0x58, 0xf6, 0x42, 0x5d],
-    [0x26, 0x8b, 0x2b, 0x93, 0xac, 0x5f, 0xe5, 0x40, 0xe6, 0x18, 0xa3, 0x78, 0xb8, 0xa7, 0x1b, 0x8f, 0x24, 0x07, 0x23, 0x27, 0x44, 0xd7, 0x1e, 0x50, 0x1c, 0xe8, 0x69, 0x99, 0x80, 0xb3, 0x06, 0xe5],
-    [0x2d, 0x43, 0x6f, 0x65, 0x4e, 0x14, 0xcc, 0x4f, 0xeb, 0xca, 0xfd, 0xf4, 0xa7, 0x53, 0xb1, 0x49, 0xdd, 0x8c, 0x88, 0xa7, 0x5d, 0xf9, 0xe5, 0xd6, 0x70, 0x7e, 0x83, 0xa8, 0x53, 0xb5, 0xf7, 0x91],
-    [0x0b, 0x66, 0xfd, 0xef, 0x5a, 0x7f, 0x00, 0xf6, 0xfb, 0x45, 0xd1, 0x49, 0x8b, 0x4d, 0x71, 0x31, 0x21, 0x8e, 0x69, 0xcc, 0xf0, 0xa2, 0x75, 0x1b, 0x6a, 0x1f, 0xb1, 0xbc, 0xd9, 0x82, 0x86, 0x7d],
-    [0x1d, 0x54, 0x2b, 0x47, 0x6c, 0x67, 0x1b, 0xb6, 0xf0, 0xd2, 0xab, 0x29, 0x39, 0x33, 0x5d, 0x7c, 0xba, 0xd0, 0x34, 0x76, 0xf1, 0xe3, 0xbc, 0xba, 0x70, 0x97, 0x3b, 0x1a, 0xdf, 0xe8, 0x8b, 0x91],
-    [0x06, 0x80, 0xc6, 0x38, 0x8c, 0x57, 0x98, 0xca, 0xf8, 0x06, 0x42, 0xa1, 0xe8, 0x43, 0x16, 0xb8, 0xb2, 0xf7, 0xca, 0xa9, 0x9d, 0xa0, 0x76, 0xf3, 0x05, 0x7d, 0x29, 0x62, 0xa4, 0x6c, 0x53, 0x58],
-    [0x03, 0xc5, 0x3c, 0xe5, 0x29, 0x6e, 0x3e, 0x89, 0x51, 0x71, 0xf8, 0x9a, 0xa0, 0x9f, 0x84, 0x21, 0x4e, 0x3f, 0xb0, 0x75, 0x5f, 0xe7, 0xa4, 0x23, 0xb8, 0x78, 0x88, 0xe4, 0xb3, 0xd7, 0x31, 0xb8],
-    [0x2d, 0xd4, 0xe2, 0x51, 0x0b, 0x33, 0x27, 0x53, 0x59, 0xbb, 0xa6, 0xed, 0xf7, 0x2e, 0x6b, 0xda, 0xca, 0xd2, 0x59, 0x95, 0x0b, 0x02, 0x4b, 0x2c, 0xc1, 0x9d, 0x63, 0xc3, 0xa5, 0xb7, 0x61, 0xdf],
-    [0x11, 0xcb, 0x22, 0x1f, 0x69, 0xd9, 0x54, 0xd5, 0x21, 0xfb, 0x53, 0x93, 0x76, 0x7e, 0x77, 0xfe, 0x4d, 0x14, 0x13, 0x37, 0x57, 0xa7, 0x06, 0xb3, 0x18, 0xe6, 0x2f, 0xa9, 0x84, 0xf9, 0x81, 0x57],
-    [0x03, 0x9d, 0x78, 0xba, 0xc8, 0xf8, 0x90, 0x78, 0x8e, 0xef, 0xe3, 0x9a, 0xf1, 0x5e, 0xee, 0x58, 0x25, 0x05, 0x66, 0x48, 0xf9, 0x92, 0x10, 0x05, 0x4f, 0xd0, 0x3c, 0x25, 0x21, 0x3f, 0x4d, 0xe7],
-    [0x0c, 0x55, 0xb8, 0x28, 0xa8, 0x30, 0x62, 0xa7, 0x7d, 0x2b, 0x3e, 0x0a, 0x66, 0xbb, 0xb5, 0x0c, 0xb6, 0x04, 0x09, 0x90, 0xd9, 0xf3, 0x68, 0xda, 0x8b, 0x24, 0xc0, 0xe8, 0x2b, 0x69, 0x23, 0x49],
-    [0x24, 0xc8, 0x66, 0xac, 0x88, 0x71, 0x58, 0x51, 0x26, 0x8d, 0x80, 0x84, 0x87, 0xe2, 0x0e, 0x69, 0x86, 0x08, 0x4f, 0xc2, 0x22, 0xd7, 0x18, 0x8e, 0x2a, 0x8e, 0x0f, 0x5b, 0x9f, 0x84, 0x57, 0xef],
-    [0x0f, 0x6a, 0x94, 0xe4, 0x37, 0xb9, 0xdf, 0xb3, 0x5c, 0xde, 0xdf, 0x41, 0xe2, 0xe1, 0x54, 0xc3, 0xae, 0x44, 0x9b, 0x7c, 0x04, 0xc1, 0x3a, 0xdd, 0x09, 0x96, 0xa7, 0xb5, 0x3c, 0xde, 0x54, 0x00],
-    [0x22, 0xaf, 0xe7, 0x69, 0x6b, 0x87, 0xcb, 0x78, 0x27, 0x42, 0xe2, 0xd3, 0xec, 0xb0, 0xf7, 0x49, 0xa9, 0xbe, 0xef, 0xbb, 0xb2, 0x15, 0x9d, 0x17, 0x8b, 0x09, 0x00, 0x0e, 0x55, 0xb2, 0x2c, 0xab],
-    [0x12, 0x1b, 0x01, 0x16, 0x4d, 0x32, 0xe9, 0xab, 0x84, 0x1b, 0xa8, 0xf5, 0x60, 0x2b, 0x0e, 0xc5, 0x8b, 0x57, 0x6e, 0x62, 0x55, 0x2c, 0x96, 0x91, 0x1d, 0x4d, 0x98, 0x8d, 0x49, 0x46, 0x8c, 0xdd],
-    [0x05, 0xf3, 0x81, 0x07, 0x07, 0xb1, 0x33, 0x6c, 0x95, 0x3b, 0x7d, 0xb1, 0x91, 0x21, 0x5d, 0xab, 0x2b, 0x57, 0x72, 0xf9, 0x30, 0x25, 0xaa, 0x34, 0x5b, 0x95, 0x4b, 0x43, 0x13, 0x5b, 0x62, 0x7b],
-    [0x28, 0x75, 0x15, 0xb2, 0xd5, 0x97, 0x5c, 0x74, 0xe3, 0xfd, 0x85, 0xa2, 0x0d, 0x68, 0x61, 0x1a, 0x46, 0x3f, 0xfe, 0x60, 0x5a, 0x1c, 0x54, 0xd8, 0x14, 0x0a, 0xb1, 0x6d, 0x1b, 0x77, 0xf5, 0x7b],
-    [0x27, 0x6f, 0xf1, 0x3f, 0xde, 0x3a, 0xfa, 0x1a, 0xdb, 0x26, 0x14, 0x9d, 0xdc, 0x3a, 0xa6, 0x72, 0x40, 0xd6, 0x03, 0xb6, 0xa9, 0x1d, 0xa5, 0xe4, 0x94, 0xc8, 0xe5, 0x87, 0x06, 0x38, 0x1a, 0x38],
-    [0x30, 0x39, 0xbc, 0xb2, 0x0f, 0x03, 0xfd, 0x9c, 0x86, 0x50, 0x13, 0x8e, 0xf2, 0xcf, 0xe6, 0x43, 0xed, 0xee, 0xd1, 0x52, 0xf9, 0xc2, 0x09, 0x99, 0xf4, 0x3a, 0xee, 0xd5, 0x4d, 0x79, 0xe3, 0x87],
-    [0x08, 0x7e, 0x5a, 0xf4, 0x39, 0x45, 0x0e, 0xf0, 0x9c, 0xe6, 0xf1, 0x2a, 0x47, 0x57, 0x19, 0x71, 0xd8, 0x33, 0x09, 0xbb, 0x6f, 0xd1, 0xe2, 0x80, 0xc2, 0x9b, 0xaf, 0x69, 0x25, 0x7f, 0x8a, 0x4f],
-    [0x18, 0x21, 0x49, 0x5b, 0x19, 0x19, 0xfa, 0x54, 0x39, 0xae, 0x4a, 0x31, 0x4f, 0xf9, 0x88, 0x43, 0x06, 0x73, 0x81, 0xa3, 0xc0, 0x15, 0xf7, 0x44, 0x59, 0x2b, 0xfd, 0x64, 0x10, 0x1d, 0xef, 0x1d],
-    [0x25, 0x78, 0x9f, 0x32, 0xf9, 0x58, 0x56, 0x83, 0x64, 0xc8, 0x13, 0x97, 0x71, 0xd7, 0x86, 0x4d, 0x93, 0xf9, 0x7e, 0xfb, 0x5b, 0xbb, 0x87, 0xcc, 0xe1, 0x95, 0x9e, 0x7e, 0x74, 0x43, 0xac, 0x80],
-    [0x25, 0xad, 0x08, 0x50, 0x41, 0x15, 0x51, 0x11, 0x5f, 0xd6, 0x97, 0xc4, 0xd9, 0x16, 0x68, 0xf9, 0x2d, 0xde, 0x52, 0x42, 0x1b, 0xe5, 0x96, 0x50, 0x35, 0x7c, 0xd5, 0x03, 0x63, 0x88, 0x05, 0x43],
-    [0x10, 0xb6, 0x04, 0xf3, 0x5a, 0x90, 0x24, 0x19, 0xa0, 0xfd, 0xcf, 0x8e, 0xe5, 0x71, 0x23, 0xe9, 0x2f, 0x0d, 0x65, 0x0a, 0xb0, 0x09, 0xb5, 0x10, 0x59, 0x16, 0xca, 0xc7, 0x81, 0x3c, 0x91, 0x37],
-    [0x1b, 0xb0, 0x7b, 0x96, 0xcd, 0xdd, 0xee, 0x48, 0x6a, 0xfb, 0x20, 0xc7, 0x8a, 0x3b, 0x82, 0x20, 0x8c, 0xb8, 0x0d, 0x2c, 0x55, 0xe5, 0x96, 0x89, 0x6f, 0xa1, 0x87, 0x91, 0x64, 0xa7, 0x51, 0xdb],
-    [0x04, 0xab, 0x93, 0xe9, 0xc4, 0x94, 0xb6, 0x71, 0x62, 0x06, 0x3e, 0x77, 0x96, 0x0c, 0xd3, 0x6f, 0x4e, 0x3e, 0x5c, 0xde, 0xe5, 0x38, 0x8a, 0x60, 0x3d, 0xc5, 0x5a, 0x03, 0x87, 0x5c, 0x72, 0xbb],
-    [0x0f, 0x9e, 0x7f, 0x4a, 0xd9, 0x48, 0xe7, 0xe4, 0x87, 0x83, 0x1c, 0x37, 0xfe, 0xf6, 0xe0, 0x32, 0xd6, 0x6a, 0xb2, 0xcd, 0x3d, 0x74, 0x2d, 0x02, 0x42, 0x74, 0x61, 0x2a, 0x86, 0xcc, 0x55, 0xed],
-    [0x2f, 0x1c, 0x69, 0x20, 0x64, 0x4c, 0xd6, 0x74, 0x37, 0x6a, 0x6d, 0x3b, 0xa4, 0xfd, 0x3c, 0xbe, 0x3a, 0x57, 0x16, 0x85, 0xaf, 0x0d, 0x9a, 0xb2, 0x8e, 0x14, 0x61, 0xe4, 0xc1, 0xd6, 0xfc, 0x0a],
-    [0x0d, 0xe2, 0xcd, 0x9d, 0xff, 0xe1, 0xe7, 0x10, 0x64, 0x7f, 0xdc, 0x17, 0x98, 0x84, 0xbd, 0x03, 0x67, 0x27, 0x66, 0x12, 0xef, 0x83, 0xd2, 0xae, 0xea, 0x0f, 0x7d, 0x8a, 0xec, 0xb9, 0xc3, 0xd7],
-    [0x00, 0x77, 0xed, 0x17, 0xda, 0xd4, 0xb5, 0x61, 0xa9, 0xb4, 0xa2, 0x1c, 0xf5, 0x87, 0x20, 0xef, 0x0c, 0x05, 0x76, 0x99, 0xfe, 0xc7, 0x2b, 0x92, 0xf2, 0xca, 0x26, 0xfd, 0xf6, 0xb4, 0x8a, 0x83],
+    [
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ],
+    [
+        0x18, 0xdf, 0xb8, 0xdc, 0x9b, 0x82, 0x22, 0x9c, 0xff, 0x97, 0x4e, 0xfe, 0xfc, 0x8d, 0xf7,
+        0x8b, 0x1c, 0xe9, 0x6d, 0x9d, 0x84, 0x42, 0x36, 0xb4, 0x96, 0x78, 0x5c, 0x69, 0x8b, 0xc6,
+        0x73, 0x2e,
+    ],
+    [
+        0x2c, 0x0d, 0x18, 0x4f, 0xc7, 0xa2, 0x5c, 0x12, 0x4a, 0x27, 0xa6, 0x7b, 0x2c, 0x46, 0x22,
+        0x0b, 0x03, 0x9b, 0x1a, 0x50, 0x72, 0xc3, 0xb6, 0x93, 0xa1, 0x8f, 0xfe, 0xe4, 0x58, 0xf6,
+        0x42, 0x5d,
+    ],
+    [
+        0x26, 0x8b, 0x2b, 0x93, 0xac, 0x5f, 0xe5, 0x40, 0xe6, 0x18, 0xa3, 0x78, 0xb8, 0xa7, 0x1b,
+        0x8f, 0x24, 0x07, 0x23, 0x27, 0x44, 0xd7, 0x1e, 0x50, 0x1c, 0xe8, 0x69, 0x99, 0x80, 0xb3,
+        0x06, 0xe5,
+    ],
+    [
+        0x2d, 0x43, 0x6f, 0x65, 0x4e, 0x14, 0xcc, 0x4f, 0xeb, 0xca, 0xfd, 0xf4, 0xa7, 0x53, 0xb1,
+        0x49, 0xdd, 0x8c, 0x88, 0xa7, 0x5d, 0xf9, 0xe5, 0xd6, 0x70, 0x7e, 0x83, 0xa8, 0x53, 0xb5,
+        0xf7, 0x91,
+    ],
+    [
+        0x0b, 0x66, 0xfd, 0xef, 0x5a, 0x7f, 0x00, 0xf6, 0xfb, 0x45, 0xd1, 0x49, 0x8b, 0x4d, 0x71,
+        0x31, 0x21, 0x8e, 0x69, 0xcc, 0xf0, 0xa2, 0x75, 0x1b, 0x6a, 0x1f, 0xb1, 0xbc, 0xd9, 0x82,
+        0x86, 0x7d,
+    ],
+    [
+        0x1d, 0x54, 0x2b, 0x47, 0x6c, 0x67, 0x1b, 0xb6, 0xf0, 0xd2, 0xab, 0x29, 0x39, 0x33, 0x5d,
+        0x7c, 0xba, 0xd0, 0x34, 0x76, 0xf1, 0xe3, 0xbc, 0xba, 0x70, 0x97, 0x3b, 0x1a, 0xdf, 0xe8,
+        0x8b, 0x91,
+    ],
+    [
+        0x06, 0x80, 0xc6, 0x38, 0x8c, 0x57, 0x98, 0xca, 0xf8, 0x06, 0x42, 0xa1, 0xe8, 0x43, 0x16,
+        0xb8, 0xb2, 0xf7, 0xca, 0xa9, 0x9d, 0xa0, 0x76, 0xf3, 0x05, 0x7d, 0x29, 0x62, 0xa4, 0x6c,
+        0x53, 0x58,
+    ],
+    [
+        0x03, 0xc5, 0x3c, 0xe5, 0x29, 0x6e, 0x3e, 0x89, 0x51, 0x71, 0xf8, 0x9a, 0xa0, 0x9f, 0x84,
+        0x21, 0x4e, 0x3f, 0xb0, 0x75, 0x5f, 0xe7, 0xa4, 0x23, 0xb8, 0x78, 0x88, 0xe4, 0xb3, 0xd7,
+        0x31, 0xb8,
+    ],
+    [
+        0x2d, 0xd4, 0xe2, 0x51, 0x0b, 0x33, 0x27, 0x53, 0x59, 0xbb, 0xa6, 0xed, 0xf7, 0x2e, 0x6b,
+        0xda, 0xca, 0xd2, 0x59, 0x95, 0x0b, 0x02, 0x4b, 0x2c, 0xc1, 0x9d, 0x63, 0xc3, 0xa5, 0xb7,
+        0x61, 0xdf,
+    ],
+    [
+        0x11, 0xcb, 0x22, 0x1f, 0x69, 0xd9, 0x54, 0xd5, 0x21, 0xfb, 0x53, 0x93, 0x76, 0x7e, 0x77,
+        0xfe, 0x4d, 0x14, 0x13, 0x37, 0x57, 0xa7, 0x06, 0xb3, 0x18, 0xe6, 0x2f, 0xa9, 0x84, 0xf9,
+        0x81, 0x57,
+    ],
+    [
+        0x03, 0x9d, 0x78, 0xba, 0xc8, 0xf8, 0x90, 0x78, 0x8e, 0xef, 0xe3, 0x9a, 0xf1, 0x5e, 0xee,
+        0x58, 0x25, 0x05, 0x66, 0x48, 0xf9, 0x92, 0x10, 0x05, 0x4f, 0xd0, 0x3c, 0x25, 0x21, 0x3f,
+        0x4d, 0xe7,
+    ],
+    [
+        0x0c, 0x55, 0xb8, 0x28, 0xa8, 0x30, 0x62, 0xa7, 0x7d, 0x2b, 0x3e, 0x0a, 0x66, 0xbb, 0xb5,
+        0x0c, 0xb6, 0x04, 0x09, 0x90, 0xd9, 0xf3, 0x68, 0xda, 0x8b, 0x24, 0xc0, 0xe8, 0x2b, 0x69,
+        0x23, 0x49,
+    ],
+    [
+        0x24, 0xc8, 0x66, 0xac, 0x88, 0x71, 0x58, 0x51, 0x26, 0x8d, 0x80, 0x84, 0x87, 0xe2, 0x0e,
+        0x69, 0x86, 0x08, 0x4f, 0xc2, 0x22, 0xd7, 0x18, 0x8e, 0x2a, 0x8e, 0x0f, 0x5b, 0x9f, 0x84,
+        0x57, 0xef,
+    ],
+    [
+        0x0f, 0x6a, 0x94, 0xe4, 0x37, 0xb9, 0xdf, 0xb3, 0x5c, 0xde, 0xdf, 0x41, 0xe2, 0xe1, 0x54,
+        0xc3, 0xae, 0x44, 0x9b, 0x7c, 0x04, 0xc1, 0x3a, 0xdd, 0x09, 0x96, 0xa7, 0xb5, 0x3c, 0xde,
+        0x54, 0x00,
+    ],
+    [
+        0x22, 0xaf, 0xe7, 0x69, 0x6b, 0x87, 0xcb, 0x78, 0x27, 0x42, 0xe2, 0xd3, 0xec, 0xb0, 0xf7,
+        0x49, 0xa9, 0xbe, 0xef, 0xbb, 0xb2, 0x15, 0x9d, 0x17, 0x8b, 0x09, 0x00, 0x0e, 0x55, 0xb2,
+        0x2c, 0xab,
+    ],
+    [
+        0x12, 0x1b, 0x01, 0x16, 0x4d, 0x32, 0xe9, 0xab, 0x84, 0x1b, 0xa8, 0xf5, 0x60, 0x2b, 0x0e,
+        0xc5, 0x8b, 0x57, 0x6e, 0x62, 0x55, 0x2c, 0x96, 0x91, 0x1d, 0x4d, 0x98, 0x8d, 0x49, 0x46,
+        0x8c, 0xdd,
+    ],
+    [
+        0x05, 0xf3, 0x81, 0x07, 0x07, 0xb1, 0x33, 0x6c, 0x95, 0x3b, 0x7d, 0xb1, 0x91, 0x21, 0x5d,
+        0xab, 0x2b, 0x57, 0x72, 0xf9, 0x30, 0x25, 0xaa, 0x34, 0x5b, 0x95, 0x4b, 0x43, 0x13, 0x5b,
+        0x62, 0x7b,
+    ],
+    [
+        0x28, 0x75, 0x15, 0xb2, 0xd5, 0x97, 0x5c, 0x74, 0xe3, 0xfd, 0x85, 0xa2, 0x0d, 0x68, 0x61,
+        0x1a, 0x46, 0x3f, 0xfe, 0x60, 0x5a, 0x1c, 0x54, 0xd8, 0x14, 0x0a, 0xb1, 0x6d, 0x1b, 0x77,
+        0xf5, 0x7b,
+    ],
+    [
+        0x27, 0x6f, 0xf1, 0x3f, 0xde, 0x3a, 0xfa, 0x1a, 0xdb, 0x26, 0x14, 0x9d, 0xdc, 0x3a, 0xa6,
+        0x72, 0x40, 0xd6, 0x03, 0xb6, 0xa9, 0x1d, 0xa5, 0xe4, 0x94, 0xc8, 0xe5, 0x87, 0x06, 0x38,
+        0x1a, 0x38,
+    ],
+    [
+        0x30, 0x39, 0xbc, 0xb2, 0x0f, 0x03, 0xfd, 0x9c, 0x86, 0x50, 0x13, 0x8e, 0xf2, 0xcf, 0xe6,
+        0x43, 0xed, 0xee, 0xd1, 0x52, 0xf9, 0xc2, 0x09, 0x99, 0xf4, 0x3a, 0xee, 0xd5, 0x4d, 0x79,
+        0xe3, 0x87,
+    ],
+    [
+        0x08, 0x7e, 0x5a, 0xf4, 0x39, 0x45, 0x0e, 0xf0, 0x9c, 0xe6, 0xf1, 0x2a, 0x47, 0x57, 0x19,
+        0x71, 0xd8, 0x33, 0x09, 0xbb, 0x6f, 0xd1, 0xe2, 0x80, 0xc2, 0x9b, 0xaf, 0x69, 0x25, 0x7f,
+        0x8a, 0x4f,
+    ],
+    [
+        0x18, 0x21, 0x49, 0x5b, 0x19, 0x19, 0xfa, 0x54, 0x39, 0xae, 0x4a, 0x31, 0x4f, 0xf9, 0x88,
+        0x43, 0x06, 0x73, 0x81, 0xa3, 0xc0, 0x15, 0xf7, 0x44, 0x59, 0x2b, 0xfd, 0x64, 0x10, 0x1d,
+        0xef, 0x1d,
+    ],
+    [
+        0x25, 0x78, 0x9f, 0x32, 0xf9, 0x58, 0x56, 0x83, 0x64, 0xc8, 0x13, 0x97, 0x71, 0xd7, 0x86,
+        0x4d, 0x93, 0xf9, 0x7e, 0xfb, 0x5b, 0xbb, 0x87, 0xcc, 0xe1, 0x95, 0x9e, 0x7e, 0x74, 0x43,
+        0xac, 0x80,
+    ],
+    [
+        0x25, 0xad, 0x08, 0x50, 0x41, 0x15, 0x51, 0x11, 0x5f, 0xd6, 0x97, 0xc4, 0xd9, 0x16, 0x68,
+        0xf9, 0x2d, 0xde, 0x52, 0x42, 0x1b, 0xe5, 0x96, 0x50, 0x35, 0x7c, 0xd5, 0x03, 0x63, 0x88,
+        0x05, 0x43,
+    ],
+    [
+        0x10, 0xb6, 0x04, 0xf3, 0x5a, 0x90, 0x24, 0x19, 0xa0, 0xfd, 0xcf, 0x8e, 0xe5, 0x71, 0x23,
+        0xe9, 0x2f, 0x0d, 0x65, 0x0a, 0xb0, 0x09, 0xb5, 0x10, 0x59, 0x16, 0xca, 0xc7, 0x81, 0x3c,
+        0x91, 0x37,
+    ],
+    [
+        0x1b, 0xb0, 0x7b, 0x96, 0xcd, 0xdd, 0xee, 0x48, 0x6a, 0xfb, 0x20, 0xc7, 0x8a, 0x3b, 0x82,
+        0x20, 0x8c, 0xb8, 0x0d, 0x2c, 0x55, 0xe5, 0x96, 0x89, 0x6f, 0xa1, 0x87, 0x91, 0x64, 0xa7,
+        0x51, 0xdb,
+    ],
+    [
+        0x04, 0xab, 0x93, 0xe9, 0xc4, 0x94, 0xb6, 0x71, 0x62, 0x06, 0x3e, 0x77, 0x96, 0x0c, 0xd3,
+        0x6f, 0x4e, 0x3e, 0x5c, 0xde, 0xe5, 0x38, 0x8a, 0x60, 0x3d, 0xc5, 0x5a, 0x03, 0x87, 0x5c,
+        0x72, 0xbb,
+    ],
+    [
+        0x0f, 0x9e, 0x7f, 0x4a, 0xd9, 0x48, 0xe7, 0xe4, 0x87, 0x83, 0x1c, 0x37, 0xfe, 0xf6, 0xe0,
+        0x32, 0xd6, 0x6a, 0xb2, 0xcd, 0x3d, 0x74, 0x2d, 0x02, 0x42, 0x74, 0x61, 0x2a, 0x86, 0xcc,
+        0x55, 0xed,
+    ],
+    [
+        0x2f, 0x1c, 0x69, 0x20, 0x64, 0x4c, 0xd6, 0x74, 0x37, 0x6a, 0x6d, 0x3b, 0xa4, 0xfd, 0x3c,
+        0xbe, 0x3a, 0x57, 0x16, 0x85, 0xaf, 0x0d, 0x9a, 0xb2, 0x8e, 0x14, 0x61, 0xe4, 0xc1, 0xd6,
+        0xfc, 0x0a,
+    ],
+    [
+        0x0d, 0xe2, 0xcd, 0x9d, 0xff, 0xe1, 0xe7, 0x10, 0x64, 0x7f, 0xdc, 0x17, 0x98, 0x84, 0xbd,
+        0x03, 0x67, 0x27, 0x66, 0x12, 0xef, 0x83, 0xd2, 0xae, 0xea, 0x0f, 0x7d, 0x8a, 0xec, 0xb9,
+        0xc3, 0xd7,
+    ],
+    [
+        0x00, 0x77, 0xed, 0x17, 0xda, 0xd4, 0xb5, 0x61, 0xa9, 0xb4, 0xa2, 0x1c, 0xf5, 0x87, 0x20,
+        0xef, 0x0c, 0x05, 0x76, 0x99, 0xfe, 0xc7, 0x2b, 0x92, 0xf2, 0xca, 0x26, 0xfd, 0xf6, 0xb4,
+        0x8a, 0x83,
+    ],
 ];
 
 #[contracttype]
@@ -285,21 +416,21 @@ pub enum DataKey {
     Admin,
     Root(BytesN<32>), // set membership: this root was produced by the on-chain tree (accepted)
     Nullifier(BytesN<32>),
-    Asset(u32), // asset id -> token contract Address
-    TreeFilled, // Vec<U256> of length TREE_DEPTH: rightmost filled node per level
-    TreeNext,   // u32: number of leaves inserted so far
-    TreeRoot,   // U256: current tree root
-    Pair(u32),  // pair id -> PairDef { base_asset, quote_asset } (canonical orientation)
-    PairCount,  // u32: number of registered pairs (pair ids are 0..PairCount)
+    Asset(u32),     // asset id -> token contract Address
+    TreeFilled,     // Vec<U256> of length TREE_DEPTH: rightmost filled node per level
+    TreeNext,       // u32: number of leaves inserted so far
+    TreeRoot,       // U256: current tree root
+    Pair(u32),      // pair id -> PairDef { base_asset, quote_asset } (canonical orientation)
+    PairCount,      // u32: number of registered pairs (pair ids are 0..PairCount)
     Book(u32, u32), // (pair_id, side) -> Vec<OrderEntry>, kept sorted best-price-first (<=64)
     BookSeq,
     // --- Base-shield bridge (one-way deposit from Base; see docs/base-bridge.md) ---
-    BaseRouter,         // Address: deployed RISC Zero verifier router (cross-called to verify)
-    BaseImageId,        // BytesN<32>: pinned guest image id (bridge-prover BRIDGE_GUEST_ID)
-    BaseConfigId,       // BytesN<32>: expected Steel configID (Base Sepolia chain-spec digest)
-    BaseBridgeAddr,     // BytesN<20>: expected Base MosaicBridge address bound in the journal
-    BaseBlock(u64),     // block number -> attested Base block hash (relayer-attested registry)
-    BaseDeposit(u64),   // Base depositId -> true (single-use; prevents double-mint)
+    BaseRouter,     // Address: deployed RISC Zero verifier router (cross-called to verify)
+    BaseImageId,    // BytesN<32>: pinned guest image id (bridge-prover BRIDGE_GUEST_ID)
+    BaseConfigId,   // BytesN<32>: expected Steel configID (Base Sepolia chain-spec digest)
+    BaseBridgeAddr, // BytesN<20>: expected Base MosaicBridge address bound in the journal
+    BaseBlock(u64), // block number -> attested Base block hash (relayer-attested registry)
+    BaseDeposit(u64), // Base depositId -> true (single-use; prevents double-mint)
 }
 
 /// A resting order in the on-chain book. Order *terms* are public (the privacy model only hides
@@ -312,14 +443,14 @@ pub enum DataKey {
 #[derive(Clone)]
 pub struct OrderEntry {
     pub order_id: BytesN<32>, // globally unique resting-order id: the consumed note nullifier
-    pub amount_in: i128,   // original offered amount (fixes the limit price ratio with min_out)
-    pub min_out: i128,     // original wanted amount (limit terms)
-    pub remaining_in: i128, // locked asset_in still held (decreases as the order fills)
+    pub amount_in: i128,      // original offered amount (fixes the limit price ratio with min_out)
+    pub min_out: i128,        // original wanted amount (limit terms)
+    pub remaining_in: i128,   // locked asset_in still held (decreases as the order fills)
     pub output_owner_tag: BytesN<32>, // proceeds + IOC/prune return destination
     pub cancel_owner_tag: BytesN<32>, // cancel authority (cancel proof must know its secret)
-    pub order_leaf: BytesN<32>,       // identity; the cancel proof references this
-    pub expiry: u64,                  // validity deadline (unix seconds)
-    pub partial_allowed: bool,        // may this order be partially filled
+    pub order_leaf: BytesN<32>, // identity; the cancel proof references this
+    pub expiry: u64,          // validity deadline (unix seconds)
+    pub partial_allowed: bool, // may this order be partially filled
 }
 
 #[contracttype]
@@ -438,7 +569,12 @@ impl Settlement {
         assets: Vec<AssetInit>,
         pairs: Vec<PairDef>,
     ) -> Result<(), Error> {
-        let vks = [(LIFT_OP, lift_vk), (UNSHIELD_OP, unshield_vk), (CANCEL_OP, cancel_vk), (JOIN_OP, join_vk)];
+        let vks = [
+            (LIFT_OP, lift_vk),
+            (UNSHIELD_OP, unshield_vk),
+            (CANCEL_OP, cancel_vk),
+            (JOIN_OP, join_vk),
+        ];
         let mut hashes: Vec<BytesN<32>> = Vec::new(&env);
         for (op, vk) in vks.iter() {
             let _ = UltraHonkVerifier::new(&env, &vk).map_err(|_| Error::VkInvalid)?;
@@ -455,10 +591,10 @@ impl Settlement {
         tree_init(&env, &Hasher::new(&env));
         bump(&env, &DataKey::BookSeq);
         bump(&env, &DataKey::PairCount);
-        bump_core(&env); // instance + tree singletons to max from the start
-        // `bookinit` MUST be the FIRST event this contract emits — clients pin the protocol identity
-        // before replaying, and the indexer rejects any `assetreg`/`pairreg`/note event seen before
-        // it. So publish it before registering the static asset/pair config below.
+        bump_core(&env); // instance + tree singletons to the storage TTL target from the start
+                         // `bookinit` MUST be the FIRST event this contract emits — clients pin the protocol identity
+                         // before replaying, and the indexer rejects any `assetreg`/`pairreg`/note event seen before
+                         // it. So publish it before registering the static asset/pair config below.
         BookInitialized {
             schema_version: BOOK_EVENT_SCHEMA_VERSION,
             lift_vk_hash: hashes.get(0).unwrap(),
@@ -480,10 +616,26 @@ impl Settlement {
     pub fn protocol_config(env: Env) -> ProtocolConfig {
         ProtocolConfig {
             schema_version: BOOK_EVENT_SCHEMA_VERSION,
-            lift_vk_hash: env.storage().persistent().get(&DataKey::VkHash(LIFT_OP)).unwrap(),
-            unshield_vk_hash: env.storage().persistent().get(&DataKey::VkHash(UNSHIELD_OP)).unwrap(),
-            cancel_vk_hash: env.storage().persistent().get(&DataKey::VkHash(CANCEL_OP)).unwrap(),
-            join_vk_hash: env.storage().persistent().get(&DataKey::VkHash(JOIN_OP)).unwrap(),
+            lift_vk_hash: env
+                .storage()
+                .persistent()
+                .get(&DataKey::VkHash(LIFT_OP))
+                .unwrap(),
+            unshield_vk_hash: env
+                .storage()
+                .persistent()
+                .get(&DataKey::VkHash(UNSHIELD_OP))
+                .unwrap(),
+            cancel_vk_hash: env
+                .storage()
+                .persistent()
+                .get(&DataKey::VkHash(CANCEL_OP))
+                .unwrap(),
+            join_vk_hash: env
+                .storage()
+                .persistent()
+                .get(&DataKey::VkHash(JOIN_OP))
+                .unwrap(),
         }
     }
 
@@ -500,7 +652,10 @@ impl Settlement {
     }
 
     pub fn book_sequence(env: Env) -> u64 {
-        env.storage().persistent().get(&DataKey::BookSeq).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&DataKey::BookSeq)
+            .unwrap_or(0)
     }
 
     /// Read a book side (price-sorted, best first). Read-only view for clients/matchers; `side` is
@@ -527,7 +682,10 @@ impl Settlement {
 
     /// Number of registered canonical pairs (ids are `0..pair_count`).
     pub fn pair_count(env: Env) -> u32 {
-        env.storage().persistent().get(&DataKey::PairCount).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&DataKey::PairCount)
+            .unwrap_or(0)
     }
 
     // NOTE: assets and pairs are immutable from construction — there are deliberately no post-deploy
@@ -572,7 +730,12 @@ impl Settlement {
         let h = Hasher::new(&env);
         let leaf = asset_note_leaf(&env, &h, asset_id, amount, &owner_tag);
         tree_insert(&env, &h, &leaf);
-        Shielded { asset_id, amount, owner_tag }.publish(&env);
+        Shielded {
+            asset_id,
+            amount,
+            owner_tag,
+        }
+        .publish(&env);
         bump_core(&env);
         Ok(())
     }
@@ -589,10 +752,18 @@ impl Settlement {
         bridge: BytesN<20>,
     ) -> Result<(), Error> {
         Self::require_admin(&env)?;
-        env.storage().persistent().set(&DataKey::BaseRouter, &router);
-        env.storage().persistent().set(&DataKey::BaseImageId, &image_id);
-        env.storage().persistent().set(&DataKey::BaseConfigId, &config_id);
-        env.storage().persistent().set(&DataKey::BaseBridgeAddr, &bridge);
+        env.storage()
+            .persistent()
+            .set(&DataKey::BaseRouter, &router);
+        env.storage()
+            .persistent()
+            .set(&DataKey::BaseImageId, &image_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::BaseConfigId, &config_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::BaseBridgeAddr, &bridge);
         bump(&env, &DataKey::BaseRouter);
         bump(&env, &DataKey::BaseImageId);
         bump(&env, &DataKey::BaseConfigId);
@@ -603,7 +774,11 @@ impl Settlement {
     /// Attest a finalized Base block hash (admin/relayer). This is the bridge's trust anchor: a Steel
     /// proof shows an event is in block `block_hash`, but only this registry asserts that hash is
     /// canonical Base. `shield_from_base` checks the journal's block hash against this map.
-    pub fn attest_base_block(env: Env, block_number: u64, block_hash: BytesN<32>) -> Result<(), Error> {
+    pub fn attest_base_block(
+        env: Env,
+        block_number: u64,
+        block_hash: BytesN<32>,
+    ) -> Result<(), Error> {
         Self::require_admin(&env)?;
         let key = DataKey::BaseBlock(block_number);
         env.storage().persistent().set(&key, &block_hash);
@@ -727,7 +902,12 @@ impl Settlement {
         let h = Hasher::new(&env);
         let leaf = asset_note_leaf(&env, &h, asset_id, amount, &owner_tag);
         tree_insert(&env, &h, &leaf);
-        Shielded { asset_id, amount, owner_tag }.publish(&env);
+        Shielded {
+            asset_id,
+            amount,
+            owner_tag,
+        }
+        .publish(&env);
         bump_core(&env);
         Ok(())
     }
@@ -745,8 +925,20 @@ impl Settlement {
         public_inputs_b: Bytes,
     ) -> Result<(), Error> {
         // Verify BOTH order proofs (~80M each; ~160M total fits the 400M per-tx budget).
-        Self::verify_proof(&env, LIFT_OP, &proof_a, &public_inputs_a, LIFT_PUBLIC_INPUTS_BYTES)?;
-        Self::verify_proof(&env, LIFT_OP, &proof_b, &public_inputs_b, LIFT_PUBLIC_INPUTS_BYTES)?;
+        Self::verify_proof(
+            &env,
+            LIFT_OP,
+            &proof_a,
+            &public_inputs_a,
+            LIFT_PUBLIC_INPUTS_BYTES,
+        )?;
+        Self::verify_proof(
+            &env,
+            LIFT_OP,
+            &proof_b,
+            &public_inputs_b,
+            LIFT_PUBLIC_INPUTS_BYTES,
+        )?;
 
         // Derive each side from its verified public inputs (domain + published-root checked here).
         let a = parse_order(&env, &public_inputs_a)?;
@@ -815,8 +1007,20 @@ impl Settlement {
         proof_b: Bytes,
         public_inputs_b: Bytes,
     ) -> Result<(), Error> {
-        Self::verify_proof(&env, LIFT_OP, &proof_a, &public_inputs_a, LIFT_PUBLIC_INPUTS_BYTES)?;
-        Self::verify_proof(&env, LIFT_OP, &proof_b, &public_inputs_b, LIFT_PUBLIC_INPUTS_BYTES)?;
+        Self::verify_proof(
+            &env,
+            LIFT_OP,
+            &proof_a,
+            &public_inputs_a,
+            LIFT_PUBLIC_INPUTS_BYTES,
+        )?;
+        Self::verify_proof(
+            &env,
+            LIFT_OP,
+            &proof_b,
+            &public_inputs_b,
+            LIFT_PUBLIC_INPUTS_BYTES,
+        )?;
 
         let a = parse_order(&env, &public_inputs_a)?;
         let b = parse_order(&env, &public_inputs_b)?;
@@ -929,7 +1133,12 @@ impl Settlement {
         bump(&env, &nf_key);
         TokenClient::new(&env, &token).transfer(&env.current_contract_address(), &to, &amount);
 
-        Unshielded { asset, amount, nullifier }.publish(&env);
+        Unshielded {
+            asset,
+            amount,
+            nullifier,
+        }
+        .publish(&env);
         bump_core(&env);
         Ok(())
     }
@@ -947,7 +1156,13 @@ impl Settlement {
     /// distinct + unused) and mints exactly the two bound output leaves. A zero-amount output mints
     /// nothing (so this also serves as a plain 2->1 merge).
     pub fn join(env: Env, proof: Bytes, public_inputs: Bytes) -> Result<(), Error> {
-        Self::verify_proof(&env, JOIN_OP, &proof, &public_inputs, JOIN_PUBLIC_INPUTS_BYTES)?;
+        Self::verify_proof(
+            &env,
+            JOIN_OP,
+            &proof,
+            &public_inputs,
+            JOIN_PUBLIC_INPUTS_BYTES,
+        )?;
 
         // [0] domain separator must be the join constant.
         if read_word(&public_inputs, 0) != JOIN_DOMAIN {
@@ -1004,7 +1219,13 @@ impl Settlement {
     /// remainder then rests (if `partial_allowed` and a slot is free) or is returned as a note (IOC).
     /// A taker that forbids partial execution and cannot fully fill reverts the whole transaction.
     pub fn submit_order(env: Env, proof: Bytes, public_inputs: Bytes) -> Result<(), Error> {
-        Self::verify_proof(&env, LIFT_OP, &proof, &public_inputs, LIFT_PUBLIC_INPUTS_BYTES)?;
+        Self::verify_proof(
+            &env,
+            LIFT_OP,
+            &proof,
+            &public_inputs,
+            LIFT_PUBLIC_INPUTS_BYTES,
+        )?;
         let taker = parse_order(&env, &public_inputs)?; // checks lift domain + published root
         if taker.amount_in <= 0 || taker.min_out <= 0 {
             return Err(Error::InvalidAmount);
@@ -1022,7 +1243,11 @@ impl Settlement {
         bump(&env, &nf);
 
         let (pair_id, taker_side) = pair_and_side(&env, taker.asset_in, taker.asset_out)?;
-        let pair: PairDef = env.storage().persistent().get(&DataKey::Pair(pair_id)).unwrap();
+        let pair: PairDef = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Pair(pair_id))
+            .unwrap();
         let h = Hasher::new(&env);
         let initial_book_seq = book_sequence_load(&env);
         let mut book_seq = initial_book_seq;
@@ -1042,11 +1267,22 @@ impl Settlement {
                 continue;
             }
             // Price cross: once the best opposing maker doesn't cross, none further will (sorted).
-            if !cross_amounts(&env, maker.amount_in, maker.min_out, taker.amount_in, taker.min_out) {
+            if !cross_amounts(
+                &env,
+                maker.amount_in,
+                maker.min_out,
+                taker.amount_in,
+                taker.min_out,
+            ) {
                 break;
             }
-            let (k_maker, k_taker, base_lot, quote_lot) =
-                compute_lots(maker_is_sell, maker.amount_in, maker.min_out, maker.remaining_in, remaining_in);
+            let (k_maker, k_taker, base_lot, quote_lot) = compute_lots(
+                maker_is_sell,
+                maker.amount_in,
+                maker.min_out,
+                maker.remaining_in,
+                remaining_in,
+            );
             if k_taker == 0 {
                 break; // taker cannot afford even one lot of the best remaining maker
             }
@@ -1134,7 +1370,13 @@ impl Settlement {
                 publish_order_upserted(&env, &mut book_seq, pair_id, taker_u, &entry);
             } else {
                 // Book full: immediate-or-cancel the remainder back to the order's destination.
-                mint_note(&env, &h, taker.asset_in, remaining_in, &taker.output_owner_tag);
+                mint_note(
+                    &env,
+                    &h,
+                    taker.asset_in,
+                    remaining_in,
+                    &taker.output_owner_tag,
+                );
             }
         }
         if book_seq != initial_book_seq {
@@ -1156,7 +1398,13 @@ impl Settlement {
         proof: Bytes,
         public_inputs: Bytes,
     ) -> Result<(), Error> {
-        Self::verify_proof(&env, CANCEL_OP, &proof, &public_inputs, CANCEL_PUBLIC_INPUTS_BYTES)?;
+        Self::verify_proof(
+            &env,
+            CANCEL_OP,
+            &proof,
+            &public_inputs,
+            CANCEL_PUBLIC_INPUTS_BYTES,
+        )?;
         if read_word(&public_inputs, 0) != CANCEL_DOMAIN {
             return Err(Error::BadPublicInputs);
         }
@@ -1232,7 +1480,7 @@ impl Settlement {
     }
 
     /// Permissionless storage heartbeat. Extends the TTL of all the BOUNDED structural state to the
-    /// network maximum: the contract instance, the incremental-tree singletons + current root, the
+    /// storage TTL target: the contract instance, the incremental-tree singletons + current root, the
     /// pair registry, and every pair's book sides. A keeper calls this periodically so nothing ever
     /// archives in practice. (Unbounded sets — historical roots and nullifiers — are bumped on write
     /// and can be refreshed individually via `keep_alive_keys`; archived entries remain restorable by
@@ -1255,7 +1503,11 @@ impl Settlement {
                 bump(&env, &key);
             }
         }
-        if let Some(pc) = env.storage().persistent().get::<DataKey, u32>(&DataKey::PairCount) {
+        if let Some(pc) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&DataKey::PairCount)
+        {
             bump(&env, &DataKey::PairCount);
             let mut i = 0u32;
             while i < pc {
@@ -1274,8 +1526,8 @@ impl Settlement {
     }
 
     /// Permissionless targeted heartbeat for the UNBOUNDED sets: extend specific nullifier and root
-    /// entries to the maximum TTL. Lets a keeper (or a user about to spend an old note / prove against
-    /// an old root) refresh exactly the entries they care about. Missing entries are skipped.
+    /// entries to the storage TTL target. Lets a keeper (or a user about to spend an old note / prove
+    /// against an old root) refresh exactly the entries they care about. Missing entries are skipped.
     pub fn keep_alive_keys(env: Env, nullifiers: Vec<BytesN<32>>, roots: Vec<BytesN<32>>) {
         for nf in nullifiers.iter() {
             let k = DataKey::Nullifier(nf);
@@ -1332,13 +1584,22 @@ impl Settlement {
     }
 }
 
-/// Extend a persistent entry's TTL to the network maximum. The entry must already exist. This is how
+fn storage_ttl(env: &Env) -> u32 {
+    let max = env.storage().max_ttl();
+    if max < STORAGE_TTL_LEDGERS {
+        max
+    } else {
+        STORAGE_TTL_LEDGERS
+    }
+}
+
+/// Extend a persistent entry's TTL to the storage target. The entry must already exist. This is how
 /// fund-critical state is kept live: persistent entries are never deleted (only archived, and
-/// archived entries are restorable + cannot be silently read as absent), so bumping to max + the
+/// archived entries are restorable + cannot be silently read as absent), so bumping to target + the
 /// permissionless `keep_alive`/restore backstop means data can never be lost and funds never stranded.
 fn bump(env: &Env, key: &DataKey) {
-    let max = env.storage().max_ttl();
-    env.storage().persistent().extend_ttl(key, max, max);
+    let ttl = storage_ttl(env);
+    env.storage().persistent().extend_ttl(key, ttl, ttl);
 }
 
 fn kind_to_u32(k: &AssetKind) -> u32 {
@@ -1361,14 +1622,23 @@ fn register_asset_inner(env: &Env, a: AssetInit) -> Result<(), Error> {
         (_, Some(t)) => Some(t),
         (_, None) => return Err(Error::AssetConfigInvalid),
     };
-    let def = AssetDef { token: token.clone(), kind: a.kind };
-    env.storage().persistent().set(&DataKey::Asset(a.asset_id), &def);
+    let def = AssetDef {
+        token: token.clone(),
+        kind: a.kind,
+    };
+    env.storage()
+        .persistent()
+        .set(&DataKey::Asset(a.asset_id), &def);
     bump(env, &DataKey::Asset(a.asset_id));
     // The event carries a non-optional token; for BaseRepresented use the contract's own address as
     // an explicit placeholder (consumers disambiguate via `kind`).
     let event_token = token.unwrap_or_else(|| env.current_contract_address());
-    AssetRegistered { asset_id: a.asset_id, token: event_token, kind: kind_to_u32(&a.kind) }
-        .publish(env);
+    AssetRegistered {
+        asset_id: a.asset_id,
+        token: event_token,
+        kind: kind_to_u32(&a.kind),
+    }
+    .publish(env);
     Ok(())
 }
 
@@ -1378,13 +1648,23 @@ fn register_pair_inner(env: &Env, p: &PairDef) -> Result<(), Error> {
     if p.base_asset == p.quote_asset {
         return Err(Error::PairNotRegistered);
     }
-    if !env.storage().persistent().has(&DataKey::Asset(p.base_asset))
-        || !env.storage().persistent().has(&DataKey::Asset(p.quote_asset))
+    if !env
+        .storage()
+        .persistent()
+        .has(&DataKey::Asset(p.base_asset))
+        || !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Asset(p.quote_asset))
     {
         return Err(Error::AssetNotRegistered);
     }
     // Reject a duplicate in either orientation: the pair is canonical, so {a,b} == {b,a}.
-    let count: u32 = env.storage().persistent().get(&DataKey::PairCount).unwrap_or(0);
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::PairCount)
+        .unwrap_or(0);
     let mut i = 0u32;
     while i < count {
         let existing: PairDef = env.storage().persistent().get(&DataKey::Pair(i)).unwrap();
@@ -1396,20 +1676,31 @@ fn register_pair_inner(env: &Env, p: &PairDef) -> Result<(), Error> {
         i += 1;
     }
     let pair_id = count;
+    env.storage().persistent().set(
+        &DataKey::Pair(pair_id),
+        &PairDef {
+            base_asset: p.base_asset,
+            quote_asset: p.quote_asset,
+        },
+    );
     env.storage()
         .persistent()
-        .set(&DataKey::Pair(pair_id), &PairDef { base_asset: p.base_asset, quote_asset: p.quote_asset });
-    env.storage().persistent().set(&DataKey::PairCount, &(count + 1));
+        .set(&DataKey::PairCount, &(count + 1));
     bump(env, &DataKey::Pair(pair_id));
     bump(env, &DataKey::PairCount);
-    PairRegistered { pair_id, base_asset: p.base_asset, quote_asset: p.quote_asset }.publish(env);
+    PairRegistered {
+        pair_id,
+        base_asset: p.base_asset,
+        quote_asset: p.quote_asset,
+    }
+    .publish(env);
     Ok(())
 }
 
-/// Extend the contract instance (and its instance storage, e.g. the admin) TTL to the maximum.
+/// Extend the contract instance (and its instance storage, e.g. the admin) TTL to the storage target.
 fn bump_instance(env: &Env) {
-    let max = env.storage().max_ttl();
-    env.storage().instance().extend_ttl(max, max);
+    let ttl = storage_ttl(env);
+    env.storage().instance().extend_ttl(ttl, ttl);
 }
 
 /// Refresh the always-present hot state every state-changing call touches: the instance and the
@@ -1423,7 +1714,11 @@ fn bump_core(env: &Env) {
     bump(env, &DataKey::TreeNext);
     bump(env, &DataKey::TreeRoot);
     // Keep the latest root's set-membership marker live (proofs bind a published root).
-    if let Some(r) = env.storage().persistent().get::<DataKey, U256>(&DataKey::TreeRoot) {
+    if let Some(r) = env
+        .storage()
+        .persistent()
+        .get::<DataKey, U256>(&DataKey::TreeRoot)
+    {
         let rk = DataKey::Root(u256_to_bytesn(env, &r));
         if env.storage().persistent().has(&rk) {
             bump(env, &rk);
@@ -1437,7 +1732,11 @@ fn bump_core(env: &Env) {
 /// asset_out=quote); BUY = give quote / want base. Returns `PairNotRegistered` if `{asset_in,
 /// asset_out}` is not a registered pair.
 fn pair_and_side(env: &Env, asset_in: u32, asset_out: u32) -> Result<(u32, Side), Error> {
-    let count: u32 = env.storage().persistent().get(&DataKey::PairCount).unwrap_or(0);
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&DataKey::PairCount)
+        .unwrap_or(0);
     let mut i = 0u32;
     while i < count {
         let p: PairDef = env.storage().persistent().get(&DataKey::Pair(i)).unwrap();
@@ -1469,7 +1768,13 @@ fn orders_cross(env: &Env, a: &Order, b: &Order) -> bool {
 /// Core crossing predicate on raw amounts: two opposite-side orders cross iff their limit prices
 /// overlap, i.e. `a.min_out * b.min_out <= a.amount_in * b.amount_in` (see `orders_cross`). Computed
 /// in `U256` because each factor is `< 2^127` and the products reach `~2^254`.
-fn cross_amounts(env: &Env, a_amount_in: i128, a_min_out: i128, b_amount_in: i128, b_min_out: i128) -> bool {
+fn cross_amounts(
+    env: &Env,
+    a_amount_in: i128,
+    a_min_out: i128,
+    b_amount_in: i128,
+    b_min_out: i128,
+) -> bool {
     let lhs = U256::from_u128(env, a_min_out as u128).mul(&U256::from_u128(env, b_min_out as u128));
     let rhs =
         U256::from_u128(env, a_amount_in as u128).mul(&U256::from_u128(env, b_amount_in as u128));
@@ -1550,7 +1855,12 @@ fn mint_note(env: &Env, h: &Hasher, asset: u32, amount: i128, owner_tag: &BytesN
     }
     let leaf = asset_note_leaf(env, h, asset, amount, owner_tag);
     tree_insert(env, h, &leaf);
-    NoteInserted { asset, amount, owner_tag: owner_tag.clone() }.publish(env);
+    NoteInserted {
+        asset,
+        amount,
+        owner_tag: owner_tag.clone(),
+    }
+    .publish(env);
 }
 
 /// Load a book side (price-sorted, best first), or an empty vector if none yet.
@@ -1569,7 +1879,10 @@ fn book_store(env: &Env, pair_id: u32, side: u32, book: &Vec<OrderEntry>) {
 }
 
 fn book_sequence_load(env: &Env) -> u64 {
-    env.storage().persistent().get(&DataKey::BookSeq).unwrap_or(0)
+    env.storage()
+        .persistent()
+        .get(&DataKey::BookSeq)
+        .unwrap_or(0)
 }
 
 fn book_sequence_store(env: &Env, sequence: u64) {
@@ -1628,13 +1941,17 @@ fn publish_order_removed(
 fn entry_better(env: &Env, a: &OrderEntry, b: &OrderEntry, side: u32) -> bool {
     if side == SIDE_SELL {
         // a.min_out/a.amount_in < b.min_out/b.amount_in
-        let lhs = U256::from_u128(env, a.min_out as u128).mul(&U256::from_u128(env, b.amount_in as u128));
-        let rhs = U256::from_u128(env, b.min_out as u128).mul(&U256::from_u128(env, a.amount_in as u128));
+        let lhs =
+            U256::from_u128(env, a.min_out as u128).mul(&U256::from_u128(env, b.amount_in as u128));
+        let rhs =
+            U256::from_u128(env, b.min_out as u128).mul(&U256::from_u128(env, a.amount_in as u128));
         lhs < rhs
     } else {
         // a.amount_in/a.min_out > b.amount_in/b.min_out
-        let lhs = U256::from_u128(env, a.amount_in as u128).mul(&U256::from_u128(env, b.min_out as u128));
-        let rhs = U256::from_u128(env, b.amount_in as u128).mul(&U256::from_u128(env, a.min_out as u128));
+        let lhs =
+            U256::from_u128(env, a.amount_in as u128).mul(&U256::from_u128(env, b.min_out as u128));
+        let rhs =
+            U256::from_u128(env, b.amount_in as u128).mul(&U256::from_u128(env, a.min_out as u128));
         lhs > rhs
     }
 }
@@ -1757,7 +2074,13 @@ fn bytesn_to_u256(env: &Env, b: &BytesN<32>) -> U256 {
 
 /// AssetNote leaf = Poseidon(asset, amount, owner_tag), folded left-to-right like the circuit's
 /// `hash3`. asset/amount are public field elements; owner_tag is a field element (32-byte word).
-fn asset_note_leaf(env: &Env, h: &Hasher, asset: u32, amount: i128, owner_tag: &BytesN<32>) -> U256 {
+fn asset_note_leaf(
+    env: &Env,
+    h: &Hasher,
+    asset: u32,
+    amount: i128,
+    owner_tag: &BytesN<32>,
+) -> U256 {
     let a = U256::from_u32(env, asset);
     let m = U256::from_u128(env, amount as u128);
     let ot = bytesn_to_u256(env, owner_tag);
@@ -1783,17 +2106,25 @@ fn tree_init(env: &Env, h: &Hasher) {
         let z = zero_at(env, TREE_DEPTH - 1);
         h.compress(env, &z, &z)
     };
-    env.storage().persistent().set(&DataKey::TreeFilled, &filled);
+    env.storage()
+        .persistent()
+        .set(&DataKey::TreeFilled, &filled);
     env.storage().persistent().set(&DataKey::TreeNext, &0u32);
     // empty-tree root (not marked accepted: no leaf to prove).
-    env.storage().persistent().set(&DataKey::TreeRoot, &empty_root);
+    env.storage()
+        .persistent()
+        .set(&DataKey::TreeRoot, &empty_root);
 }
 
 /// Insert a leaf (Tornado-style incremental update: TREE_DEPTH compressions up the rightmost path).
 /// Advances the root and marks the new root accepted. Index bits are LSB-first; bit 0 => the
 /// running node is the LEFT child (sibling = zeros[level]), matching the circuit's membership fold.
 fn tree_insert(env: &Env, h: &Hasher, leaf: &U256) -> U256 {
-    let mut filled: Vec<U256> = env.storage().persistent().get(&DataKey::TreeFilled).unwrap();
+    let mut filled: Vec<U256> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::TreeFilled)
+        .unwrap();
     let idx: u32 = env.storage().persistent().get(&DataKey::TreeNext).unwrap();
 
     let mut cur = leaf.clone();
@@ -1809,8 +2140,12 @@ fn tree_insert(env: &Env, h: &Hasher, leaf: &U256) -> U256 {
         i += 1;
     }
 
-    env.storage().persistent().set(&DataKey::TreeFilled, &filled);
-    env.storage().persistent().set(&DataKey::TreeNext, &(idx + 1));
+    env.storage()
+        .persistent()
+        .set(&DataKey::TreeFilled, &filled);
+    env.storage()
+        .persistent()
+        .set(&DataKey::TreeNext, &(idx + 1));
     env.storage().persistent().set(&DataKey::TreeRoot, &cur);
     // Accept this root for membership proofs. Any past root stays accepted (nullifiers prevent
     // double-spend regardless of root recency); bounded-ring eviction is a later refinement.

@@ -164,6 +164,8 @@ async function executeOrder(
   if (!pair) throw new Error('The requested pair is not registered on this desk.')
   const assetIn = request.side === 'SELL' ? pair.base_asset : pair.quote_asset
   const assetOut = request.side === 'SELL' ? pair.quote_asset : pair.base_asset
+  const base = desk.assets.find((a) => a.asset_id === pair.base_asset)
+  const quote = desk.assets.find((a) => a.asset_id === pair.quote_asset)
   const offer = await exactInput(desk, assetIn, BigInt(request.amount_in))
   const membership = await waitForNoteProof(desk.id, offer.owner_tag)
   await updateNote(offer.id, { operation_id: operationId, operation_state: 'reserved' })
@@ -209,7 +211,22 @@ async function executeOrder(
   await updateNote(offer.id, { status: 'spent', operation_state: 'committed' })
   await updateNote(output.id, { operation_state: 'committed' })
   await syncRecoveryNow()
-  return { output_tag: terms.output_owner_tag }
+  return {
+    output_tag: terms.output_owner_tag,
+    pair_id: request.pair_id,
+    side: request.side,
+    base_symbol: base?.symbol ?? `#${pair.base_asset}`,
+    quote_symbol: quote?.symbol ?? `#${pair.quote_asset}`,
+    base_decimals: base?.decimals ?? 7,
+    quote_decimals: quote?.decimals ?? 7,
+    asset_in: assetIn,
+    symbol_in: desk.assets.find((a) => a.asset_id === assetIn)?.symbol ?? `#${assetIn}`,
+    amount_in: offer.amount,
+    asset_out: assetOut,
+    symbol_out: symbol,
+    min_out: request.min_out,
+    partial_allowed: request.partial_allowed,
+  }
 }
 
 async function executeUnshieldOperation(
@@ -222,7 +239,12 @@ async function executeUnshieldOperation(
   await executeUnshield(desk, note, request.recipient)
   await updateNote(note.id, { operation_state: 'committed' })
   await syncRecoveryNow()
-  return { recipient: request.recipient }
+  return {
+    recipient: request.recipient,
+    asset_id: request.asset_id,
+    symbol: desk.assets.find((a) => a.asset_id === request.asset_id)?.symbol ?? `#${request.asset_id}`,
+    amount: request.amount,
+  }
 }
 
 async function executeCancel(
@@ -258,5 +280,13 @@ async function executeCancel(
   await updateNote(note.id, { status: 'cancelled', cancelledAt: nowMs(), operation_state: 'committed' })
   await updateNote(refund.id, { operation_state: 'committed' })
   await syncRecoveryNow()
-  return { return_owner_tag }
+  return {
+    return_owner_tag,
+    cancelled_note_id: note.id,
+    pair_id: c.pairId,
+    side: c.side,
+    refund_asset_id: c.asset_in,
+    refund_symbol: c.symbol_in,
+    refund_amount: c.amount_in,
+  }
 }

@@ -54,7 +54,11 @@ fn funded_asset(env: &Env, asset_id: u32, amount: i128) -> (AssetInit, Address, 
     let holder = Address::generate(env);
     StellarAssetClient::new(env, &token).mint(&holder, &amount);
     (
-        AssetInit { asset_id, token: Some(token.clone()), kind: AssetKind::Dual },
+        AssetInit {
+            asset_id,
+            token: Some(token.clone()),
+            kind: AssetKind::Dual,
+        },
         token,
         holder,
     )
@@ -105,7 +109,9 @@ fn full_lifecycle_shield_order_settle_unshield() {
         client.root().to_array(),
         "path-server root == on-chain root R2 (the root both order proofs were made against)"
     );
-    std::println!("[1] shield: custody = 100 asset1 + 2000 asset2; tree root R2 reproduced off-chain");
+    std::println!(
+        "[1] shield: custody = 100 asset1 + 2000 asset2; tree root R2 reproduced off-chain"
+    );
 
     // --- 2. ORDER (off-chain) + 3. SETTLE (atomic, two verifies) ----------------------------------
     // A: give 100 asset1, want >=1500 asset2.  B: give 2000 asset2, want >=50 asset1. They cross.
@@ -127,7 +133,9 @@ fn full_lifecycle_shield_order_settle_unshield() {
         client.root().to_array(),
         "path-server root == on-chain root R4 after settle inserted the proceeds notes"
     );
-    std::println!("[2/3] settle: atomic two-proof trade; proceeds notes minted; tree root R4 reproduced");
+    std::println!(
+        "[2/3] settle: atomic two-proof trade; proceeds notes minted; tree root R4 reproduced"
+    );
 
     // --- 4. UNSHIELD A's proceeds note (the SETTLE-created leaf 2) ---------------------------------
     // The membership path for leaf 2 was reconstructed by the path server from the event history;
@@ -136,9 +144,17 @@ fn full_lifecycle_shield_order_settle_unshield() {
     assert_eq!(tc2.balance(&to), 0, "recipient starts with no asset2");
     client.unshield(&to, &bytes(&env, UNSHIELD_PROOF), &bytes(&env, UNSHIELD_PI));
 
-    assert_eq!(tc2.balance(&to), AMT_B, "recipient received A's 2000 asset2 proceeds");
+    assert_eq!(
+        tc2.balance(&to),
+        AMT_B,
+        "recipient received A's 2000 asset2 proceeds"
+    );
     assert_eq!(tc2.balance(&id), 0, "custody asset2 fully withdrawn");
-    assert_eq!(tc1.balance(&id), AMT_A, "B's 100 asset1 proceeds still in custody as a note");
+    assert_eq!(
+        tc1.balance(&id),
+        AMT_A,
+        "B's 100 asset1 proceeds still in custody as a note"
+    );
     std::println!("[4] unshield: A withdrew its settle-created 2000 asset2 note to a real address");
     std::println!("    Full shield -> order -> settle -> unshield lifecycle complete.");
 }

@@ -235,7 +235,7 @@ else
 fi
 
 echo "==> 4. deploy + configure settlement on Stellar testnet"
-( cd "$CONTRACT" && stellar contract build >/dev/null )
+( cd "$CONTRACT" && stellar contract build --optimize >/dev/null )
 WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
 # Retry transient public-RPC failures (e.g. 502 gateway errors) up to 5x. Retry notices go to stderr
 # so they don't pollute values captured via $(inv -- ...).

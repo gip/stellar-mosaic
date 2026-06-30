@@ -13,15 +13,23 @@
 
 .activity-drawer { position: fixed; right: 18px; bottom: 18px; z-index: 20; }
 .activity-toggle { box-shadow: 0 2px 12px #0003; }
-.activity-panel { width: min(420px, calc(100vw - 36px)); max-height: 65vh; overflow: auto; background: white; color: black; border: 2px solid black; padding: 14px; margin-bottom: 8px; box-shadow: 0 6px 24px #0004; }
+.activity-panel { width: min(540px, calc(100vw - 36px)); max-height: 65vh; overflow: auto; background: white; color: black; border: 2px solid black; padding: 14px; margin-bottom: 8px; box-shadow: 0 6px 24px #0004; }
 .activity-item { border-top: 1px solid #aaa; padding: 10px 0; }
 .activity-item small { display: block; margin: 3px 0; }
 .activity-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.activity-group { border-top: 1px solid #aaa; padding: 10px 0 2px; }
+.activity-group h4 { margin: 0 0 6px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.activity-summary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(78px, auto); gap: 10px; align-items: baseline; margin-bottom: 5px; }
+.activity-summary > div { min-width: 0; }
+.activity-summary span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-line { display: grid; grid-template-columns: minmax(0, 1fr) minmax(92px, 136px) minmax(78px, auto); gap: 10px; align-items: baseline; padding: 3px 0; white-space: nowrap; }
+.activity-line > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .activity-source { border: 1px solid #999; border-radius: 999px; padding: 1px 7px; font-size: 0.75rem; line-height: 1.4; }
 .activity-source.local { background: #eef7ff; color: #164b75; border-color: #9fc8e6; }
 .activity-source.remote { background: #f4f0ff; color: #4a2f7a; border-color: #c4b2ee; }
 .activity-transactions, .activity-contracts { margin-top: 4px; }
-.activity-tx-link, .activity-contract-link { display: block; color: #164b75; text-decoration: underline; text-underline-offset: 2px; }
+.activity-tx-link, .activity-contract-link, .activity-address-link { color: #164b75; text-decoration: underline; text-underline-offset: 2px; }
+.activity-tx-link, .activity-contract-link { display: block; }
 .operation-succeeded { color: #167526; }
 .operation-failed, .operation-cancelled { color: #a02020; }
 

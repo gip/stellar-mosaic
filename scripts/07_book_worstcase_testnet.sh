@@ -19,7 +19,7 @@ inv() { stellar contract invoke --id "$CID" --source "$IDENTITY" --network "$NET
 echo ">>> network=$NETWORK identity=$IDENTITY  (full $N-deep book + 4-fill taker)"
 ADMIN=$(stellar keys address "$IDENTITY")
 XLM_SAC=$(stellar contract id asset --asset native --network "$NETWORK")
-( cd "$CONTRACT" && stellar contract build >/dev/null 2>&1 )
+( cd "$CONTRACT" && stellar contract build --optimize >/dev/null 2>&1 )
 WASM="$CONTRACT/target/wasm32v1-none/release/settlement.wasm"
 # Assets/pairs are constructor-only (immutable): assets 1,2 as Dual (XLM SAC) + canonical pair id 0.
 ASSETS_JSON="[{\"asset_id\":1,\"token\":\"$XLM_SAC\",\"kind\":\"Dual\"},{\"asset_id\":2,\"token\":\"$XLM_SAC\",\"kind\":\"Dual\"}]"
