@@ -213,9 +213,37 @@ th {
   padding: 16px;
   margin-bottom: 12px;
 }
+.card-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.card-title-row button {
+  flex: 0 0 auto;
+}
 .card h3 {
   margin: 0 0 6px;
   font-size: 15px;
+}
+.hidden-desks {
+  border-top: 1px solid var(--line);
+  margin: 16px 0 24px;
+  padding-top: 10px;
+}
+.hidden-desks summary {
+  cursor: pointer;
+}
+.hidden-desk-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  border-bottom: 1px solid var(--line);
+  padding: 10px 0;
+}
+.hidden-desk-row > div {
+  min-width: 0;
 }
 .err {
   color: #b00;

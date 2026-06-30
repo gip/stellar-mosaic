@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { errorMessage } from '@mosaic/sdk'
 import { Link } from 'react-router-dom'
 import { api, type Desk } from '../api'
@@ -8,11 +8,52 @@ import CreateDeskForm from '../components/CreateDeskForm'
 import ImportDeskForm from '../components/ImportDeskForm'
 import BaseDeploymentPanel from '../components/BaseDeploymentPanel'
 
+const HIDDEN_DESKS_KEY = 'mosaic.hiddenDesks'
+
+function readHiddenDesks(): string[] {
+  try {
+    const raw = localStorage.getItem(HIDDEN_DESKS_KEY)
+    const parsed: unknown = raw ? JSON.parse(raw) : []
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+function writeHiddenDesks(ids: string[]) {
+  try {
+    localStorage.setItem(HIDDEN_DESKS_KEY, JSON.stringify(ids))
+  } catch {
+    // Keep the in-memory state even if browser storage is unavailable.
+  }
+}
+
 export default function Home() {
   const { address } = useWallet()
   const mosaicServer = useMosaicServer()
   const [desks, setDesks] = useState<Desk[] | null>(null)
+  const [hiddenDeskIds, setHiddenDeskIds] = useState<string[]>(readHiddenDesks)
   const [error, setError] = useState<string | null>(null)
+  const hiddenDeskSet = useMemo(() => new Set(hiddenDeskIds), [hiddenDeskIds])
+  const visibleDesks = desks?.filter((desk) => !hiddenDeskSet.has(desk.id)) ?? null
+  const hiddenDesks = desks?.filter((desk) => hiddenDeskSet.has(desk.id)) ?? []
+
+  function hideDesk(id: string) {
+    setHiddenDeskIds((current) => {
+      if (current.includes(id)) return current
+      const next = [...current, id]
+      writeHiddenDesks(next)
+      return next
+    })
+  }
+
+  function showDesk(id: string) {
+    setHiddenDeskIds((current) => {
+      const next = current.filter((deskId) => deskId !== id)
+      writeHiddenDesks(next)
+      return next
+    })
+  }
 
   async function load() {
     try {
@@ -43,12 +84,18 @@ export default function Home() {
       <h2>Desks</h2>
       {error && <p className="err">{error}</p>}
       {desks === null && !error && <p className="muted">Loading…</p>}
-      {desks?.length === 0 && <p className="muted">No desks yet. Import one below.</p>}
-      {desks?.map((d) => (
+      {visibleDesks?.length === 0 && hiddenDesks.length === 0 && <p className="muted">No desks yet. Import one below.</p>}
+      {visibleDesks?.length === 0 && hiddenDesks.length > 0 && <p className="muted">No visible desks.</p>}
+      {visibleDesks?.map((d) => (
         <div className="card" key={d.id}>
-          <h3>
-            <Link to={`/desk/${d.id}`}>{d.name}</Link>
-          </h3>
+          <div className="card-title-row">
+            <h3>
+              <Link to={`/desk/${d.id}`}>{d.name}</Link>
+            </h3>
+            <button type="button" onClick={() => hideDesk(d.id)} title="Hide from desk list">
+              Hide
+            </button>
+          </div>
           <div className="mono muted">{d.contract_id}</div>
           <div style={{ marginTop: 8 }}>
             {d.pairs.length === 0 && <span className="muted">no pairs</span>}
@@ -71,6 +118,23 @@ export default function Home() {
           )}
         </div>
       ))}
+
+      {hiddenDesks.length > 0 && (
+        <details className="hidden-desks">
+          <summary className="muted">Hidden desks ({hiddenDesks.length})</summary>
+          {hiddenDesks.map((d) => (
+            <div className="hidden-desk-row" key={d.id}>
+              <div>
+                <Link to={`/desk/${d.id}`}>{d.name}</Link>
+                <div className="mono muted">{d.contract_id}</div>
+              </div>
+              <button type="button" onClick={() => showDesk(d.id)}>
+                Show
+              </button>
+            </div>
+          ))}
+        </details>
+      )}
 
       {address ? (
         <>
