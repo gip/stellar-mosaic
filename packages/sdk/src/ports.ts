@@ -10,6 +10,7 @@ import type {
   BaseDeploymentConfig,
   BaseShieldConfig,
   BaseShieldJob,
+  BookSide,
   CatalogAsset,
   ChainNote,
   ClientAction,
@@ -178,6 +179,7 @@ export interface McpClient {
   }): Promise<Desk>;
   baseDeploymentConfig(): Promise<BaseDeploymentConfig>;
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk>;
+  getBook(deskId: string, pair: number, side: number): Promise<BookSide>;
   listAssets(): Promise<CatalogAsset[]>;
   proposeAsset(body: ProposeAssetBody): Promise<CatalogAsset>;
   trustAsset(id: string): Promise<{ ok: boolean }>;

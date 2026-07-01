@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Desk, MosaicLogger, Operation, SubmitResult } from "@mosaic/sdk";
+import type { BookSide, Desk, MosaicLogger, Operation, SubmitResult } from "@mosaic/sdk";
 import { z } from "zod";
 import { AuthService } from "./auth.js";
+import { StellarBookReader } from "./book.js";
 import { runBaseShield, type BaseShieldConfig as RunnerBaseShieldConfig } from "./baseShield.js";
 import { SponsoredStellarDeployHandlers } from "./deploy.js";
 import { createStderrLogger } from "./logging.js";
@@ -30,11 +31,16 @@ export interface DeployHandlers {
   baseDeploymentConfig(): Promise<unknown>;
 }
 
+export interface BookHandlers {
+  getBook(args: { desk_id: string; pair: number; side: number }): Promise<BookSide>;
+}
+
 export interface MosaicMcpOptions {
   auth?: AuthService;
   store?: MosaicStore;
   relays?: RelayHandlers;
   deploy?: DeployHandlers;
+  books?: BookHandlers;
   logger?: MosaicLogger;
   /** Legacy direct Base-shield runner; the durable queued flow is exposed separately. */
   baseShield?: RunnerBaseShieldConfig;
@@ -80,6 +86,9 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   const auth = opts.auth ?? new AuthService(store);
   const relays = opts.relays ?? new StellarCliRelayer({ store });
   const deploy = opts.deploy ?? new SponsoredStellarDeployHandlers();
+  const books = opts.books ?? {
+    getBook: async ({ desk_id, pair, side }) => new StellarBookReader().getBook(await store.getDesk(desk_id), pair, side),
+  };
   const logger = opts.logger ?? createStderrLogger();
   const server = new McpServer({ name: "mosaic-mcp", version: "0.0.0" });
 
@@ -182,6 +191,15 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
       const s = await session(auth, args);
       return ok(await deploy.completeBaseDeployment(String(args.id), body(args), s.address));
     },
+  );
+
+  reg(
+    "get_book",
+    {
+      description: "Read one public on-chain book side for a desk.",
+      inputSchema: { desk_id: z.string(), pair: z.number(), side: z.number() },
+    },
+    async (args) => ok(await books.getBook({ desk_id: String(args.desk_id), pair: Number(args.pair), side: Number(args.side) })),
   );
 
   reg("list_assets", { description: "List catalog assets.", inputSchema: { session: z.string() } }, async (args) => {

@@ -33,6 +33,26 @@ export interface PairDef {
   quote_asset: number;
 }
 
+/** Public resting order as returned by the settlement contract's `book(pair_id, side)` view. */
+export interface BookOrder {
+  order_id: Field;
+  amount_in: Amount;
+  min_out: Amount;
+  remaining_in: Amount;
+  output_owner_tag: Field;
+  cancel_owner_tag: Field;
+  order_leaf: Field;
+  expiry: Amount;
+  partial_allowed: boolean;
+  priority_sequence: Amount;
+}
+
+export interface BookSide {
+  pair: number;
+  side: Side;
+  orders: BookOrder[];
+}
+
 export interface DeskConfig {
   id: string;
   name?: string;

@@ -558,7 +558,7 @@ function NotesTable({
               {noteDisplayStatus(n, bookIndex, noteIndexError)}
             </td>
             <td>
-              {n.status === 'active' && n.cancel && userPubkey && (
+              {n.status === 'active' && orderIsResting(n, bookIndex) && userPubkey && (
                 <CancelOrderButton
                   desk={desk}
                   note={n}
@@ -583,10 +583,12 @@ function noteDisplayStatus(n: Note, bookIndex: BookIndexSnapshot, noteIndexError
   if (noteIndexError) return 'active · index error'
   if (!n.cancel) return 'active · pending index'
   if (bookIndex.status !== 'synced') return 'order submitted · syncing book'
-  const resting = bookIndex.orders.some(
-    (order) => normTag(order.order_leaf) === normTag(n.cancel!.order_leaf),
-  )
-  return resting ? 'resting · awaiting fill' : 'active · pending proceeds'
+  return orderIsResting(n, bookIndex) ? 'resting · awaiting fill' : 'not yet on book'
+}
+
+function orderIsResting(n: Note, bookIndex: BookIndexSnapshot): boolean {
+  if (!n.cancel || bookIndex.status !== 'synced') return false
+  return bookIndex.orders.some((order) => normTag(order.order_leaf) === normTag(n.cancel!.order_leaf))
 }
 
 /** User-facing note kind. Order notes retain the side used when they were submitted. */

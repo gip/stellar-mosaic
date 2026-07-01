@@ -10,6 +10,7 @@ import type {
   BaseDeploymentConfig,
   BaseShieldConfig,
   BaseShieldJob,
+  BookSide,
   CatalogAsset,
   ClientAction,
   Desk,
@@ -173,6 +174,10 @@ class HttpMcpClient implements McpClient {
 
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk> {
     return this.call("complete_base_deployment", this.auth({ id, body }));
+  }
+
+  getBook(deskId: string, pair: number, side: number): Promise<BookSide> {
+    return this.call("get_book", { desk_id: deskId, pair, side });
   }
 
   listAssets(): Promise<CatalogAsset[]> {

@@ -304,6 +304,7 @@ export const api = {
       deskCache('trusted').set(desk.id, desk)
       return desk
     }),
+  getBook: (id: string, pair: number, side: number) => wrap(() => mcp.getBook(id, pair, side)),
   listCatalogAssets: (mode: StorageMode) =>
     wrap(() => mode === 'trusted' ? mcp.listAssets() : localCatalog(mode)),
   proposeAsset: (mode: StorageMode, body: ProposeAssetBody) =>
