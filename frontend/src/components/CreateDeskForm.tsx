@@ -42,7 +42,10 @@ export default function CreateDeskForm({
   const [createdDesk, setCreatedDesk] = useState<Desk | null>(null)
   const [stellarDeployment, setStellarDeployment] = useState<'sponsored' | 'self-funded'>('self-funded')
   const ethereum = useEthereumWallet()
-  const effectiveStellarDeployment = allowSponsored ? stellarDeployment : 'self-funded'
+  const canSelfFund = mode === 'trustless'
+  const effectiveStellarDeployment = canSelfFund ? stellarDeployment : 'sponsored'
+  const canDeployBase = allowSponsored && effectiveStellarDeployment === 'sponsored'
+  const effectiveDeployBase = canDeployBase && deployBase
 
   useEffect(() => {
     let active = true
@@ -70,7 +73,7 @@ export default function CreateDeskForm({
   const effectiveDeploymentConfig = allowSponsored ? deploymentConfig : null
 
   useEffect(() => {
-    if (!deployBase || !ethereum.address || !ethereum.connectedToBase || !effectiveDeploymentConfig?.available || !effectiveDeploymentConfig.abi || !effectiveDeploymentConfig.bytecode || baseAssets.length === 0) {
+    if (!effectiveDeployBase || !ethereum.address || !ethereum.connectedToBase || !effectiveDeploymentConfig?.available || !effectiveDeploymentConfig.abi || !effectiveDeploymentConfig.bytecode || baseAssets.length === 0) {
       return
     }
     estimateBridgeDeployment({
@@ -79,7 +82,7 @@ export default function CreateDeskForm({
       assetIds: baseAssets.map((asset) => assetIdOf(asset.id)),
       tokens: baseAssets.map((asset) => baseTokenAddress(asset) as Address),
     }).then((value) => setEstimatedFee(value.maxFee)).catch(() => setEstimatedFee(null))
-  }, [deployBase, ethereum.address, ethereum.connectedToBase, effectiveDeploymentConfig, baseAssets, assetIdOf])
+  }, [effectiveDeployBase, ethereum.address, ethereum.connectedToBase, effectiveDeploymentConfig, baseAssets, assetIdOf])
 
   function toggleAsset(id: string) {
     const removing = selected.includes(id)
@@ -113,23 +116,26 @@ export default function CreateDeskForm({
       if (assets.length === 0) throw new Error('Select at least one asset.')
       if (assets.length >= 2 && deskPairs.length === 0)
         throw new Error('Add at least one trading pair (base / quote).')
-      if (deployBase && (!ethereum.address || !ethereum.connectedToBase)) {
+      if (effectiveDeployBase && (!ethereum.address || !ethereum.connectedToBase)) {
         throw new Error('Connect MetaMask on Base Sepolia first.')
       }
-      if (deployBase && baseAssets.length === 0) {
+      if (effectiveDeployBase && baseAssets.length === 0) {
         throw new Error('Select at least one asset with a Base Sepolia ERC-20 mapping.')
       }
-      if (deployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
+      if (effectiveDeployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
         throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
       }
-      if (effectiveStellarDeployment === 'self-funded' && deployBase) {
+      if (!canSelfFund && stellarDeployment === 'self-funded') {
+        throw new Error('Trustless browser deploy is only available in Trustless mode.')
+      }
+      if (effectiveStellarDeployment === 'self-funded' && effectiveDeployBase) {
         throw new Error('Base deployment setup currently requires the Mosaic Server sponsored deployment path.')
       }
       const deskBody = {
         name,
         assets,
         pairs: deskPairs,
-        ...(deployBase && ethereum.address
+        ...(effectiveDeployBase && ethereum.address
           ? { base_deployment: { deployer_address: ethereum.address } }
           : {}),
       }
@@ -166,7 +172,7 @@ export default function CreateDeskForm({
     )
   }
 
-  const effectiveEstimatedFee = deployBase && ethereum.connectedToBase ? estimatedFee : null
+  const effectiveEstimatedFee = effectiveDeployBase && ethereum.connectedToBase ? estimatedFee : null
 
   return (
     <form onSubmit={submit} style={{ maxWidth: 560 }}>
@@ -261,32 +267,27 @@ export default function CreateDeskForm({
         </>
       )}
 
-      <label>Stellar deployment</label>
-      <div className="segmented" style={{ marginBottom: 12 }}>
-        <button
-          type="button"
-          aria-pressed={effectiveStellarDeployment === 'sponsored'}
-          disabled={!allowSponsored}
-          title={allowSponsored ? undefined : 'Trust Mosaic Server in the header to enable sponsorship'}
-          onClick={() => setStellarDeployment('sponsored')}
-        >
-          Mosaic Server sponsored
-        </button>
-        <button
-          type="button"
-          aria-pressed={effectiveStellarDeployment === 'self-funded'}
-          onClick={() => setStellarDeployment('self-funded')}
-        >
-          Trustless browser deploy
-        </button>
-      </div>
+      {canSelfFund && (
+        <>
+          <label>Stellar deployment</label>
+          <div className="segmented" style={{ marginBottom: 12 }}>
+            <button
+              type="button"
+              aria-pressed={effectiveStellarDeployment === 'self-funded'}
+              onClick={() => setStellarDeployment('self-funded')}
+            >
+              Trustless browser deploy
+            </button>
+          </div>
+        </>
+      )}
 
-      {ethereum.address && (
+      {ethereum.address && canDeployBase && (
         <div className="base-deployment">
           <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
               type="checkbox"
-              checked={deployBase}
+              checked={effectiveDeployBase}
               disabled={!ethereum.connectedToBase || !effectiveDeploymentConfig?.available || baseAssets.length === 0}
               onChange={(event) => setDeployBase(event.target.checked)}
             />
