@@ -9,6 +9,8 @@ import { addNote } from '../notes'
 import { baseShield } from '../base'
 import { useRecovery } from '../RecoveryContext'
 import { useEthereumWallet } from '../EthereumWalletContext'
+import Field from './ui/Field'
+import ProgressSteps from './ui/ProgressSteps'
 
 const STATUS_LABEL: Record<string, string> = {
   proving: 'Proving the deposit (Groth16)…',
@@ -99,6 +101,19 @@ export default function ShieldFromBaseForm({
   const selectedAssetId = baseAssets.some((a) => a.asset_id === assetId)
     ? assetId
     : (baseAssets[0]?.asset_id ?? -1)
+
+  const selectedAsset = baseAssets.find((a) => a.asset_id === selectedAssetId)
+  const amountError = (() => {
+    if (amount.trim() === '' || !selectedAsset) return null
+    try {
+      return BigInt(toRaw(amount, selectedAsset.decimals)) > 0n ? null : 'Amount must be greater than zero.'
+    } catch {
+      return `Enter a valid amount with at most ${selectedAsset.decimals} decimal places.`
+    }
+  })()
+
+  // The backend job is mid-flight until it reaches a terminal state.
+  const jobRunning = !!job && job.status !== 'active' && job.status !== 'failed'
 
   // Poll the backend job until it reaches a terminal state.
   useEffect(() => {
@@ -195,7 +210,7 @@ export default function ShieldFromBaseForm({
   }
 
   return (
-    <form onSubmit={submit} className="col" style={{ gap: 12 }}>
+    <form onSubmit={submit} className="stack">
       <p className="muted" style={{ margin: 0 }}>
         Lock an asset on Base Sepolia and mint the matching private note on Stellar via a zero-knowledge
         proof. Proving + finality (~10–15 min) run on the backend; the note appears here once minted.
@@ -218,9 +233,8 @@ export default function ShieldFromBaseForm({
       {baseSymbols && baseAssets.length === 0 ? (
         <span className="muted">None of this desk’s assets are available on Base.</span>
       ) : (
-        <div className="row" style={{ alignItems: 'flex-end' }}>
-          <div>
-            <label>Asset</label>
+        <>
+          <Field id="baseshield-asset" label="Asset">
             <select value={selectedAssetId} onChange={(e) => setAssetId(Number(e.target.value))}>
               {baseAssets.map((a) => (
                 <option key={a.asset_id} value={a.asset_id}>
@@ -228,12 +242,12 @@ export default function ShieldFromBaseForm({
                 </option>
               ))}
             </select>
-          </div>
-          <div>
-            <label>Amount ({baseAssets.find((a) => a.asset_id === selectedAssetId)?.symbol ?? ''})</label>
+          </Field>
+          <Field id="baseshield-amount" label={`Amount (${selectedAsset?.symbol ?? ''})`} error={amountError}>
             <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
-          </div>
+          </Field>
           <button
+            className="btn-primary btn-block"
             type="submit"
             disabled={
               busy ||
@@ -241,7 +255,8 @@ export default function ShieldFromBaseForm({
               !baseSymbols ||
               !!disabledReason ||
               !ethereum.connectedToBase ||
-              !config?.available
+              !config?.available ||
+              !!amountError
             }
           >
             {busy
@@ -256,14 +271,17 @@ export default function ShieldFromBaseForm({
                     ? 'Shield from Base'
                     : 'Enable / repair recovery first'}
           </button>
-        </div>
+        </>
       )}
-      {status && <span className="muted">{status}</span>}
-      {error && <span className="err">{error}</span>}
-      {job && (
-        <div className="muted" style={{ fontSize: 13 }}>
-          Deposit #{job.deposit_id}: <strong>{STATUS_LABEL[job.status] ?? job.status}</strong>
-          {job.block_number ? ` · block ${job.block_number}` : ''}
+      <ProgressSteps
+        running={busy || jobRunning}
+        step={jobRunning && job ? STATUS_LABEL[job.status] ?? job.status : status}
+        hint="Base proving + finality run on the backend (~10–15 min). You can leave this page."
+      />
+      {error && <div className="banner err" role="alert">{error}</div>}
+      {job && !jobRunning && (
+        <div className={`status-dot ${job.status === 'active' ? 'ok' : 'err'}`}>
+          Deposit #{job.deposit_id}: {STATUS_LABEL[job.status] ?? job.status}
           {job.status === 'failed' && job.error ? ` — ${job.error}` : ''}
         </div>
       )}

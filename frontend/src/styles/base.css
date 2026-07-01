@@ -1,0 +1,90 @@
+/* Base element styles + page frame. Depends on tokens.css. */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+body {
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* Accessible focus ring on every interactive element. */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-radius: var(--r-1);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color var(--t-fast);
+}
+a:hover {
+  color: var(--accent-hover);
+}
+
+/* Numerics align in a mono face everywhere. */
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  word-break: break-all;
+}
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.muted {
+  color: var(--fg-muted);
+}
+.dim {
+  color: var(--fg-dim);
+}
+
+/* Section headings (used across screens). */
+h2 {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
+  margin: var(--sp-5) 0 var(--sp-3);
+}
+h3 {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  margin: 0 0 var(--sp-2);
+}
+
+/* ---- Page frame ---- */
+.app-main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--sp-5);
+}
+/* The trading workspace fills the width; reading pages (Home/Assets) center a narrower column. */
+.reading {
+  max-width: var(--reading-max);
+  margin: 0 auto;
+}
+
+@media (max-width: 768px) {
+  .app-main {
+    padding: var(--sp-4) var(--sp-3);
+  }
+}

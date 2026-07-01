@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { type Desk } from '../api'
 import type { BookIndexSnapshot, IndexedOrder } from '../bookIndexer'
 import { formatAmount, formatPrice } from '../amount'
@@ -11,9 +12,20 @@ function normLeaf(h: string): string {
   return h.replace(/^0x/i, '').toLowerCase().padStart(64, '0')
 }
 
+/** base/quote raw amounts for an order. Price is always quote-per-base; which of amount_in/min_out
+ * is the base depends on the side (offered asset is base for asks, quote for bids). */
+function baseQuote(o: IndexedOrder, inIsBase: boolean): [bigint, bigint] {
+  const base = BigInt(inIsBase ? o.amount_in : o.min_out)
+  const quote = BigInt(inIsBase ? o.min_out : o.amount_in)
+  return [base, quote]
+}
+
+/** One side of the book (asks or bids) rendered as a depth ladder, highest price on top so the
+ * best price sits adjacent to the spread. Depth bars scale by `remaining_in` within the side. */
 export default function BookView({
   desk,
-  label,
+  tone,
+  showHeader = true,
   inDecimals,
   outDecimals,
   baseDecimals,
@@ -29,17 +41,14 @@ export default function BookView({
   desk: Desk
   pairId: number
   side: number
-  label: string
-  /** Decimals of the asset offered (amount_in / remaining_in). */
+  /** Visual + semantic side: asks show in sell-red, bids in buy-green. */
+  tone: 'ask' | 'bid'
+  showHeader?: boolean
   inDecimals: number
-  /** Decimals of the asset requested (min_out). */
   outDecimals: number
-  /** Pair base/quote decimals, for the quote-per-base price column. */
   baseDecimals: number
   quoteDecimals: number
-  /** Whether the offered (amount_in) asset is the base — true for asks, false for bids. */
   inIsBase: boolean
-  /** The user's local notes — used to find orders we placed (and can cancel). */
   notes: Note[]
   orders: IndexedOrder[]
   bookIndex: BookIndexSnapshot
@@ -49,64 +58,89 @@ export default function BookView({
 }) {
   // Our still-cancellable orders, keyed by on-chain order_leaf, so we can offer a cancel button on
   // the matching book row. Only active order-output notes carry usable cancel authority.
-  const ownByLeaf = new Map(
-    notes
-      .filter((n) => n.cancel && n.status === 'active')
-      .map((n) => [normLeaf(n.cancel!.order_leaf), n] as const),
+  const ownByLeaf = useMemo(
+    () =>
+      new Map(
+        notes
+          .filter((n) => n.cancel && n.status === 'active')
+          .map((n) => [normLeaf(n.cancel!.order_leaf), n] as const),
+      ),
+    [notes],
   )
+
+  // Sort by price descending (best price nearest the spread) and scale depth by max remaining.
+  const rows = useMemo(() => {
+    const withRaw = orders.map((o) => ({ o, bq: baseQuote(o, inIsBase) }))
+    withRaw.sort((a, b) => {
+      const [ab, aq] = a.bq
+      const [bb, bq] = b.bq
+      // price_a vs price_b == aq/ab vs bq/bb == aq*bb vs bq*ab (descending)
+      const lhs = aq * bb
+      const rhs = bq * ab
+      return lhs < rhs ? 1 : lhs > rhs ? -1 : 0
+    })
+    const maxRemaining = withRaw.reduce((m, { o }) => {
+      const r = BigInt(o.remaining_in)
+      return r > m ? r : m
+    }, 1n)
+    return withRaw.map(({ o, bq }) => ({
+      o,
+      px: formatPrice(bq[0], bq[1], baseDecimals, quoteDecimals),
+      depth: Number((BigInt(o.remaining_in) * 100n) / maxRemaining),
+    }))
+  }, [orders, inIsBase, baseDecimals, quoteDecimals])
+
+  if (bookIndex.status === 'error') return <p className="err">Book index unavailable: {bookIndex.error}</p>
+  if (bookIndex.status === 'syncing')
+    return (
+      <p className="muted">
+        Syncing events · {bookIndex.lastSequence}/{bookIndex.targetSequence}
+      </p>
+    )
+  if (rows.length === 0) return <p className="muted">No {tone === 'ask' ? 'asks' : 'bids'}.</p>
+
   return (
-    <div style={{ flex: 1, minWidth: 280 }}>
-      <div className="muted" style={{ fontSize: 13, marginBottom: 4 }}>
-        {label}
-      </div>
-      {bookIndex.status === 'error' && <p className="err">Book index unavailable: {bookIndex.error}</p>}
-      {bookIndex.status === 'syncing' && (
-        <p className="muted">Syncing events · {bookIndex.lastSequence}/{bookIndex.targetSequence}</p>
+    <table className="book-table">
+      {showHeader && (
+        <thead>
+          <tr>
+            <th>Price</th>
+            <th>In</th>
+            <th>Min out</th>
+            <th>Left</th>
+            <th>Part</th>
+            <th />
+          </tr>
+        </thead>
       )}
-      {bookIndex.status === 'synced' && orders.length === 0 && <p className="muted">empty</p>}
-      {orders && orders.length > 0 && (
-        <table>
-          <thead>
-            <tr>
-              <th>price</th>
-              <th>in</th>
-              <th>min out</th>
-              <th>left</th>
-              <th>part</th>
-              <th></th>
+      <tbody>
+        {rows.map(({ o, px, depth }) => {
+          const own = o.order_leaf ? ownByLeaf.get(normLeaf(o.order_leaf)) : undefined
+          return (
+            <tr key={o.order_id} className={`book-row ${tone}${own ? ' own' : ''}`}>
+              <td>
+                <span className="depth-bar" style={{ width: `${depth}%` }} />
+                <span className={`book-px ${tone}`}>{px ?? '—'}</span>
+              </td>
+              <td>{formatAmount(BigInt(o.amount_in), inDecimals)}</td>
+              <td>{formatAmount(BigInt(o.min_out), outDecimals)}</td>
+              <td>{formatAmount(BigInt(o.remaining_in), inDecimals)}</td>
+              <td>{o.partial_allowed ? 'Y' : 'N'}</td>
+              <td>
+                {own && userPubkey && (
+                  <CancelOrderButton
+                    desk={desk}
+                    note={own}
+                    userPubkey={userPubkey}
+                    trustless={trustless}
+                    onDone={onCancel}
+                  />
+                )}
+              </td>
             </tr>
-          </thead>
-          <tbody>
-            {orders.map((o) => {
-              const own = o.order_leaf ? ownByLeaf.get(normLeaf(o.order_leaf)) : undefined
-              // Price is always quote-per-base: amount_in/min_out are base/quote depending on side.
-              const baseRaw = BigInt(inIsBase ? o.amount_in : o.min_out)
-              const quoteRaw = BigInt(inIsBase ? o.min_out : o.amount_in)
-              const px = formatPrice(baseRaw, quoteRaw, baseDecimals, quoteDecimals)
-              return (
-                <tr key={o.order_id}>
-                  <td>{px ?? '—'}</td>
-                  <td>{formatAmount(BigInt(o.amount_in), inDecimals)}</td>
-                  <td>{formatAmount(BigInt(o.min_out), outDecimals)}</td>
-                  <td>{formatAmount(BigInt(o.remaining_in), inDecimals)}</td>
-                  <td>{o.partial_allowed ? 'Y' : 'N'}</td>
-                  <td>
-                    {own && userPubkey && (
-                      <CancelOrderButton
-                        desk={desk}
-                        note={own}
-                        userPubkey={userPubkey}
-                        trustless={trustless}
-                        onDone={onCancel}
-                      />
-                    )}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
-      )}
-    </div>
+          )
+        })}
+      </tbody>
+    </table>
   )
 }

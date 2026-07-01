@@ -1,0 +1,127 @@
+/* Design tokens — terminal-style trading identity.
+ * Dark by default; a light theme is provided under [data-theme="light"].
+ * Everything downstream (base.css, components.css, ui/*) references these vars only. */
+:root {
+  /* Type families */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "JetBrains Mono", monospace;
+
+  /* Type scale (dense terminal) */
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 15px;
+  --fs-lg: 20px;
+  --fs-xl: 28px;
+  --lh-tight: 1.25;
+  --lh: 1.5;
+
+  /* Spacing scale (4px base) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-8: 48px;
+
+  /* Radii */
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 10px;
+  --r-pill: 999px;
+
+  /* Motion */
+  --t-fast: 120ms ease;
+  --t: 160ms ease;
+
+  /* Layout */
+  --header-h: 56px;
+  --content-max: 1440px;
+  --reading-max: 920px;
+
+  /* ---- Dark palette (default) ---- */
+  --bg: #0b0d10;
+  --bg-panel: #111419;
+  --bg-elevated: #161b22;
+  --bg-inset: #0d1014;
+  --bg-hover: #1b212a;
+
+  --fg: #e6e9ef;
+  --fg-muted: #8b94a3;
+  --fg-dim: #5c6573;
+  --fg-onaccent: #04130f;
+
+  --line: #20262e;
+  --line-strong: #2c333d;
+
+  --accent: #2dd4bf;
+  --accent-hover: #5ce0d0;
+  --accent-dim: rgba(45, 212, 191, 0.14);
+
+  --buy: #3fb950;
+  --buy-dim: rgba(63, 185, 80, 0.14);
+  --sell: #f85149;
+  --sell-dim: rgba(248, 81, 73, 0.14);
+
+  --ok: #3fb950;
+  --err: #f85149;
+  --warn: #d29922;
+  --info: #58a6ff;
+
+  --ok-dim: rgba(63, 185, 80, 0.13);
+  --err-dim: rgba(248, 81, 73, 0.13);
+  --warn-dim: rgba(210, 153, 34, 0.13);
+  --info-dim: rgba(88, 166, 255, 0.13);
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
+  --shadow-2: 0 8px 28px rgb(0 0 0 / 50%);
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  color-scheme: dark;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+[data-theme="light"] {
+  --bg: #f6f7f9;
+  --bg-panel: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-inset: #eef0f3;
+  --bg-hover: #eceef2;
+
+  --fg: #111419;
+  --fg-muted: #5b6470;
+  --fg-dim: #8a93a0;
+  --fg-onaccent: #04130f;
+
+  --line: #e2e5ea;
+  --line-strong: #cdd2da;
+
+  --accent: #0d9488;
+  --accent-hover: #0b827a;
+  --accent-dim: rgba(13, 148, 136, 0.12);
+
+  --buy: #1a7f37;
+  --buy-dim: rgba(26, 127, 55, 0.12);
+  --sell: #cf222e;
+  --sell-dim: rgba(207, 34, 46, 0.12);
+
+  --ok: #1a7f37;
+  --err: #cf222e;
+  --warn: #9a6700;
+  --info: #0969da;
+
+  --ok-dim: rgba(26, 127, 55, 0.1);
+  --err-dim: rgba(207, 34, 46, 0.1);
+  --warn-dim: rgba(154, 103, 0, 0.1);
+  --info-dim: rgba(9, 105, 218, 0.1);
+
+  --shadow-1: 0 1px 2px rgb(16 22 26 / 8%);
+  --shadow-2: 0 8px 28px rgb(16 22 26 / 14%);
+  --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  color-scheme: light;
+}

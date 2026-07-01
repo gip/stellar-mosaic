@@ -92,44 +92,48 @@ export default function Home() {
   }, [storageMode.mode])
 
   return (
-    <>
+    <div className="reading">
       <h2>Desks</h2>
-      {error && <p className="err">{error}</p>}
+      {error && <div className="banner err" role="alert">{error}</div>}
       {desks === null && !error && <p className="muted">Loading…</p>}
       {visibleDesks?.length === 0 && hiddenDesks.length === 0 && <p className="muted">No desks yet. Import one below.</p>}
       {visibleDesks?.length === 0 && hiddenDesks.length > 0 && <p className="muted">No visible desks.</p>}
-      {visibleDesks?.map((d) => (
-        <div className="card" key={d.id}>
-          <div className="card-title-row">
-            <h3>
-              <Link to={`/desk/${d.id}`}>{d.name}</Link>
-            </h3>
-            <button type="button" onClick={() => hideDesk(d.id)} title="Hide from desk list">
-              Hide
-            </button>
-          </div>
-          <div className="mono muted">{d.contract_id}</div>
-          <div style={{ marginTop: 8 }}>
-            {d.pairs.length === 0 && <span className="muted">no pairs</span>}
-            {d.pairs.map((p) => {
-              const base = d.assets.find((a) => a.asset_id === p.base_asset)?.symbol ?? p.base_asset
-              const quote =
-                d.assets.find((a) => a.asset_id === p.quote_asset)?.symbol ?? p.quote_asset
-              return (
-                <span className="pill" key={p.pair_id}>
-                  {base}/{quote}
-                </span>
-              )
-            })}
-          </div>
-          {d.base_deployment && (
-            <BaseDeploymentPanel
-              desk={d}
-              onUpdated={(updated) => setDesks((current) => current?.map((desk) => desk.id === updated.id ? updated : desk) ?? null)}
-            />
-          )}
+      {visibleDesks && visibleDesks.length > 0 && (
+        <div className="card-grid">
+          {visibleDesks.map((d) => (
+            <div className="card" key={d.id}>
+              <div className="card-title-row">
+                <h3>
+                  <Link to={`/desk/${d.id}`}>{d.name}</Link>
+                </h3>
+                <button className="btn-ghost btn-sm" type="button" onClick={() => hideDesk(d.id)} title="Hide from desk list">
+                  Hide
+                </button>
+              </div>
+              <div className="mono muted">{d.contract_id}</div>
+              <div className="balances" style={{ marginTop: 'var(--sp-2)' }}>
+                {d.pairs.length === 0 && <span className="muted">no pairs</span>}
+                {d.pairs.map((p) => {
+                  const base = d.assets.find((a) => a.asset_id === p.base_asset)?.symbol ?? p.base_asset
+                  const quote =
+                    d.assets.find((a) => a.asset_id === p.quote_asset)?.symbol ?? p.quote_asset
+                  return (
+                    <span className="pill" key={p.pair_id}>
+                      {base}/{quote}
+                    </span>
+                  )
+                })}
+              </div>
+              {d.base_deployment && (
+                <BaseDeploymentPanel
+                  desk={d}
+                  onUpdated={(updated) => setDesks((current) => current?.map((desk) => desk.id === updated.id ? updated : desk) ?? null)}
+                />
+              )}
+            </div>
+          ))}
         </div>
-      ))}
+      )}
 
       {hiddenDesks.length > 0 && (
         <details className="hidden-desks">
@@ -173,6 +177,6 @@ export default function Home() {
       ) : (
         <p className="muted">Connect your wallet to create or import a desk.</p>
       )}
-    </>
+    </div>
   )
 }

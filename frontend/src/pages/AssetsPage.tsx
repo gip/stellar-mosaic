@@ -53,7 +53,7 @@ export default function AssetsPage() {
   }, [ready, storageMode.mode])
 
   return (
-    <>
+    <div className="reading">
       <h2>Assets</h2>
       <p className="muted">
         A mode-scoped catalog of cross-chain assets. Anyone can propose one; trust an asset to make it
@@ -74,6 +74,6 @@ export default function AssetsPage() {
       ) : (
         <p className="muted">Connect your wallet to propose a new asset.</p>
       )}
-    </>
+    </div>
   )
 }

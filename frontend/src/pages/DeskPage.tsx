@@ -4,10 +4,14 @@ import { errorMessage } from '@mosaic/sdk'
 import { api, type Asset, type Desk } from '../api'
 import { NATIVE_EVM_SENTINEL } from '../baseDeployment'
 import { useWallet } from '../WalletContext'
-import BookView from '../components/BookView'
+import OrderBook from '../components/OrderBook'
 import OrderForm from '../components/OrderForm'
 import ShieldUnshieldPanel from '../components/ShieldUnshieldPanel'
 import CancelOrderButton from '../components/CancelOrderButton'
+import Pane from '../components/ui/Pane'
+import Tabs from '../components/ui/Tabs'
+import StatusDot, { type StatusTone } from '../components/ui/StatusDot'
+import ScrollTable from '../components/ui/ScrollTable'
 import Toasts, { type ToastItem } from '../components/Toasts'
 import { notesForDesk, reconcile, type Note } from '../notes'
 import { formatAmount } from '../amount'
@@ -75,6 +79,8 @@ export default function DeskPage() {
   const [noteIndexError, setNoteIndexError] = useState<string | null>(null)
   const [submitMode, setSubmitMode] = useState<'direct' | 'sponsored'>(submissionMode())
   const [lastVerifiedDesk, setLastVerifiedDesk] = useState<Desk | null>(null)
+  const [activePairId, setActivePairId] = useState<number | null>(null)
+  const [tradeTab, setTradeTab] = useState<'trade' | 'fund'>('trade')
   const bookIndex = useBookIndex(storageMode.mode, desk, networkPassphrase)
 
   const currentVerifiedDesk = useMemo<Desk | null>(() => {
@@ -260,202 +266,244 @@ export default function DeskPage() {
   const active = notes.filter((n) => n.status === 'active').sort((a, b) => mtime(b) - mtime(a))
   const history = notes.filter((n) => n.status !== 'active').sort((a, b) => mtime(b) - mtime(a))
 
+  const pairs = verifiedDesk.pairs
+  const selectedPair = pairs.find((p) => p.pair_id === activePairId) ?? pairs[0] ?? null
+  const bookTone: StatusTone =
+    bookIndex.status === 'synced' ? 'ok' : bookIndex.status === 'error' ? 'err' : 'busy'
+
   return (
     <>
       <Toasts items={toasts} onDismiss={dismissToast} />
-      <h2>{desk.name}</h2>
+      <div className="desk-head">
+        <h1 className="desk-title">{desk.name}</h1>
+        <StatusDot tone={bookTone} title={bookIndex.error ?? undefined}>
+          Book {bookIndex.status} · seq {bookIndex.lastSequence}/{bookIndex.targetSequence}
+        </StatusDot>
+      </div>
 
-      <h2>Address book — desk</h2>
-      <table>
-        <tbody>
-          <tr>
-            <th>Stellar contract</th>
-            <td className="mono">{desk.contract_id}</td>
-          </tr>
-          <tr>
-            <th>Base bridge</th>
-            <td className="mono">
-              {desk.base_deployment?.bridge_address ? (
-                desk.base_deployment.bridge_address
-              ) : (
-                <span className="muted">
-                  {desk.base_deployment
-                    ? `not deployed (${desk.base_deployment.status})`
-                    : 'not deployed'}
-                </span>
-              )}
-            </td>
-          </tr>
-          <tr>
-            <th>Sponsor (main)</th>
-            <td className="mono">{desk.sponsor_pubkey || <span className="muted">—</span>}</td>
-          </tr>
-          <tr>
-            <th>Tree root</th>
-            <td className="mono">{root ?? '…'}</td>
-          </tr>
-          <tr>
-            <th>Submission</th>
-            <td>
-              {trustlessDesk ? (
-                <span>Self-submit (you pay network fees)</span>
-              ) : (
-                <select
-                  value={submitMode}
-                  onChange={(event) => {
-                    const mode = event.target.value as 'direct' | 'sponsored'
-                    setSubmissionMode(mode)
-                    setSubmitMode(mode)
-                  }}
-                >
-                  <option value="direct">Self-submit (you pay network fees)</option>
-                  <option value="sponsored">Desk sponsor</option>
-                </select>
-              )}
-            </td>
-          </tr>
-          <tr>
-            <th>Book index</th>
-            <td>
-              {bookIndex.status} · ledger {bookIndex.lastLedger} · sequence {bookIndex.lastSequence}/
-              {bookIndex.targetSequence}
-              {bookIndex.error && <div className="err">{bookIndex.error}</div>}
-            </td>
-          </tr>
-          {verifiedDesk.assets.map((a) => (
-            <tr key={a.asset_id}>
-              <th>
-                {a.symbol} (id {a.asset_id})
-              </th>
-              <td className="mono">{assetTokenCell(a, desk)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="desk-grid">
+        {/* Left rail — balances, notes, desk config */}
+        <div className="stack">
+          <Pane title="Shielded balances">
+            {balances(notes, dec).length > 0 ? (
+              <div className="balances">
+                {balances(notes, dec).map(([s, amt]) => (
+                  <span className="pill accent" key={s}>
+                    {s} {amt}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">No shielded balance yet.</p>
+            )}
+          </Pane>
 
-      <ShieldUnshieldPanel
-        desk={displayDesk}
-        notes={notes}
-        userPubkey={address}
-        disabledReason={fundActionsDisabled}
-        trustless={trustlessDesk}
-        onRecheck={bookIndex.status === 'error' ? bookIndex.recheck : undefined}
-        onDone={reloadNotes}
-      />
+          <Pane title="My notes">
+            {notes.length === 0 ? (
+              <p className="muted">No notes yet.</p>
+            ) : (
+              <>
+                {active.length > 0 && (
+                  <details open>
+                    <summary>Active notes ({active.length})</summary>
+                    <ScrollTable>
+                      <NotesTable
+                        notes={active}
+                        dec={dec}
+                        desk={verifiedDesk}
+                        bookIndex={bookIndex}
+                        noteIndexError={noteIndexError}
+                        userPubkey={address ?? ''}
+                        trustless={trustlessDesk}
+                        onDone={reloadNotes}
+                      />
+                    </ScrollTable>
+                  </details>
+                )}
+                {history.length > 0 && (
+                  <details>
+                    <summary className="muted">Spent &amp; cancelled ({history.length})</summary>
+                    <ScrollTable>
+                      <NotesTable
+                        notes={history}
+                        dec={dec}
+                        desk={verifiedDesk}
+                        bookIndex={bookIndex}
+                        noteIndexError={noteIndexError}
+                        userPubkey={address ?? ''}
+                        trustless={trustlessDesk}
+                        onDone={reloadNotes}
+                      />
+                    </ScrollTable>
+                  </details>
+                )}
+              </>
+            )}
+          </Pane>
 
-      <h2>Place limit order</h2>
-      {address && orderDesk && orderDesk.pairs.length > 0 ? (
-        <OrderForm
-          desk={orderDesk}
-          notes={notes}
-          bookIndex={bookIndex}
-          userPubkey={address}
-          trustless={trustlessDesk}
-          disabledReason={orderDisabledReason}
-          onDone={reloadNotes}
-        />
-      ) : (
-        <p className="muted">
-          {address
-            ? bookIndex.status === 'synced'
-              ? 'No pairs registered.'
-              : 'Waiting for verified book synchronization.'
-            : 'Connect your wallet to place orders.'}
-        </p>
-      )}
-
-      <h2>Address book — my notes</h2>
-      {notes.length === 0 ? (
-        <p className="muted">No notes yet.</p>
-      ) : (
-        <>
-          {balances(notes, dec).length > 0 && (
-            <p>
-              {balances(notes, dec).map(([s, amt]) => (
-                <span className="pill" key={s}>
-                  {s} {amt}
-                </span>
-              ))}
-            </p>
-          )}
-          {active.length > 0 && (
+          <Pane title="Desk details">
             <details>
-              <summary>Active notes ({active.length})</summary>
-              <NotesTable
-                notes={active}
-                dec={dec}
-                desk={verifiedDesk}
-                bookIndex={bookIndex}
-                noteIndexError={noteIndexError}
-                userPubkey={address ?? ''}
-                trustless={trustlessDesk}
-                onDone={reloadNotes}
-              />
+              <summary className="muted">Addresses &amp; config</summary>
+              <ScrollTable>
+                <table>
+                  <tbody>
+                    <tr>
+                      <th>Stellar contract</th>
+                      <td className="mono">{desk.contract_id}</td>
+                    </tr>
+                    <tr>
+                      <th>Base bridge</th>
+                      <td className="mono">
+                        {desk.base_deployment?.bridge_address ? (
+                          desk.base_deployment.bridge_address
+                        ) : (
+                          <span className="muted">
+                            {desk.base_deployment
+                              ? `not deployed (${desk.base_deployment.status})`
+                              : 'not deployed'}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>Sponsor (main)</th>
+                      <td className="mono">{desk.sponsor_pubkey || <span className="muted">—</span>}</td>
+                    </tr>
+                    <tr>
+                      <th>Tree root</th>
+                      <td className="mono">{root ?? '…'}</td>
+                    </tr>
+                    <tr>
+                      <th>Submission</th>
+                      <td>
+                        {trustlessDesk ? (
+                          <span>Self-submit (you pay network fees)</span>
+                        ) : (
+                          <select
+                            value={submitMode}
+                            onChange={(event) => {
+                              const mode = event.target.value as 'direct' | 'sponsored'
+                              setSubmissionMode(mode)
+                              setSubmitMode(mode)
+                            }}
+                          >
+                            <option value="direct">Self-submit (you pay network fees)</option>
+                            <option value="sponsored">Desk sponsor</option>
+                          </select>
+                        )}
+                      </td>
+                    </tr>
+                    <tr>
+                      <th>Book index</th>
+                      <td>
+                        {bookIndex.status} · ledger {bookIndex.lastLedger} · sequence{' '}
+                        {bookIndex.lastSequence}/{bookIndex.targetSequence}
+                        {bookIndex.error && <div className="err">{bookIndex.error}</div>}
+                      </td>
+                    </tr>
+                    {verifiedDesk.assets.map((a) => (
+                      <tr key={a.asset_id}>
+                        <th>
+                          {a.symbol} (id {a.asset_id})
+                        </th>
+                        <td className="mono">{assetTokenCell(a, desk)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </ScrollTable>
             </details>
-          )}
-          {history.length > 0 && (
-            <details>
-              <summary className="muted">Spent &amp; cancelled notes ({history.length})</summary>
-              <NotesTable
-                notes={history}
-                dec={dec}
-                desk={verifiedDesk}
-                bookIndex={bookIndex}
-                noteIndexError={noteIndexError}
-                userPubkey={address ?? ''}
-                trustless={trustlessDesk}
-                onDone={reloadNotes}
-              />
-            </details>
-          )}
-        </>
-      )}
-
-      <h2>Order book</h2>
-      {verifiedDesk.pairs.length === 0 && bookIndex.status === 'synced' && <p className="muted">No pairs registered.</p>}
-      {verifiedDesk.pairs.map((p) => (
-        <div className="card" key={p.pair_id}>
-          <h3>
-            {sym(p.base_asset)}/{sym(p.quote_asset)} <span className="muted">· pair {p.pair_id}</span>
-          </h3>
-          <div className="row">
-            <BookView
-              desk={verifiedDesk}
-              pairId={p.pair_id}
-              side={1}
-              label="Asks (sell base)"
-              inDecimals={dec(p.base_asset)}
-              outDecimals={dec(p.quote_asset)}
-              baseDecimals={dec(p.base_asset)}
-              quoteDecimals={dec(p.quote_asset)}
-              inIsBase={true}
-              notes={notes}
-              orders={ordersFor(bookIndex, p.pair_id, 1)}
-              bookIndex={bookIndex}
-              userPubkey={address ?? ''}
-              trustless={trustlessDesk}
-              onCancel={reloadNotes}
-            />
-            <BookView
-              desk={verifiedDesk}
-              pairId={p.pair_id}
-              side={0}
-              label="Bids (buy base)"
-              inDecimals={dec(p.quote_asset)}
-              outDecimals={dec(p.base_asset)}
-              baseDecimals={dec(p.base_asset)}
-              quoteDecimals={dec(p.quote_asset)}
-              inIsBase={false}
-              notes={notes}
-              orders={ordersFor(bookIndex, p.pair_id, 0)}
-              bookIndex={bookIndex}
-              userPubkey={address ?? ''}
-              trustless={trustlessDesk}
-              onCancel={reloadNotes}
-            />
-          </div>
+          </Pane>
         </div>
-      ))}
+
+        {/* Center — order book */}
+        <Pane title="Order book">
+          {pairs.length === 0 ? (
+            <p className="muted">
+              {bookIndex.status === 'synced'
+                ? 'No pairs registered.'
+                : 'Waiting for verified book synchronization.'}
+            </p>
+          ) : (
+            <>
+              {pairs.length > 1 && (
+                <Tabs
+                  ariaLabel="Trading pair"
+                  value={String(selectedPair?.pair_id)}
+                  onChange={(id) => setActivePairId(Number(id))}
+                  tabs={pairs.map((p) => ({
+                    id: String(p.pair_id),
+                    label: `${sym(p.base_asset)}/${sym(p.quote_asset)}`,
+                  }))}
+                />
+              )}
+              {selectedPair && (
+                <OrderBook
+                  desk={verifiedDesk}
+                  pair={selectedPair}
+                  sym={sym}
+                  dec={dec}
+                  asks={ordersFor(bookIndex, selectedPair.pair_id, 1)}
+                  bids={ordersFor(bookIndex, selectedPair.pair_id, 0)}
+                  bookIndex={bookIndex}
+                  notes={notes}
+                  userPubkey={address ?? ''}
+                  trustless={trustlessDesk}
+                  onCancel={reloadNotes}
+                />
+              )}
+            </>
+          )}
+        </Pane>
+
+        {/* Right rail — trade + fund */}
+        <div className="stack">
+          <Pane>
+            <Tabs
+              ariaLabel="Trade or fund"
+              value={tradeTab}
+              onChange={(id) => setTradeTab(id as 'trade' | 'fund')}
+              panelId="trade-fund-panel"
+              tabs={[
+                { id: 'trade', label: 'Trade' },
+                { id: 'fund', label: 'Fund' },
+              ]}
+            >
+              {tradeTab === 'trade' ? (
+                address && orderDesk && orderDesk.pairs.length > 0 ? (
+                  <OrderForm
+                    desk={orderDesk}
+                    notes={notes}
+                    bookIndex={bookIndex}
+                    userPubkey={address}
+                    trustless={trustlessDesk}
+                    disabledReason={orderDisabledReason}
+                    onDone={reloadNotes}
+                  />
+                ) : (
+                  <p className="muted">
+                    {address
+                      ? bookIndex.status === 'synced'
+                        ? 'No pairs registered.'
+                        : 'Waiting for verified book synchronization.'
+                      : 'Connect your wallet to place orders.'}
+                  </p>
+                )
+              ) : (
+                <ShieldUnshieldPanel
+                  desk={displayDesk}
+                  notes={notes}
+                  userPubkey={address}
+                  disabledReason={fundActionsDisabled}
+                  trustless={trustlessDesk}
+                  onRecheck={bookIndex.status === 'error' ? bookIndex.recheck : undefined}
+                  onDone={reloadNotes}
+                />
+              )}
+            </Tabs>
+          </Pane>
+        </div>
+      </div>
     </>
   )
 }

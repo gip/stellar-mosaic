@@ -8,6 +8,9 @@ import type { Note } from '../notes'
 import { useRecovery } from '../RecoveryContext'
 import { useActivity } from '../ActivityContext'
 import { unshieldTrustless } from '../trustless'
+import Field from './ui/Field'
+import ProgressSteps from './ui/ProgressSteps'
+import Button from './ui/Button'
 
 function parseAmount(amount: string, decimals: number): bigint | null {
   if (amount.trim() === '') return null
@@ -58,14 +61,21 @@ export default function UnshieldForm({
     plan.kind !== 'impossible' &&
     recipientValid
 
-  const preview = (() => {
+  // Field-level error for the amount input (blank while empty).
+  const amountError = (() => {
     if (amount.trim() === '') return null
     if (amountRaw == null) return `Enter a valid amount with at most ${decimals} decimal places.`
     if (amountRaw <= 0n) return 'Amount must be greater than zero.'
-    if (amountRaw > maxRaw) {
-      return `Exceeds max ${formatAmount(maxRaw, decimals)} ${asset?.symbol ?? `#${assetId}`}.`
-    }
+    if (amountRaw > maxRaw) return `Exceeds max ${formatAmount(maxRaw, decimals)} ${asset?.symbol ?? `#${assetId}`}.`
     if (plan?.kind === 'impossible') return plan.reason
+    return null
+  })()
+  const recipientError =
+    recipient.trim() !== '' && !recipientValid ? 'Enter a valid Stellar G… account.' : null
+
+  // Non-error preview of what will happen (assembly steps).
+  const preview = (() => {
+    if (!amountRaw || amountRaw <= 0n || amountError) return null
     if (plan?.kind === 'assemble') {
       const singleSplit = plan.steps.length === 1 && plan.steps[0].op === 'split'
       if (singleSplit) return 'Will split a note to the exact amount, then unshield it.'
@@ -88,14 +98,14 @@ export default function UnshieldForm({
     setStatus(null)
     try {
       if (trustless) {
-        setStatus('Submitting with Freighter…')
+        setStatus('Proving & submitting in browser…')
         await unshieldTrustless(desk, {
           address: userPubkey,
           assetId,
           amount: amountRaw.toString(),
           recipient: recipient.trim(),
         })
-        setStatus('Unshielded')
+        setStatus('Unshielded ✓')
       } else {
         setStatus('Queueing unshield…')
         const operation = await activity.enqueue({
@@ -114,9 +124,8 @@ export default function UnshieldForm({
   }
 
   return (
-    <form onSubmit={submit} className="row" style={{ alignItems: 'flex-end' }}>
-      <div>
-        <label>Asset</label>
+    <form onSubmit={submit} className="stack">
+      <Field id="unshield-asset" label="Asset">
         <select value={assetId} onChange={(e) => setAssetId(Number(e.target.value))}>
           {desk.assets.map((a) => (
             <option key={a.asset_id} value={a.asset_id}>
@@ -124,37 +133,47 @@ export default function UnshieldForm({
             </option>
           ))}
         </select>
-      </div>
-      <div>
-        <label>
-          Amount ({asset?.symbol ?? ''}) · max {formatAmount(maxRaw, decimals)}
-        </label>
-        <input
-          value={amount}
-          onChange={(e) => setAmount(e.target.value)}
-          inputMode="decimal"
-          placeholder={formatAmount(maxRaw, decimals)}
-        />
-        <button
-          type="button"
-          style={{ padding: '2px 8px', marginLeft: 6 }}
-          onClick={() => setAmount(formatAmount(maxRaw, decimals))}
-          disabled={maxRaw <= 0n || busy}
-        >
-          max
-        </button>
-      </div>
-      <div>
-        <label>Recipient</label>
+      </Field>
+      <Field
+        id="unshield-amount"
+        label={`Amount (${asset?.symbol ?? ''})`}
+        help={`Max ${formatAmount(maxRaw, decimals)} available.`}
+        error={amountError}
+      >
+        <div className="field-row">
+          <input
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            inputMode="decimal"
+            placeholder={formatAmount(maxRaw, decimals)}
+            style={{ flex: 1 }}
+          />
+          <Button
+            size="sm"
+            onClick={() => setAmount(formatAmount(maxRaw, decimals))}
+            disabled={maxRaw <= 0n || busy}
+          >
+            Max
+          </Button>
+        </div>
+      </Field>
+      <Field
+        id="unshield-recipient"
+        label="Recipient"
+        help="Stellar account to receive the withdrawn asset."
+        error={recipientError}
+      >
         <input
           className="mono"
           value={recipient}
           onChange={(e) => setRecipient(e.target.value)}
           placeholder="G…"
-          size={58}
+          style={{ width: '100%' }}
         />
-      </div>
+      </Field>
+      {preview && !error && <div className="muted">{preview}</div>}
       <button
+        className="btn-primary btn-block"
         type="submit"
         disabled={busy || !valid || !!disabledReason || (!!needsRecovery && !recoveryReady)}
       >
@@ -162,16 +181,13 @@ export default function UnshieldForm({
           ? 'Working…'
           : disabledReason
             ? 'Waiting for contract verification'
-          : needsRecovery && !recoveryReady
-            ? 'Enable / repair recovery to prepare note'
-            : 'Unshield'}
+            : needsRecovery && !recoveryReady
+              ? 'Enable / repair recovery to prepare note'
+              : 'Unshield'}
       </button>
-      {!recipientValid && recipient.trim() !== '' && !error && (
-        <span className="err">Enter a valid Stellar G… account.</span>
-      )}
-      {preview && !error && <span className="muted">{preview}</span>}
-      {status && <span className="muted">{status}</span>}
-      {error && <span className="err">{error}</span>}
+      <ProgressSteps running={busy} step={status} />
+      {!busy && status && !error && <div className="status-dot ok">{status}</div>}
+      {error && <div className="banner err" role="alert">{error}</div>}
     </form>
   )
 }

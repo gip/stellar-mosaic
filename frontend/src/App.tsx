@@ -1,7 +1,9 @@
-import { Link, Outlet } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useWallet } from './WalletContext'
 import RecoveryPanel from './components/RecoveryPanel'
 import ActivityDrawer from './components/ActivityDrawer'
+import StatusDot from './components/ui/StatusDot'
 import { useEthereumWallet } from './EthereumWalletContext'
 import { useMosaicServer } from './MosaicServerContext'
 import { useStorageMode } from './StorageModeContext'
@@ -10,36 +12,73 @@ function short(addr: string): string {
   return addr.length > 12 ? `${addr.slice(0, 5)}…${addr.slice(-4)}` : addr
 }
 
+function navClass({ isActive }: { isActive: boolean }): string {
+  return isActive ? 'active' : ''
+}
+
 export default function App() {
   const { address, connect, disconnect, connecting, error } = useWallet()
   const ethereum = useEthereumWallet()
   const mosaicServer = useMosaicServer()
   const storageMode = useStorageMode()
+  const [dismissed, setDismissed] = useState<string[]>([])
+  const navigate = useNavigate()
+  const location = useLocation()
+
+  // A desk only exists in one data mode, so leaving that mode should not keep us
+  // on its now-stale desk page — send the user back home instead.
+  useEffect(() => {
+    function onModeChanged() {
+      if (location.pathname.startsWith('/desk/')) navigate('/')
+    }
+    window.addEventListener('mosaic-storage-mode-changed', onModeChanged)
+    return () => window.removeEventListener('mosaic-storage-mode-changed', onModeChanged)
+  }, [location.pathname, navigate])
 
   async function logOutStellar() {
     await mosaicServer.disconnect().catch(() => {})
     await disconnect()
   }
 
+  const errors = useMemo(
+    () => [error, mosaicServer.error, ethereum.error].filter((e): e is string => !!e),
+    [error, mosaicServer.error, ethereum.error],
+  )
+  const activeErrors = errors.filter((e) => !dismissed.includes(e))
+
   return (
     <>
       <header className="topbar">
-        <h1>
+        <h1 className="brand">
           <Link to="/">STELLAR MOSAIC</Link>
         </h1>
         <nav className="topnav">
-          <Link to="/">Desks</Link>
-          <Link to="/assets">Assets</Link>
+          <NavLink to="/" end className={navClass}>
+            Desks
+          </NavLink>
+          <NavLink to="/assets" className={navClass}>
+            Assets
+          </NavLink>
         </nav>
+        <div className="topbar-spacer" />
         <div className="wallet-stack">
           <div className="wallet-chain">
             <span className="chain-label">Stellar Testnet</span>
             {address ? (
               <div className="wallet-controls">
-                <button className="address-button mono" type="button" title={`Copy ${address}`} onClick={() => void navigator.clipboard.writeText(address)}>
-                  {short(address)}
+                <StatusDot tone="ok" title="Connected">
+                  <button
+                    className="address-button mono"
+                    type="button"
+                    title={`Copy ${address}`}
+                    onClick={() => void navigator.clipboard.writeText(address)}
+                  >
+                    {short(address)}
+                  </button>
+                </StatusDot>
+                <button type="button" onClick={() => void logOutStellar()}>
+                  Log out
                 </button>
-                <button type="button" onClick={() => void logOutStellar()}>Log out</button>
               </div>
             ) : (
               <button type="button" onClick={() => void connect()} disabled={connecting}>
@@ -74,11 +113,20 @@ export default function App() {
             <span className="chain-label">Base Sepolia</span>
             {ethereum.address ? (
               <div className="wallet-controls">
-                <button className="address-button mono" type="button" title={`Copy ${ethereum.address}`} onClick={() => void navigator.clipboard.writeText(ethereum.address!)}>
-                  {short(ethereum.address)}
+                <StatusDot tone={ethereum.connectedToBase ? 'ok' : 'warn'} title={ethereum.connectedToBase ? 'Connected' : 'Wrong network'}>
+                  <button
+                    className="address-button mono"
+                    type="button"
+                    title={`Copy ${ethereum.address}`}
+                    onClick={() => void navigator.clipboard.writeText(ethereum.address!)}
+                  >
+                    {short(ethereum.address)}
+                  </button>
+                </StatusDot>
+                {!ethereum.connectedToBase && <span className="warn">Wrong network</span>}
+                <button type="button" onClick={ethereum.disconnect}>
+                  Disconnect
                 </button>
-                {!ethereum.connectedToBase && <span className="err">Wrong network</span>}
-                <button type="button" onClick={ethereum.disconnect}>Disconnect</button>
               </div>
             ) : (
               <button type="button" onClick={() => void ethereum.connect().catch(() => {})} disabled={!address || ethereum.connecting}>
@@ -86,12 +134,26 @@ export default function App() {
               </button>
             )}
           </div>
-          {error && <span className="err">{error}</span>}
-          {mosaicServer.error && <span className="err">{mosaicServer.error}</span>}
-          {ethereum.error && <span className="err">{ethereum.error}</span>}
         </div>
       </header>
-      <main>
+      <main className="app-main">
+        {activeErrors.length > 0 && (
+          <div className="banner err" role="alert" style={{ marginBottom: 'var(--sp-4)' }}>
+            <div className="banner-body">
+              {activeErrors.map((e) => (
+                <div key={e}>{e}</div>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="btn-ghost btn-sm"
+              aria-label="Dismiss"
+              onClick={() => setDismissed((d) => [...d, ...activeErrors])}
+            >
+              ✕
+            </button>
+          </div>
+        )}
         <RecoveryPanel />
         <Outlet />
       </main>

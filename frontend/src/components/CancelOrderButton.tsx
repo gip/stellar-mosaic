@@ -41,7 +41,7 @@ export default function CancelOrderButton({
     setError(null)
     try {
       if (trustless) {
-        setStatus('Submitting with Freighter…')
+        setStatus('Proving cancel…')
         await cancelOrderTrustless(desk, { address: userPubkey, noteId: note.id })
         setStatus('Cancelled')
       } else {
@@ -60,10 +60,19 @@ export default function CancelOrderButton({
 
   return (
     <>
-      <button type="button" onClick={cancel} disabled={busy || !recoveryReady}>
-        {busy ? 'Working…' : recoveryReady ? 'Cancel' : 'Repair recovery to cancel'}
+      <button className="btn-danger btn-sm" type="button" onClick={cancel} disabled={busy || !recoveryReady}>
+        {busy ? 'Working…' : recoveryReady ? 'Cancel' : 'Repair recovery'}
       </button>
-      {status && <span className="muted"> {status}</span>}
+      {busy && status && (
+        <span className="status-dot busy" style={{ marginLeft: 6 }} title={status}>
+          {status}
+        </span>
+      )}
+      {!busy && status && !error && (
+        <span className="status-dot ok" style={{ marginLeft: 6 }}>
+          {status}
+        </span>
+      )}
       {error && <span className="err"> {error}</span>}
     </>
   )
