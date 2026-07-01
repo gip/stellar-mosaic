@@ -60,6 +60,9 @@ export default function App() {
           <NavLink to="/assets" className={navClass}>
             Assets
           </NavLink>
+          <NavLink to="/activity" className={navClass}>
+            Activity
+          </NavLink>
         </nav>
         <div className="topbar-spacer" />
         <ThemeToggle />

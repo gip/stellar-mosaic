@@ -9,6 +9,7 @@ import { useMosaicServer } from './MosaicServerContext'
 import { browserActivityStore } from './sdk/indexedDbStore'
 import { useStorageMode } from './StorageModeContext'
 import { ensureBackendSession } from './auth'
+import { syncTrustedActivity } from './sdk/activitySync'
 
 interface ActivityState {
   operations: Operation[]
@@ -34,6 +35,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const running = useRef(false)
+  const activitySyncRunning = useRef(false)
   const eventCursor = useRef(0)
 
   const authenticate = useCallback(async () => {
@@ -135,6 +137,34 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       window.clearInterval(interval)
     }
   }, [connected, history, refresh, refreshActivities, wallet.address, wallet.networkPassphrase])
+
+  useEffect(() => {
+    if (!connected || !storageMode.trusted || !wallet.address || !wallet.networkPassphrase) return
+    let alive = true
+    const tick = async () => {
+      if (!alive || activitySyncRunning.current) return
+      activitySyncRunning.current = true
+      try {
+        const result = await syncTrustedActivity({
+          address: wallet.address!,
+          network: wallet.networkPassphrase!,
+          store: activityStore,
+          api,
+        })
+        if (alive && result.pulled > 0) await refreshActivities()
+      } catch {
+        /* Activity mirroring is best-effort; local IndexedDB remains the UI source of truth. */
+      } finally {
+        activitySyncRunning.current = false
+      }
+    }
+    void tick()
+    const interval = window.setInterval(() => void tick(), 1500)
+    return () => {
+      alive = false
+      window.clearInterval(interval)
+    }
+  }, [activityStore, connected, refreshActivities, storageMode.trusted, wallet.address, wallet.networkPassphrase])
 
   // Any tab may poll, but the backend lease lets only one execute the private step.
   useEffect(() => {

@@ -7,6 +7,7 @@ import {
   makeNoirCompressor,
   replayNoteEvents,
   type AssetDef,
+  type ActivityEvent,
   type AuthChallenge,
   type AuthSession,
   type BaseDeploymentConfig as SdkBaseDeploymentConfig,
@@ -394,4 +395,6 @@ export const api = {
   failClientAction: (id: string, lease_token: string, error: string, retryable = false) =>
     wrap(() => mcp.failClientAction(id, lease_token, error, retryable)),
   operationEventsSince: (cursor: number) => wrap(() => mcp.operationEventsSince(cursor)),
+  recordActivity: (events: ActivityEvent[]) => wrap(() => mcp.recordActivity(events)),
+  activitySince: (cursor: number) => wrap(() => mcp.activitySince(cursor)),
 }

@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  ActivityEvent,
   AuthSession,
   BaseShieldJob,
   CatalogAsset,
@@ -13,6 +14,7 @@ import type {
   OperationRequest,
   WalletBackupEnvelope,
 } from "@mosaic/sdk";
+import { normalizeActivityEvent } from "@mosaic/sdk";
 
 const now = () => Date.now();
 const SESSION_TTL_MS = 60 * 60_000;
@@ -53,6 +55,8 @@ export interface MosaicStore {
   completeAction(address: string, id: string, leaseToken: string, result: unknown): Promise<Operation>;
   failAction(address: string, id: string, leaseToken: string, error: string, retryable: boolean): Promise<Operation>;
   eventsAfter(address: string, cursor: number): Promise<OperationEvent[]>;
+  recordActivity(address: string, network: string, events: ActivityEvent[]): Promise<ActivityEvent[]>;
+  activityAfter(address: string, network: string, cursor: number): Promise<ActivityEvent[]>;
   getWalletBackup(backupId: string): Promise<WalletBackupEnvelope | null>;
   putWalletBackup(
     backupId: string,
@@ -163,9 +167,13 @@ export class MemoryMosaicStore implements MosaicStore {
   private readonly operationKeys = new Map<string, string>();
   private readonly actions = new Map<string, ClientAction & { address: string; status: string; result?: unknown }>();
   private readonly events: OperationEvent[] = [];
+  private readonly activityEvents: ActivityEvent[] = [];
+  private readonly activityById = new Map<string, ActivityEvent>();
+  private readonly activityByIdempotency = new Map<string, ActivityEvent>();
   private readonly backups = new Map<string, StoredBackup>();
   private readonly baseShields = new Map<string, BaseShieldJob>();
   private cursor = 0;
+  private activityCursor = 0;
 
   constructor() {
     for (const asset of defaultCatalog(now())) this.assets.set(asset.id, asset);
@@ -376,6 +384,19 @@ export class MemoryMosaicStore implements MosaicStore {
     return this.events.filter((event) => event.cursor > cursor && this.operations.get(event.operation_id)?.address === address).map(clone);
   }
 
+  async recordActivity(address: string, network: string, events: ActivityEvent[]): Promise<ActivityEvent[]> {
+    const out: ActivityEvent[] = [];
+    for (const event of events) out.push(this.recordOneActivity(address, network, event));
+    return out.map(clone);
+  }
+
+  async activityAfter(address: string, network: string, cursor: number): Promise<ActivityEvent[]> {
+    return this.activityEvents
+      .filter((event) => event.wallet_address === address && event.network === network && (event.cursor ?? 0) > cursor)
+      .sort((a, b) => (a.cursor ?? 0) - (b.cursor ?? 0))
+      .map(clone);
+  }
+
   async getWalletBackup(backupId: string): Promise<WalletBackupEnvelope | null> {
     const backup = this.backups.get(backupId);
     if (!backup) return null;
@@ -430,6 +451,24 @@ export class MemoryMosaicStore implements MosaicStore {
       created_at: now(),
     });
   }
+
+  private recordOneActivity(address: string, network: string, event: ActivityEvent): ActivityEvent {
+    const stored = normalizeActivityEvent({ ...event, wallet_address: address, network });
+    if (!stored.id) throw new Error("activity event id required");
+    const idempotencyKey = stored.idempotency_key ? `${address}\0${network}\0${stored.idempotency_key}` : undefined;
+    if (idempotencyKey) {
+      const existing = this.activityByIdempotency.get(idempotencyKey);
+      if (existing) return clone(existing);
+    }
+    const idKey = `${address}\0${network}\0${stored.id}`;
+    const existing = this.activityById.get(idKey);
+    if (existing) return clone(existing);
+    const withCursor = { ...stored, cursor: ++this.activityCursor };
+    this.activityEvents.push(withCursor);
+    this.activityById.set(idKey, withCursor);
+    if (idempotencyKey) this.activityByIdempotency.set(idempotencyKey, withCursor);
+    return clone(withCursor);
+  }
 }
 
 type StoredAction = ClientAction & { address: string; status: string; result?: unknown };
@@ -476,11 +515,23 @@ export class SqliteMosaicStore implements MosaicStore {
       );
       CREATE TABLE IF NOT EXISTS actions (id TEXT PRIMARY KEY, address TEXT NOT NULL, status TEXT NOT NULL, lease_expires_at INTEGER NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (cursor INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT NOT NULL, json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS activity_events (
+        cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+        address TEXT NOT NULL,
+        network TEXT NOT NULL,
+        id TEXT NOT NULL,
+        idempotency_key TEXT,
+        json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS wallet_backups (backup_id TEXT PRIMARY KEY, write_token_hash TEXT NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS base_shields (key TEXT PRIMARY KEY, desk_id TEXT NOT NULL, json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS idx_operations_address ON operations(address, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_actions_claim ON actions(address, status, lease_expires_at);
       CREATE INDEX IF NOT EXISTS idx_events_address_cursor ON events(address, cursor);
+      CREATE INDEX IF NOT EXISTS idx_activity_addr_network_cursor ON activity_events(address, network, cursor);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_addr_network_idem ON activity_events(address, network, idempotency_key) WHERE idempotency_key IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_addr_network_id ON activity_events(address, network, id);
       CREATE INDEX IF NOT EXISTS idx_base_shields_desk ON base_shields(desk_id);
     `);
     const existing = this.db.prepare("SELECT COUNT(*) AS count FROM catalog_assets").get() as { count: number };
@@ -737,6 +788,17 @@ export class SqliteMosaicStore implements MosaicStore {
     return rows.map((row) => JSON.parse(row.json) as OperationEvent);
   }
 
+  async recordActivity(address: string, network: string, events: ActivityEvent[]): Promise<ActivityEvent[]> {
+    return events.map((event) => this.recordOneActivity(address, network, event));
+  }
+
+  async activityAfter(address: string, network: string, cursor: number): Promise<ActivityEvent[]> {
+    const rows = this.db
+      .prepare("SELECT cursor, json FROM activity_events WHERE address = ? AND network = ? AND cursor > ? ORDER BY cursor")
+      .all(address, network, cursor) as { cursor: number; json: string }[];
+    return rows.map((row) => this.activityFromRow(row));
+  }
+
   async getWalletBackup(backupId: string): Promise<WalletBackupEnvelope | null> {
     const backup = parseJson<StoredBackup>(
       this.db.prepare("SELECT json FROM wallet_backups WHERE backup_id = ?").get(backupId) as { json: string } | undefined,
@@ -834,6 +896,44 @@ export class SqliteMosaicStore implements MosaicStore {
     const result = this.db.prepare("INSERT INTO events(address, json) VALUES(?, ?)").run(operation.address, JSON.stringify(event));
     event.cursor = Number(result.lastInsertRowid);
     this.db.prepare("UPDATE events SET json = ? WHERE cursor = ?").run(JSON.stringify(event), event.cursor);
+  }
+
+  private recordOneActivity(address: string, network: string, event: ActivityEvent): ActivityEvent {
+    const stored = normalizeActivityEvent({ ...event, wallet_address: address, network });
+    if (!stored.id) throw new Error("activity event id required");
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO activity_events(address, network, id, idempotency_key, json, created_at) VALUES(?, ?, ?, ?, ?, ?)",
+      )
+      .run(address, network, stored.id, stored.idempotency_key ?? null, JSON.stringify(stored), stored.created_at ?? now());
+    const row = this.activityRow(address, network, stored.id, stored.idempotency_key);
+    if (!row) throw new Error("failed to record activity event");
+    const withCursor = this.activityFromRow(row);
+    if ((stored.cursor ?? 0) !== withCursor.cursor) {
+      this.db.prepare("UPDATE activity_events SET json = ? WHERE cursor = ?").run(JSON.stringify(withCursor), withCursor.cursor ?? row.cursor);
+    }
+    return withCursor;
+  }
+
+  private activityRow(
+    address: string,
+    network: string,
+    id: string,
+    idempotencyKey?: string,
+  ): { cursor: number; json: string } | undefined {
+    if (idempotencyKey) {
+      const row = this.db
+        .prepare("SELECT cursor, json FROM activity_events WHERE address = ? AND network = ? AND idempotency_key = ?")
+        .get(address, network, idempotencyKey) as { cursor: number; json: string } | undefined;
+      if (row) return row;
+    }
+    return this.db
+      .prepare("SELECT cursor, json FROM activity_events WHERE address = ? AND network = ? AND id = ?")
+      .get(address, network, id) as { cursor: number; json: string } | undefined;
+  }
+
+  private activityFromRow(row: { cursor: number; json: string }): ActivityEvent {
+    return { ...(JSON.parse(row.json) as ActivityEvent), cursor: Number(row.cursor) };
   }
 }
 

@@ -127,7 +127,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     { description: "Return the current authenticated session.", inputSchema: { session: z.string() } },
     async (args) => {
       const s = await auth.getSession(String(args.session));
-      return ok(s ? { address: s.address, network: "testnet", expires_at: s.expiresAt } : null);
+      return ok(s ? { address: s.address, network: s.network, expires_at: s.expiresAt } : null);
     },
   );
 
@@ -251,6 +251,18 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   reg("operation_events_since", { description: "Replay operation events.", inputSchema: { session: z.string(), cursor: z.number() } }, async (args) =>
     ok(await store.eventsAfter((await session(auth, args)).address, Number(args.cursor))),
   );
+  reg(
+    "record_activity",
+    { description: "Persist client-generated activity events.", inputSchema: { session: z.string(), events: z.array(z.record(z.unknown())) } },
+    async (args) => {
+      const s = await session(auth, args);
+      return ok(await store.recordActivity(s.address, s.network, args.events as never));
+    },
+  );
+  reg("activity_since", { description: "Replay persisted activity events.", inputSchema: { session: z.string(), cursor: z.number() } }, async (args) => {
+    const s = await session(auth, args);
+    return ok(await store.activityAfter(s.address, s.network, Number(args.cursor)));
+  });
 
   reg("relay_shield", { description: "Relay sponsored shield.", inputSchema: { session: z.string(), desk_id: z.string(), tx_xdr: z.string(), action_id: z.string().optional(), lease_token: z.string().optional() } }, async (args) => {
     const operation = await relayGuard(store, auth, args, String(args.desk_id), "relay_shield");

@@ -20,6 +20,7 @@ import type {
   ProposeAssetBody,
   WalletBackupEnvelope,
 } from "./types.js";
+import type { ActivityEvent } from "./activity.js";
 import type { AssetDef, PairDef } from "./types.js";
 import type { ClientActionLease, McpClient, StellarSigner, SubmitResult } from "./ports.js";
 
@@ -224,6 +225,14 @@ class HttpMcpClient implements McpClient {
 
   operationEventsSince(cursor: number): Promise<OperationEvent[]> {
     return this.call("operation_events_since", this.auth({ cursor }));
+  }
+
+  recordActivity(events: ActivityEvent[]): Promise<ActivityEvent[]> {
+    return this.call("record_activity", this.auth({ events }));
+  }
+
+  activitySince(cursor: number): Promise<ActivityEvent[]> {
+    return this.call("activity_since", this.auth({ cursor }));
   }
 
   async relayShield(deskId: string, txXdr: string, lease?: ClientActionLease): Promise<SubmitResult> {

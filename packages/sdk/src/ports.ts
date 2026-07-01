@@ -27,6 +27,7 @@ import type {
   TreeEvent,
   WalletBackupEnvelope,
 } from "./types.js";
+import type { ActivityEvent } from "./activity.js";
 export type { ActivityStore } from "./activity.js";
 
 /** Network coordinates shared by every RPC-touching adapter. */
@@ -190,6 +191,8 @@ export interface McpClient {
   completeClientAction(id: string, leaseToken: string, result: unknown): Promise<Operation>;
   failClientAction(id: string, leaseToken: string, error: string, retryable?: boolean): Promise<Operation>;
   operationEventsSince(cursor: number): Promise<OperationEvent[]>;
+  recordActivity(events: ActivityEvent[]): Promise<ActivityEvent[]>;
+  activitySince(cursor: number): Promise<ActivityEvent[]>;
   relayShield(deskId: string, txXdr: string, lease?: ClientActionLease): Promise<SubmitResult>;
   relayOrder(deskId: string, proofB64: string, publicInputsB64: string, lease?: ClientActionLease): Promise<SubmitResult>;
   relayJoin(deskId: string, proofB64: string, publicInputsB64: string, lease?: ClientActionLease): Promise<SubmitResult>;
