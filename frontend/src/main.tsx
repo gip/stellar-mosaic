@@ -11,6 +11,7 @@ import App from './App'
 import Home from './pages/Home'
 import DeskPage from './pages/DeskPage'
 import AssetsPage from './pages/AssetsPage'
+import { ThemeProvider } from './ThemeContext'
 import { WalletProvider } from './WalletContext'
 import { MosaicServerProvider } from './MosaicServerContext'
 import { StorageModeProvider } from './StorageModeContext'
@@ -21,19 +22,21 @@ import { EthereumWalletProvider } from './EthereumWalletContext'
 // eslint-disable-next-line react-refresh/only-export-components
 function AppRoute() {
   return (
-    <WalletProvider>
-      <StorageModeProvider>
-        <MosaicServerProvider>
-          <EthereumWalletProvider>
-            <RecoveryProvider>
-              <ActivityProvider>
-                <App />
-              </ActivityProvider>
-            </RecoveryProvider>
-          </EthereumWalletProvider>
-        </MosaicServerProvider>
-      </StorageModeProvider>
-    </WalletProvider>
+    <ThemeProvider>
+      <WalletProvider>
+        <StorageModeProvider>
+          <MosaicServerProvider>
+            <EthereumWalletProvider>
+              <RecoveryProvider>
+                <ActivityProvider>
+                  <App />
+                </ActivityProvider>
+              </RecoveryProvider>
+            </EthereumWalletProvider>
+          </MosaicServerProvider>
+        </StorageModeProvider>
+      </WalletProvider>
+    </ThemeProvider>
   )
 }
 

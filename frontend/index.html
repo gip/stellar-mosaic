@@ -4,7 +4,22 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <title>Mosaic</title>
+    <script>
+      // Set the theme before first paint to avoid a flash of the wrong theme.
+      // Keep the id list in sync with THEMES in src/ThemeContext.tsx.
+      (function () {
+        try {
+          var saved = localStorage.getItem('mosaic.theme')
+          var theme = ['dark', 'light'].indexOf(saved) !== -1
+            ? saved
+            : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+          document.documentElement.setAttribute('data-theme', theme)
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark')
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,10 +1,75 @@
 /* Design tokens — terminal-style trading identity.
  * Dark by default; a light theme is provided under [data-theme="light"].
- * Everything downstream (base.css, components.css, ui/*) references these vars only. */
+ * Everything downstream (base.css, components.css, ui/*) references these vars only.
+ *
+ * Adding a color scheme (e.g. B&W): add a `[data-theme="<id>"] { … }` block below that
+ * overrides the color tokens, then append `{ id: '<id>', label: '…' }` to THEMES in
+ * src/ThemeContext.tsx (and an icon in components/ui/ThemeToggle.tsx + the id in the
+ * anti-flash script in index.html). The non-color tokens on :root are shared by all schemes. */
+
+/* Zed Sans / Zed Mono — © Zed Industries, SIL OFL 1.1
+   Source: https://github.com/zed-industries/zed-fonts. Self-hosted from /public/fonts. */
+@font-face {
+  font-family: "Zed Sans";
+  src: url("/fonts/zed-sans-regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Sans";
+  src: url("/fonts/zed-sans-medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Sans";
+  src: url("/fonts/zed-sans-semibold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Sans";
+  src: url("/fonts/zed-sans-bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Mono";
+  src: url("/fonts/zed-mono-regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Mono";
+  src: url("/fonts/zed-mono-medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Mono";
+  src: url("/fonts/zed-mono-bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Zed Mono";
+  src: url("/fonts/zed-mono-italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+
 :root {
   /* Type families */
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "JetBrains Mono", monospace;
+  --font-sans: "Zed Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Zed Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, "JetBrains Mono", monospace;
 
   /* Type scale (dense terminal) */
   --fs-xs: 11px;

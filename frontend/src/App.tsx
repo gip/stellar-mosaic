@@ -4,6 +4,7 @@ import { useWallet } from './WalletContext'
 import RecoveryPanel from './components/RecoveryPanel'
 import ActivityDrawer from './components/ActivityDrawer'
 import StatusDot from './components/ui/StatusDot'
+import ThemeToggle from './components/ui/ThemeToggle'
 import { useEthereumWallet } from './EthereumWalletContext'
 import { useMosaicServer } from './MosaicServerContext'
 import { useStorageMode } from './StorageModeContext'
@@ -50,7 +51,7 @@ export default function App() {
     <>
       <header className="topbar">
         <h1 className="brand">
-          <Link to="/">STELLAR MOSAIC</Link>
+          <Link to="/">MOSAIC</Link>
         </h1>
         <nav className="topnav">
           <NavLink to="/" end className={navClass}>
@@ -61,6 +62,7 @@ export default function App() {
           </NavLink>
         </nav>
         <div className="topbar-spacer" />
+        <ThemeToggle />
         <div className="wallet-stack">
           <div className="wallet-chain">
             <span className="chain-label">Stellar Testnet</span>

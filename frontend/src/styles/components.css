@@ -113,6 +113,24 @@ header.topbar {
   flex: 1;
 }
 
+/* Theme toggle — icon-only button reusing the base button token styles */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  color: var(--fg-muted);
+}
+.theme-toggle:hover:not(:disabled) {
+  color: var(--accent);
+}
+.theme-toggle svg {
+  display: block;
+}
+
 /* Wallet status chips */
 .wallet-stack {
   display: flex;
