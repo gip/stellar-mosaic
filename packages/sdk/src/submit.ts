@@ -9,7 +9,8 @@
 import { BASE_FEE, Contract, TransactionBuilder, rpc, type xdr } from "@stellar/stellar-sdk";
 import type { ContractCall, NetworkConfig, StellarSigner, SubmitResult, Submitter } from "./ports.js";
 import { ActivityHistory, type ActivityStore } from "./activity.js";
-import { errorMessage, getMosaicLogger, serializeError, type MosaicLogger } from "./logging.js";
+import { getMosaicLogger, serializeError, type MosaicLogger } from "./logging.js";
+import { transactionErrorMessage } from "./transactionErrors.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -64,7 +65,7 @@ export class DirectSubmitter implements Submitter {
         method: call.method,
         tx_hash: hash,
         message: error,
-        metadata: { error },
+        metadata: { ...call.metadata, error },
       })
       .catch((cause) => this.logger.debug("activity transaction record failed", { error: cause }));
   }
@@ -83,7 +84,7 @@ export class DirectSubmitter implements Submitter {
 
     const simulation = await this.server.simulateTransaction(raw);
     if (rpc.Api.isSimulationError(simulation)) {
-      const message = `Simulation failed: ${errorMessage(simulation.error)}`;
+      const message = transactionErrorMessage(simulation.error, call);
       this.logger.error("transaction simulation failed", {
         deskId: call.deskId,
         contractId: call.contractId,
@@ -112,7 +113,7 @@ export class DirectSubmitter implements Submitter {
     this.logger.info("transaction submitting", { deskId: call.deskId, method: call.method, hash });
     const sent = await this.server.sendTransaction(transaction);
     if (sent.status !== "PENDING" && sent.status !== "DUPLICATE") {
-      const error = `RPC rejected transaction ${hash}: ${sent.status}`;
+      const error = transactionErrorMessage(`RPC rejected transaction ${hash}: ${sent.status}`, call);
       this.onStatus?.({ hash, call, status: "failed", error });
       await this.recordTx(call, "failed", hash, error);
       this.logger.error("transaction rejected", { deskId: call.deskId, method: call.method, hash, error });
@@ -128,7 +129,7 @@ export class DirectSubmitter implements Submitter {
         return { txHash: hash, status: "SUCCESS" };
       }
       if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
-        const error = `Transaction ${hash} failed in ledger ${result.ledger}`;
+        const error = transactionErrorMessage(`Transaction ${hash} failed in ledger ${result.ledger}`, call);
         this.onStatus?.({ hash, call, status: "failed", error });
         await this.recordTx(call, "failed", hash, error);
         this.logger.error("transaction failed", { deskId: call.deskId, method: call.method, hash, error });

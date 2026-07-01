@@ -16,6 +16,7 @@ export * from "./noteTree.js";
 export * from "./eventReplay.js";
 export * from "./noirRuntime.js";
 export * from "./logging.js";
+export * from "./transactionErrors.js";
 export * from "./activity.js";
 export * from "./noirCompressor.js";
 export * from "./localPathProvider.js";

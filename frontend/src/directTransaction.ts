@@ -9,7 +9,7 @@ import {
 } from '@stellar/stellar-sdk'
 import { currentAddress, network } from './wallet'
 import { SOROBAN_RPC_URL } from './config'
-import { errorMessage } from '@mosaic/sdk'
+import { errorMessage, transactionErrorMessage } from '@mosaic/sdk'
 
 interface SubmissionRecord {
   hash: string
@@ -55,6 +55,7 @@ export async function submitContractCall(
   contractId: string,
   method: string,
   args: xdr.ScVal[],
+  metadata?: Record<string, unknown>,
 ): Promise<string> {
   const [source, selectedNetwork] = await Promise.all([currentAddress(), network()])
   if (!source) throw new Error('Connect Freighter before submitting.')
@@ -67,7 +68,8 @@ export async function submitContractCall(
     .setTimeout(120)
     .build()
   const simulation = await server.simulateTransaction(raw)
-  if (rpc.Api.isSimulationError(simulation)) throw new Error(`Simulation failed: ${simulation.error}`)
+  const call = { contractId, method, args, metadata }
+  if (rpc.Api.isSimulationError(simulation)) throw new Error(transactionErrorMessage(simulation.error, call))
   const assembled = rpc.assembleTransaction(raw, simulation).build()
   const hash = assembled.hash().toString('hex')
   const record: SubmissionRecord = {
@@ -94,7 +96,7 @@ export async function submitContractCall(
   await update(record, { status: 'submitted' })
   const sent = await server.sendTransaction(transaction)
   if (sent.status !== 'PENDING' && sent.status !== 'DUPLICATE') {
-    const message = `RPC rejected transaction ${hash}: ${sent.status}`
+    const message = transactionErrorMessage(`RPC rejected transaction ${hash}: ${sent.status}`, call)
     await update(record, { status: 'failed', error: message })
     throw new Error(message)
   }
@@ -105,7 +107,7 @@ export async function submitContractCall(
       return hash
     }
     if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
-      const message = `Transaction ${hash} failed in ledger ${result.ledger}`
+      const message = transactionErrorMessage(`Transaction ${hash} failed in ledger ${result.ledger}`, call)
       await update(record, { status: 'failed', error: message })
       throw new Error(message)
     }

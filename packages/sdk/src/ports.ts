@@ -53,6 +53,8 @@ export interface ContractCall {
   deskId?: string;
   contractId: string;
   method: string;
+  /** Public, non-secret metadata used to correlate transaction activity with the wallet action. */
+  metadata?: Record<string, unknown>;
   /** Method arguments, already converted to `@stellar/stellar-sdk` `xdr.ScVal`-compatible values
    * by the core. Typed as `unknown[]` here to keep the port free of the stellar-sdk types. */
   args: unknown[];

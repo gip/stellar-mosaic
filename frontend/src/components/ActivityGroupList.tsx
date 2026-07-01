@@ -18,9 +18,9 @@ export default function ActivityGroupList({
   if (groups.length === 0) return <p className="activity-empty">{empty}</p>
   return (
     <div className="activity-groups">
-      {groups.map((group) => (
-        <section className="activity-group" key={group.id}>
-          <div className="activity-summary">
+      {groups.map((group, groupIndex) => (
+        <section className="activity-group" key={`${group.id}:${groupIndex}`}>
+          <div className="activity-row">
             <div className="activity-summary-main">
               <div className="activity-summary-heading">
                 <h4>{group.action}</h4>
@@ -28,21 +28,20 @@ export default function ActivityGroupList({
               </div>
               <span className="activity-summary-text" title={group.summary}>{renderLinkedSummary(group.summary)}</span>
             </div>
+            <div className="activity-tx-list">
+              {group.lines.flatMap((line, lineIndex) => {
+                if (!line.tx || !line.activity) return []
+                return (
+                  <a className="mono activity-tx-link" href={txUrl(line.tx, line.activity)} target="_blank" rel="noreferrer" title={`${line.label}: ${line.tx}`} key={`${group.id}:${line.id}:${lineIndex}`}>
+                    {short(line.tx)}
+                  </a>
+                )
+              })}
+            </div>
             <StatusDot tone={statusTone(group.status)} title={formatStatus(group.status)}>
               <span className="activity-status-label">{formatStatus(group.status)}</span>
             </StatusDot>
           </div>
-          {group.lines.map((line) => (
-            <div className="activity-line" key={line.id}>
-              <span className="activity-line-label">{line.label}</span>
-              {line.tx && line.activity
-                ? <a className="mono activity-tx-link" href={txUrl(line.tx, line.activity)} target="_blank" rel="noreferrer" title={line.tx}>{short(line.tx)}</a>
-                : <span className="muted">No tx</span>}
-              <StatusDot tone={statusTone(line.status)} title={formatStatus(line.status)}>
-                <span className="activity-status-label">{formatStatus(line.status)}</span>
-              </StatusDot>
-            </div>
-          ))}
         </section>
       ))}
     </div>

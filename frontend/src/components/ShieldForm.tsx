@@ -6,6 +6,7 @@ import { useRecovery } from '../RecoveryContext'
 import { useActivity } from '../ActivityContext'
 import { useMosaicServer } from '../MosaicServerContext'
 import { shieldTrustless } from '../trustless'
+import Banner from './ui/Banner'
 import Field from './ui/Field'
 import ProgressSteps from './ui/ProgressSteps'
 
@@ -87,6 +88,7 @@ export default function ShieldForm({
 
   return (
     <form onSubmit={submit} className="stack">
+      {error && <Banner tone="err">{error}</Banner>}
       <Field id="shield-asset" label="Asset">
         <select value={assetId} onChange={(e) => setAssetId(Number(e.target.value))}>
           {desk.assets.map((a) => (
@@ -110,7 +112,6 @@ export default function ShieldForm({
       </button>
       <ProgressSteps running={busy} step={status} />
       {!busy && status && !error && <div className="status-dot ok">{status}</div>}
-      {error && <div className="banner err" role="alert">{error}</div>}
     </form>
   )
 }

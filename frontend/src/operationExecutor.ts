@@ -121,11 +121,12 @@ async function executeShield(
       nativeToScVal(request.asset_id, { type: 'u32' }),
       nativeToScVal(BigInt(request.amount), { type: 'i128' }),
       xdr.ScVal.scvBytes(Buffer.from(fieldToBytes32(owner_tag))),
-    ])
+    ], { asset_id: request.asset_id, symbol: asset.symbol, decimals: asset.decimals, amount: request.amount })
   } else {
     const txXdr = await buildSponsoredShield(
       desk.contract_id, desk.sponsor_pubkey, session.address, request.asset_id, request.amount,
       fieldToBytes32(owner_tag),
+      { asset_id: request.asset_id, symbol: asset.symbol, decimals: asset.decimals, amount: request.amount },
     )
     transaction = (await api.submitShield(desk.id, txXdr)).result
   }

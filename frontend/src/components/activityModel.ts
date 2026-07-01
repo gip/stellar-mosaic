@@ -1,6 +1,6 @@
 import type { ActivityEvent } from '@mosaic/sdk'
 import type { Operation } from '../api'
-import { formatAmount, formatPrice } from '../amount'
+import { formatAmount, formatPrice } from '../amount.ts'
 
 export type ActivityAction = 'Deploy' | 'Shield' | 'Unshield' | 'Place Order' | 'Cancel Order'
 
@@ -78,6 +78,8 @@ export function activityGroups(activities: ActivityEvent[], operations: Operatio
     group.createdAt = operation.updated_at ?? operation.created_at
   }
 
+  mergeLooseTransactionGroups(groups, activityByGroup)
+
   for (const group of groups) {
     const operationId = group.id.startsWith('operation:') ? group.id.slice('operation:'.length) : undefined
     const operation = operationId ? operationById.get(operationId) : undefined
@@ -92,7 +94,7 @@ export function activityGroups(activities: ActivityEvent[], operations: Operatio
     group.lines.sort((a, b) => statusRank(a.status) - statusRank(b.status))
   }
 
-  return groups
+  return groups.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
 }
 
 function upsertTxLine(group: ActivityGroup, line: TransactionLine) {
@@ -105,6 +107,57 @@ function upsertTxLine(group: ActivityGroup, line: TransactionLine) {
   existing.activity = line.activity ?? existing.activity
   existing.label = line.label
   existing.createdAt = Math.max(existing.createdAt ?? 0, line.createdAt ?? 0) || existing.createdAt
+}
+
+function mergeLooseTransactionGroups(groups: ActivityGroup[], activityByGroup: Map<string, ActivityEvent[]>) {
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index]
+    if (!group.id.startsWith('tx:') || group.lines.length === 0) continue
+    const candidate = nearestActionGroup(group, groups, activityByGroup)
+    if (!candidate) continue
+    for (const line of group.lines) upsertTxLine(candidate, line)
+    activityByGroup.set(candidate.id, [...(activityByGroup.get(candidate.id) ?? []), ...(activityByGroup.get(group.id) ?? [])])
+    activityByGroup.delete(group.id)
+    groups.splice(index, 1)
+  }
+}
+
+function nearestActionGroup(
+  txGroup: ActivityGroup,
+  groups: ActivityGroup[],
+  activityByGroup: Map<string, ActivityEvent[]>,
+): ActivityGroup | undefined {
+  const txActivities = activityByGroup.get(txGroup.id) ?? []
+  const txDesks = deskIds(txActivities)
+  const txTime = groupTime(txGroup, txActivities)
+  let best: { group: ActivityGroup; distance: number } | undefined
+  for (const group of groups) {
+    if (group === txGroup || group.id.startsWith('tx:') || group.action !== txGroup.action) continue
+    const activities = activityByGroup.get(group.id) ?? []
+    const desks = deskIds(activities)
+    if (txDesks.size > 0 && desks.size > 0 && !intersects(txDesks, desks)) continue
+    const distance = Math.abs(groupTime(group, activities) - txTime)
+    if (distance > 5 * 60_000) continue
+    if (!best || distance < best.distance) best = { group, distance }
+  }
+  return best?.group
+}
+
+function groupTime(group: ActivityGroup, activities: ActivityEvent[]): number {
+  return Math.max(
+    group.createdAt ?? 0,
+    ...activities.map((activity) => activity.created_at ?? 0),
+    ...group.lines.map((line) => line.createdAt ?? 0),
+  )
+}
+
+function deskIds(activities: ActivityEvent[]): Set<string> {
+  return new Set(activities.map((activity) => activity.desk_id).filter((id): id is string => !!id))
+}
+
+function intersects<T>(a: Set<T>, b: Set<T>): boolean {
+  for (const value of a) if (b.has(value)) return true
+  return false
 }
 
 export function terminalStatus(status?: string) {
@@ -175,6 +228,10 @@ function activityType(activity: ActivityEvent) {
 }
 
 function txLabel(activity: ActivityEvent) {
+  const methodAction = actionForValue(activity.method)
+  if (methodAction) return methodAction
+  const activityAction = actionForValue(activity.action)
+  if (activityAction) return activityAction
   if (activity.method) return title(activity.method)
   if (activity.action) return title(activity.action)
   return activity.kind === 'backend_operation' ? title(metadataString(activity.metadata, ['event_type']) ?? 'transaction') : activityType(activity)
@@ -258,8 +315,10 @@ function amountAssetSummary(value: unknown) {
   const amount = metadataString(value, ['amount'])
   const symbol = metadataString(value, ['symbol'])
   const assetId = metadataNumber(value, ['asset_id'])
+  const decimals = metadataNumber(value, ['decimals'])
   if (!amount) return undefined
-  return `${amount} ${symbol ?? (assetId === undefined ? 'units' : `asset #${assetId}`)}`
+  const displayAmount = decimals === undefined ? amount : formatAmount(BigInt(amount), decimals)
+  return `${displayAmount} ${symbol ?? (assetId === undefined ? 'units' : `asset #${assetId}`)}`
 }
 
 function refundSummary(activities: ActivityEvent[]) {
