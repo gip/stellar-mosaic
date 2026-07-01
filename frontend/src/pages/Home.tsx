@@ -87,6 +87,7 @@ export default function Home() {
   }
 
   useEffect(() => {
+    if (!address) return
     let active = true
     queueMicrotask(() => {
       if (!active) return
@@ -105,7 +106,18 @@ export default function Home() {
     return () => {
       active = false
     }
-  }, [storageMode.mode])
+  }, [address, storageMode.mode])
+
+  if (!address) {
+    return (
+      <div className="reading intro">
+        <p>
+          Stellar Mosaic is a privacy-preserving DEX on Stellar: trades settle atomically on-chain
+          while the owner behind each note and the create-to-spend link stay hidden.
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div className="reading">

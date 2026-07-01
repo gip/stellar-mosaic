@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useParams } from 'react-router-dom'
 import { errorMessage } from '@mosaic/sdk'
 import { api, type Asset, type Desk } from '../api'
@@ -19,7 +19,7 @@ import { isRecoveryUnlocked, syncRecoveryNow } from '../recovery'
 import { ordersFor, type BookIndexSnapshot } from '../bookIndexer'
 import { useBookIndex } from '../useBookIndex'
 import { setSubmissionMode, submissionMode } from '../directTransaction'
-import { useStorageMode } from '../StorageModeContext'
+import { useStorageMode, type StorageMode } from '../StorageModeContext'
 
 /** Canonical 32-byte hex tag for comparison: drop any `0x`, lowercase, left-pad to 64. */
 function normTag(h: string): string {
@@ -39,6 +39,70 @@ function assetTokenCell(a: Asset, desk: Desk) {
   }
   if (base) return `${base.token} (Base)`
   return <span className="muted">Represented — no Stellar token</span>
+}
+
+/** Contract/config rows shared by the logged-in and public desk-details tables. `submissionRow`
+ * (self-submit vs. sponsor) is wallet-specific, so the public view omits it. */
+function DeskDetailsTable({
+  desk,
+  verifiedDesk,
+  root,
+  bookIndex,
+  submissionRow,
+}: {
+  desk: Desk
+  verifiedDesk: Desk
+  root: string | null
+  bookIndex: BookIndexSnapshot
+  submissionRow?: ReactNode
+}) {
+  return (
+    <table>
+      <tbody>
+        <tr>
+          <th>Stellar contract</th>
+          <td className="mono">{desk.contract_id}</td>
+        </tr>
+        <tr>
+          <th>Base bridge</th>
+          <td className="mono">
+            {desk.base_deployment?.bridge_address ? (
+              desk.base_deployment.bridge_address
+            ) : (
+              <span className="muted">
+                {desk.base_deployment ? `not deployed (${desk.base_deployment.status})` : 'not deployed'}
+              </span>
+            )}
+          </td>
+        </tr>
+        <tr>
+          <th>Sponsor (main)</th>
+          <td className="mono">{desk.sponsor_pubkey || <span className="muted">—</span>}</td>
+        </tr>
+        <tr>
+          <th>Tree root</th>
+          <td className="mono">{root ?? '…'}</td>
+        </tr>
+        {submissionRow}
+        <tr>
+          <th>Book index</th>
+          <td>
+            {bookIndex.status} · ledger {bookIndex.lastLedger} · sequence{' '}
+            {bookIndex.lastSequence}/{bookIndex.targetSequence}
+            {bookIndex.error && <div className="err">{bookIndex.error}</div>}
+          </td>
+        </tr>
+        {verifiedDesk.assets.map((a) => (
+          <tr key={a.asset_id}>
+            <th>
+              {a.symbol} (id {a.asset_id})
+            </th>
+            <td className="mono">{assetTokenCell(a, desk)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
 }
 
 function sameDeskProjection(a: Desk | null, b: Desk): boolean {
@@ -71,6 +135,11 @@ export default function DeskPage() {
   const { deskId } = useParams()
   const { address, networkPassphrase } = useWallet()
   const storageMode = useStorageMode()
+  // A visitor with no connected wallet has no local desk registry and no session — resolve
+  // through the same public, unauthenticated path real Trusted-mode users use (`mcp.getDesk` /
+  // `syncTrustedBookIndex`), instead of the local-only Trustless path storageMode falls back to.
+  const loggedOut = !address
+  const effectiveMode: StorageMode = loggedOut ? 'trusted' : storageMode.mode
   const [desk, setDesk] = useState<Desk | null>(null)
   const [root, setRoot] = useState<string | null>(null)
   const [notes, setNotes] = useState<Note[]>([])
@@ -81,7 +150,7 @@ export default function DeskPage() {
   const [lastVerifiedDesk, setLastVerifiedDesk] = useState<Desk | null>(null)
   const [activePairId, setActivePairId] = useState<number | null>(null)
   const [tradeTab, setTradeTab] = useState<'trade' | 'fund'>('trade')
-  const bookIndex = useBookIndex(storageMode.mode, desk, networkPassphrase)
+  const bookIndex = useBookIndex(effectiveMode, desk, networkPassphrase)
 
   const currentVerifiedDesk = useMemo<Desk | null>(() => {
     if (!desk || bookIndex.status !== 'synced') return null
@@ -124,15 +193,20 @@ export default function DeskPage() {
       setNoteIndexError(null)
       setLastVerifiedDesk(null)
     })
-    Promise.all([api.getDesk(storageMode.mode, deskId)])
-      .then(([nextDesk]) => {
+    api
+      .getDesk(effectiveMode, deskId)
+      .then((nextDesk) => {
         if (!active) return
         setDesk(nextDesk)
       })
-      .catch((e) => active && setError(errorMessage(e)))
-    reloadNotes()
+      .catch((e) => {
+        if (!active) return
+        const message = errorMessage(e)
+        setError(loggedOut && /not found/i.test(message) ? 'Desk not found.' : message)
+      })
+    if (!loggedOut) reloadNotes()
     return () => { active = false }
-  }, [storageMode.mode, deskId, reloadNotes])
+  }, [effectiveMode, loggedOut, deskId, reloadNotes])
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -143,9 +217,9 @@ export default function DeskPage() {
     return () => window.removeEventListener('mosaic-notes-changed', handler)
   }, [storageMode.mode, reloadNotes])
 
-  // Auto-refresh the on-chain root every 5s as a liveness signal.
+  // Auto-refresh the on-chain root every 5s as a liveness signal. Not shown in the public view.
   useEffect(() => {
-    if (!deskId) return
+    if (!deskId || loggedOut) return
     let alive = true
     const tick = () =>
       api
@@ -158,11 +232,12 @@ export default function DeskPage() {
       alive = false
       clearInterval(h)
     }
-  }, [storageMode.mode, deskId])
+  }, [storageMode.mode, deskId, loggedOut])
 
-  // Reconcile local notes against on-chain state every 7s so filled proceeds appear.
+  // Reconcile local notes against on-chain state every 7s so filled proceeds appear. Nothing to
+  // reconcile without a wallet.
   useEffect(() => {
-    if (!deskId) return
+    if (!deskId || loggedOut) return
     let alive = true
     const tick = () =>
       api
@@ -184,7 +259,7 @@ export default function DeskPage() {
       alive = false
       clearInterval(h)
     }
-  }, [storageMode.mode, deskId, address, reloadNotes])
+  }, [storageMode.mode, deskId, address, loggedOut, reloadNotes])
 
   // Live confirmation toasts (e.g. "your order filled").
   const [toasts, setToasts] = useState<ToastItem[]>([])
@@ -204,7 +279,7 @@ export default function DeskPage() {
   const seenFills = useRef<Set<string>>(new Set())
   const fillsSeeded = useRef(false)
   useEffect(() => {
-    if (!deskId || !desk) return
+    if (!deskId || !desk || loggedOut) return
     seenFills.current = new Set()
     fillsSeeded.current = false
     const symOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
@@ -239,7 +314,7 @@ export default function DeskPage() {
       alive = false
       clearInterval(h)
     }
-  }, [storageMode.mode, deskId, desk])
+  }, [storageMode.mode, deskId, desk, loggedOut])
 
   if (error) return <p className="err">{error}</p>
   if (!desk) return <p className="muted">Loading…</p>
@@ -270,6 +345,69 @@ export default function DeskPage() {
   const selectedPair = pairs.find((p) => p.pair_id === activePairId) ?? pairs[0] ?? null
   const bookTone: StatusTone =
     bookIndex.status === 'synced' ? 'ok' : bookIndex.status === 'error' ? 'err' : 'busy'
+
+  // No wallet, no session: just the desk's public identity and its live order book.
+  if (loggedOut) {
+    return (
+      <>
+        <div className="desk-head">
+          <h1 className="desk-title">{desk.name}</h1>
+          <StatusDot tone={bookTone} title={bookIndex.error ?? undefined}>
+            Book {bookIndex.status} · seq {bookIndex.lastSequence}/{bookIndex.targetSequence}
+          </StatusDot>
+        </div>
+        <div className="stack">
+          <Pane title="Order book">
+            {pairs.length === 0 ? (
+              <p className="muted">
+                {bookIndex.status === 'synced'
+                  ? 'No pairs registered.'
+                  : 'Waiting for verified book synchronization.'}
+              </p>
+            ) : (
+              <>
+                {pairs.length > 1 && (
+                  <Tabs
+                    ariaLabel="Trading pair"
+                    value={String(selectedPair?.pair_id)}
+                    onChange={(id) => setActivePairId(Number(id))}
+                    tabs={pairs.map((p) => ({
+                      id: String(p.pair_id),
+                      label: `${sym(p.base_asset)}/${sym(p.quote_asset)}`,
+                    }))}
+                  />
+                )}
+                {selectedPair && (
+                  <OrderBook
+                    desk={verifiedDesk}
+                    pair={selectedPair}
+                    sym={sym}
+                    dec={dec}
+                    asks={ordersFor(bookIndex, selectedPair.pair_id, 1)}
+                    bids={ordersFor(bookIndex, selectedPair.pair_id, 0)}
+                    bookIndex={bookIndex}
+                    notes={[]}
+                    userPubkey=""
+                    trustless={false}
+                    onCancel={() => {}}
+                  />
+                )}
+              </>
+            )}
+          </Pane>
+
+          <Pane title="Desk details">
+            <details>
+              <summary className="muted">Addresses &amp; config</summary>
+              <ScrollTable>
+                <DeskDetailsTable desk={desk} verifiedDesk={verifiedDesk} root={root} bookIndex={bookIndex} />
+              </ScrollTable>
+            </details>
+          </Pane>
+        </div>
+      </>
+    )
+  }
 
   return (
     <>
@@ -345,34 +483,12 @@ export default function DeskPage() {
             <details>
               <summary className="muted">Addresses &amp; config</summary>
               <ScrollTable>
-                <table>
-                  <tbody>
-                    <tr>
-                      <th>Stellar contract</th>
-                      <td className="mono">{desk.contract_id}</td>
-                    </tr>
-                    <tr>
-                      <th>Base bridge</th>
-                      <td className="mono">
-                        {desk.base_deployment?.bridge_address ? (
-                          desk.base_deployment.bridge_address
-                        ) : (
-                          <span className="muted">
-                            {desk.base_deployment
-                              ? `not deployed (${desk.base_deployment.status})`
-                              : 'not deployed'}
-                          </span>
-                        )}
-                      </td>
-                    </tr>
-                    <tr>
-                      <th>Sponsor (main)</th>
-                      <td className="mono">{desk.sponsor_pubkey || <span className="muted">—</span>}</td>
-                    </tr>
-                    <tr>
-                      <th>Tree root</th>
-                      <td className="mono">{root ?? '…'}</td>
-                    </tr>
+                <DeskDetailsTable
+                  desk={desk}
+                  verifiedDesk={verifiedDesk}
+                  root={root}
+                  bookIndex={bookIndex}
+                  submissionRow={
                     <tr>
                       <th>Submission</th>
                       <td>
@@ -393,24 +509,8 @@ export default function DeskPage() {
                         )}
                       </td>
                     </tr>
-                    <tr>
-                      <th>Book index</th>
-                      <td>
-                        {bookIndex.status} · ledger {bookIndex.lastLedger} · sequence{' '}
-                        {bookIndex.lastSequence}/{bookIndex.targetSequence}
-                        {bookIndex.error && <div className="err">{bookIndex.error}</div>}
-                      </td>
-                    </tr>
-                    {verifiedDesk.assets.map((a) => (
-                      <tr key={a.asset_id}>
-                        <th>
-                          {a.symbol} (id {a.asset_id})
-                        </th>
-                        <td className="mono">{assetTokenCell(a, desk)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                  }
+                />
               </ScrollTable>
             </details>
           </Pane>

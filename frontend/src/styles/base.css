@@ -82,6 +82,19 @@ h3 {
   max-width: var(--reading-max);
   margin: 0 auto;
 }
+/* Logged-out Home: a single centered sentence instead of the desk list. */
+.reading.intro {
+  display: flex;
+  min-height: 40vh;
+  align-items: center;
+  text-align: center;
+}
+.reading.intro p {
+  font-size: var(--fs-lg);
+  color: var(--fg-muted);
+  line-height: 1.5;
+  margin: 0 auto;
+}
 
 @media (max-width: 768px) {
   .app-main {
