@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::models::{CreateDesk, Desk, ImportDesk};
+use crate::models::{CreateDesk, Desk};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
@@ -131,37 +131,6 @@ pub async fn get_desk(
     if desk.event_start_ledger.is_none() {
         desk.event_start_ledger = st.stellar.oldest_ledger(&desk.contract_id).ok();
     }
-    Ok(Json(desk))
-}
-
-/// Import an already-deployed contract as a read-only desk (Phase 1 convenience).
-pub async fn import_desk(
-    State(st): State<Arc<AppState>>,
-    Json(body): Json<ImportDesk>,
-) -> AppResult<Json<Desk>> {
-    tracing::info!(name = %body.name, contract_id = %body.contract_id, "import_desk");
-    if body.contract_id.trim().is_empty() {
-        return Err(AppError::BadRequest("contract_id required".into()));
-    }
-    let desk = Desk {
-        id: Uuid::new_v4().to_string(),
-        name: body.name,
-        contract_id: body.contract_id,
-        sponsor_pubkey: body.sponsor_pubkey,
-        event_start_ledger: None,
-        assets: body.assets,
-        pairs: body.pairs,
-        base_deployment: None,
-    };
-    let event_start_ledger = st.stellar.oldest_ledger(&desk.contract_id).ok();
-    let desk = Desk {
-        event_start_ledger,
-        ..desk
-    };
-    st.db
-        .insert_desk(&desk, None, desk.event_start_ledger, None)
-        .await?;
-    tracing::info!(desk = %desk.id, contract_id = %desk.contract_id, "import_desk ok");
     Ok(Json(desk))
 }
 

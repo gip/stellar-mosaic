@@ -21,6 +21,7 @@ import type {
   Submitter,
 } from "./ports.js";
 import { ActivityHistory, type ActivityStore } from "./activity.js";
+import { transactionErrorMessage } from "./transactionErrors.js";
 
 function b64FromScBytes(value: unknown): string {
   const native = scValToNative(value as xdr.ScVal);
@@ -139,7 +140,7 @@ export class SponsoredSubmitter implements Submitter {
         method: call.method,
         tx_hash: hash,
         message: error,
-        metadata: { sponsored: true, result_status: resultStatus, error },
+        metadata: { ...call.metadata, sponsored: true, result_status: resultStatus, error },
       })
       .catch(() => undefined);
   }
@@ -158,7 +159,7 @@ export class SponsoredSubmitter implements Submitter {
       .setTimeout(120)
       .build();
     const sim = await server.simulateTransaction(probe);
-    if (rpc.Api.isSimulationError(sim)) throw new Error(`Simulation failed: ${sim.error}`);
+    if (rpc.Api.isSimulationError(sim)) throw new Error(transactionErrorMessage(sim.error, call));
 
     const validUntil = sim.latestLedger + 60;
     const auth = sim.result?.auth ?? [];

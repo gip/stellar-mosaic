@@ -234,7 +234,7 @@ export class MosaicClient {
         desk_id: desk.id,
         note_id: note.id,
         owner_tag,
-        metadata: { action_id: actionId, asset_id: params.asset_id, symbol: asset.symbol, amount: params.amount },
+        metadata: { action_id: actionId, asset_id: params.asset_id, symbol: asset.symbol, decimals: asset.decimals, amount: params.amount },
       });
       this.logger.info("shield note staged", { deskId: desk.id, noteId, assetId: params.asset_id, symbol: asset.symbol });
 
@@ -243,6 +243,7 @@ export class MosaicClient {
         deskId: desk.id,
         contractId: desk.contractId,
         method: "shield",
+        metadata: { action_id: actionId, asset_id: params.asset_id, symbol: asset.symbol, decimals: asset.decimals, amount: params.amount },
         args: [
           new Address(source).toScVal(),
           nativeToScVal(params.asset_id, { type: "u32" }),
@@ -514,6 +515,7 @@ export class MosaicClient {
       deskId: desk.id,
       contractId: desk.contractId,
       method: "join",
+      metadata: { action_id: actionId },
       args: [this.scvBytes(bundle.proof), this.scvBytes(bundle.publicInputs)],
     });
     await this.notes.update(target.id, { txHash: res.txHash });
@@ -654,6 +656,7 @@ export class MosaicClient {
         deskId: desk.id,
         contractId: desk.contractId,
         method: "submit_order",
+        metadata: { action_id: actionId },
         args: [this.scvBytes(bundle.proof), this.scvBytes(bundle.publicInputs)],
       });
       await this.notes.update(output.id, { txHash: res.txHash });
@@ -699,6 +702,7 @@ export class MosaicClient {
     });
     try {
       const desk = await this.p.desks.get(params.deskId);
+      const asset = desk.assets.find((a) => a.asset_id === params.asset_id);
       const offer = (await this.assemble(params.deskId, params.asset_id, params.amount)).note;
       await this.waitForConfirm(params.deskId, offer.id, wallet);
       const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
@@ -726,12 +730,20 @@ export class MosaicClient {
         desk_id: desk.id,
         note_id: offer.id,
         owner_tag: offer.owner_tag,
-        metadata: { action_id: actionId, recipient: params.recipient, asset_id: offer.asset_id, amount: offer.amount },
+        metadata: {
+          action_id: actionId,
+          recipient: params.recipient,
+          asset_id: offer.asset_id,
+          symbol: asset?.symbol ?? offer.symbol,
+          decimals: asset?.decimals,
+          amount: offer.amount,
+        },
       });
       const res = await this.p.submitter.submit({
         deskId: desk.id,
         contractId: desk.contractId,
         method: "unshield",
+        metadata: { action_id: actionId },
         args: [
           new Address(params.recipient).toScVal(),
           this.scvBytes(bundle.proof),
@@ -823,6 +835,7 @@ export class MosaicClient {
         deskId: desk.id,
         contractId: desk.contractId,
         method: "cancel_order",
+        metadata: { action_id: actionId },
         args: [
           nativeToScVal(c.pairId, { type: "u32" }),
           nativeToScVal(c.side, { type: "u32" }),

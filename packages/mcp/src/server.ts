@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Desk, MosaicLogger, Operation, SubmitResult } from "@mosaic/sdk";
+import type { BookSide, Desk, MosaicLogger, Operation, SubmitResult } from "@mosaic/sdk";
 import { z } from "zod";
 import { AuthService } from "./auth.js";
+import { StellarBookReader } from "./book.js";
 import { runBaseShield, type BaseShieldConfig as RunnerBaseShieldConfig } from "./baseShield.js";
 import { SponsoredStellarDeployHandlers } from "./deploy.js";
 import { createStderrLogger } from "./logging.js";
@@ -30,11 +30,16 @@ export interface DeployHandlers {
   baseDeploymentConfig(): Promise<unknown>;
 }
 
+export interface BookHandlers {
+  getBook(args: { desk_id: string; pair: number; side: number }): Promise<BookSide>;
+}
+
 export interface MosaicMcpOptions {
   auth?: AuthService;
   store?: MosaicStore;
   relays?: RelayHandlers;
   deploy?: DeployHandlers;
+  books?: BookHandlers;
   logger?: MosaicLogger;
   /** Legacy direct Base-shield runner; the durable queued flow is exposed separately. */
   baseShield?: RunnerBaseShieldConfig;
@@ -80,6 +85,9 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   const auth = opts.auth ?? new AuthService(store);
   const relays = opts.relays ?? new StellarCliRelayer({ store });
   const deploy = opts.deploy ?? new SponsoredStellarDeployHandlers();
+  const books = opts.books ?? {
+    getBook: async ({ desk_id, pair, side }) => new StellarBookReader().getBook(await store.getDesk(desk_id), pair, side),
+  };
   const logger = opts.logger ?? createStderrLogger();
   const server = new McpServer({ name: "mosaic-mcp", version: "0.0.0" });
 
@@ -127,7 +135,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     { description: "Return the current authenticated session.", inputSchema: { session: z.string() } },
     async (args) => {
       const s = await auth.getSession(String(args.session));
-      return ok(s ? { address: s.address, network: "testnet", expires_at: s.expiresAt } : null);
+      return ok(s ? { address: s.address, network: s.network, expires_at: s.expiresAt } : null);
     },
   );
 
@@ -143,25 +151,6 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   reg("list_desks", { description: "List shared desks.", inputSchema: {} }, async () => ok(await store.listDesks()));
   reg("get_desk", { description: "Get one desk.", inputSchema: { id: z.string() } }, async ({ id }) =>
     ok(await store.getDesk(String(id))),
-  );
-  reg(
-    "import_desk",
-    { description: "Import an already-deployed desk.", inputSchema: { session: z.string(), body: z.record(z.unknown()) } },
-    async (args) => {
-      await session(auth, args);
-      const b = body(args);
-      const desk: Desk = {
-        id: randomUUID(),
-        name: String(b.name ?? "Imported desk"),
-        contract_id: String(b.contract_id),
-        sponsor_pubkey: String(b.sponsor_pubkey),
-        event_start_ledger: b.event_start_ledger === undefined || b.event_start_ledger === null ? null : Number(b.event_start_ledger),
-        assets: (b.assets ?? []) as Desk["assets"],
-        pairs: (b.pairs ?? []) as Desk["pairs"],
-        base_deployment: null,
-      };
-      return ok(await store.insertDesk(desk, null));
-    },
   );
   reg(
     "create_desk",
@@ -182,6 +171,15 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
       const s = await session(auth, args);
       return ok(await deploy.completeBaseDeployment(String(args.id), body(args), s.address));
     },
+  );
+
+  reg(
+    "get_book",
+    {
+      description: "Read one public on-chain book side for a desk.",
+      inputSchema: { desk_id: z.string(), pair: z.number(), side: z.number() },
+    },
+    async (args) => ok(await books.getBook({ desk_id: String(args.desk_id), pair: Number(args.pair), side: Number(args.side) })),
   );
 
   reg("list_assets", { description: "List catalog assets.", inputSchema: { session: z.string() } }, async (args) => {
@@ -251,6 +249,18 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   reg("operation_events_since", { description: "Replay operation events.", inputSchema: { session: z.string(), cursor: z.number() } }, async (args) =>
     ok(await store.eventsAfter((await session(auth, args)).address, Number(args.cursor))),
   );
+  reg(
+    "record_activity",
+    { description: "Persist client-generated activity events.", inputSchema: { session: z.string(), events: z.array(z.record(z.unknown())) } },
+    async (args) => {
+      const s = await session(auth, args);
+      return ok(await store.recordActivity(s.address, s.network, args.events as never));
+    },
+  );
+  reg("activity_since", { description: "Replay persisted activity events.", inputSchema: { session: z.string(), cursor: z.number() } }, async (args) => {
+    const s = await session(auth, args);
+    return ok(await store.activityAfter(s.address, s.network, Number(args.cursor)));
+  });
 
   reg("relay_shield", { description: "Relay sponsored shield.", inputSchema: { session: z.string(), desk_id: z.string(), tx_xdr: z.string(), action_id: z.string().optional(), lease_token: z.string().optional() } }, async (args) => {
     const operation = await relayGuard(store, auth, args, String(args.desk_id), "relay_shield");

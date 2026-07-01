@@ -1,5 +1,5 @@
 import { Noir } from '@noir-lang/noir_js'
-import { BASE_FEE, Contract, Networks, rpc, scValToNative, TransactionBuilder } from '@stellar/stellar-sdk'
+import { Asset as StellarAsset, BASE_FEE, Contract, Networks, nativeToScVal, rpc, scValToNative, TransactionBuilder } from '@stellar/stellar-sdk'
 import {
   ChainEventSource,
   errorMessage,
@@ -7,6 +7,7 @@ import {
   makeNoirCompressor,
   replayNoteEvents,
   type AssetDef,
+  type ActivityEvent,
   type AuthChallenge,
   type AuthSession,
   type BaseDeploymentConfig as SdkBaseDeploymentConfig,
@@ -43,6 +44,7 @@ import {
 } from './sdk/indexedDbStore'
 import { currentAddress } from './wallet'
 import { defaultCatalogAssets, mergeCatalogAssets } from './defaultCatalog'
+import { parseDeskShare } from './deskShare'
 import { initNoirWasm } from './noirWasm'
 import { MCP_URL, SOROBAN_RPC_URL } from './config'
 import type { StorageMode } from './StorageModeContext'
@@ -73,6 +75,7 @@ export class ApiError extends Error {
 const mcp = createMcpClient({ url: MCP_URL })
 const deskCaches = new Map<StorageMode, Map<string, Desk>>()
 const sources = new Map<StorageMode, LocalPathProvider>()
+const CONTRACT_ID = /^C[A-Z2-7]{55}$/
 
 let compressNoir: Noir | undefined
 const compress = makeNoirCompressor({
@@ -178,6 +181,98 @@ async function readContractRoot(desk: Desk): Promise<string> {
   return bytesToHex(scValToNative(simulation.result.retval))
 }
 
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (value instanceof Map) return Object.fromEntries(value.entries()) as Record<string, unknown>
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>
+  throw new Error(`invalid ${label}`)
+}
+
+function kindFromNative(value: unknown): AssetKind {
+  const text = typeof value === 'string' ? value : JSON.stringify(value)
+  if (text.includes('BaseRepresented')) return 'BaseRepresented'
+  if (text.includes('Dual')) return 'Dual'
+  if (text.includes('Stellar')) return 'Stellar'
+  throw new Error('invalid asset kind from contract')
+}
+
+function normalizeAddress(value: string | null | undefined): string | null {
+  return value ? value.toLowerCase() : null
+}
+
+function resolveStellarToken(token: string | null, networkPassphrase: string): string | null {
+  if (token === null) return null
+  if (CONTRACT_ID.test(token)) return token
+  if (token === 'native') return StellarAsset.native().contractId(networkPassphrase)
+  const [code, issuer] = token.split(':')
+  if (code && issuer) return new StellarAsset(code, issuer).contractId(networkPassphrase)
+  return token
+}
+
+async function simulateContractView(
+  server: rpc.Server,
+  desk: Desk,
+  networkPassphrase: string,
+  method: string,
+  args: ReturnType<typeof nativeToScVal>[] = [],
+): Promise<unknown> {
+  const account = await server.getAccount(desk.sponsor_pubkey)
+  const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase })
+    .addOperation(new Contract(desk.contract_id).call(method, ...args))
+    .setTimeout(30)
+    .build()
+  const simulation = await server.simulateTransaction(tx)
+  if (rpc.Api.isSimulationError(simulation) || !simulation.result) {
+    throw new Error(`${method} simulation failed${rpc.Api.isSimulationError(simulation) ? `: ${errorMessage(simulation.error)}` : ''}`)
+  }
+  return scValToNative(simulation.result.retval)
+}
+
+async function verifyImportedAsset(
+  server: rpc.Server,
+  desk: Desk,
+  networkPassphrase: string,
+  asset: Asset,
+): Promise<void> {
+  const native = await simulateContractView(
+    server,
+    desk,
+    networkPassphrase,
+    'asset',
+    [nativeToScVal(asset.asset_id, { type: 'u32' })],
+  )
+  if (native === null || native === undefined) throw new Error(`asset ${asset.asset_id} is not registered on-chain`)
+  const live = record(native, `asset ${asset.asset_id}`)
+  const kind = kindFromNative(live.kind)
+  if (kind !== asset.kind) throw new Error(`asset ${asset.asset_id} kind does not match the contract`)
+  const liveToken = typeof live.token === 'string' ? live.token : null
+  const expectedToken = kind === 'BaseRepresented' ? null : resolveStellarToken(asset.token, networkPassphrase)
+  if (normalizeAddress(liveToken) !== normalizeAddress(expectedToken)) {
+    throw new Error(`asset ${asset.asset_id} token does not match the contract`)
+  }
+}
+
+async function verifyImportedDesk(desk: Desk, networkPassphrase: string): Promise<void> {
+  if (networkPassphrase !== Networks.TESTNET) {
+    throw new Error('Desk share is for a different Stellar network.')
+  }
+  const server = new rpc.Server(SOROBAN_RPC_URL)
+  await simulateContractView(server, desk, networkPassphrase, 'root')
+  const pairCount = await simulateContractView(server, desk, networkPassphrase, 'pair_count')
+  if (typeof pairCount !== 'number' && typeof pairCount !== 'bigint') throw new Error('pair_count simulation returned an invalid value')
+  if (Number(pairCount) !== desk.pairs.length) throw new Error('desk pair count does not match the contract')
+  for (const asset of desk.assets) await verifyImportedAsset(server, desk, networkPassphrase, asset)
+
+  const startLedger = desk.event_start_ledger ?? 0
+  const chain = new ChainEventSource({
+    network: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase },
+    startLedger,
+  })
+  const events = await chain.events(desk.contract_id, startLedger, {
+    validateReplay: (recovered) => validateReplayRoot(desk, recovered),
+  })
+  await validateReplayRoot(desk, events)
+}
+
 async function validateReplayRoot(desk: Desk, events: TreeEvent[]): Promise<void> {
   const [state, root] = await Promise.all([
     replayNoteEvents({ events, compress }),
@@ -232,15 +327,11 @@ export const api = {
   ),
   getDesk: (mode: StorageMode, id: string) => wrap(() => getDesk(mode, id)),
   getRoot: (mode: StorageMode, id: string) => wrap(async () => ({ root: await readContractRoot(await getDesk(mode, id)) })),
-  importDesk: (body: {
-    name: string
-    contract_id: string
-    sponsor_pubkey: string
-    assets: Asset[]
-    pairs: Pair[]
-  }) => wrap(async () => {
-    const desk = (await mcp.importDesk(body)) as Desk
-    deskCache('trusted').set(desk.id, desk)
+  importDeskShare: (share: string) => wrap(async () => {
+    const { desk, networkPassphrase } = await parseDeskShare(share)
+    await verifyImportedDesk(desk, networkPassphrase)
+    await putLocalDesk('trustless', desk)
+    deskCache('trustless').set(desk.id, desk)
     return desk
   }),
   createDesk: (body: {
@@ -303,6 +394,7 @@ export const api = {
       deskCache('trusted').set(desk.id, desk)
       return desk
     }),
+  getBook: (id: string, pair: number, side: number) => wrap(() => mcp.getBook(id, pair, side)),
   listCatalogAssets: (mode: StorageMode) =>
     wrap(() => mode === 'trusted' ? mcp.listAssets() : localCatalog(mode)),
   proposeAsset: (mode: StorageMode, body: ProposeAssetBody) =>
@@ -394,4 +486,6 @@ export const api = {
   failClientAction: (id: string, lease_token: string, error: string, retryable = false) =>
     wrap(() => mcp.failClientAction(id, lease_token, error, retryable)),
   operationEventsSince: (cursor: number) => wrap(() => mcp.operationEventsSince(cursor)),
+  recordActivity: (events: ActivityEvent[]) => wrap(() => mcp.recordActivity(events)),
+  activitySince: (cursor: number) => wrap(() => mcp.activitySince(cursor)),
 }

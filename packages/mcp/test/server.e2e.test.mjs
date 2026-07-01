@@ -20,6 +20,20 @@ async function connect(opts = {}) {
 
 const textOf = (res) => JSON.parse(res.content.find((c) => c.type === "text").text);
 
+async function authenticate(client, kp = Keypair.random()) {
+  const ch = textOf(await client.callTool({ name: "auth_challenge", arguments: { address: kp.publicKey() } }));
+  const signature = kp
+    .sign(Buffer.from(sep53Digest(new TextEncoder().encode(ch.message))))
+    .toString("base64");
+  const verified = textOf(
+    await client.callTool({
+      name: "auth_verify",
+      arguments: { address: kp.publicKey(), challengeId: ch.challengeId, signature },
+    }),
+  );
+  return { kp, token: verified.token };
+}
+
 test("exposes the MCP-only frontend tool set", async () => {
   const client = await connect();
   const { tools } = await client.listTools();
@@ -33,6 +47,8 @@ test("exposes the MCP-only frontend tool set", async () => {
     "get_desk",
     "create_operation",
     "claim_client_action",
+    "record_activity",
+    "activity_since",
     "relay_shield",
     "relay_order",
     "get_wallet_backup",
@@ -74,6 +90,54 @@ test("wallet auth handshake over the protocol, then base_shield gated by config"
     },
   });
   assert.ok(bs.isError, "base_shield must error when the prover/relayer is not configured");
+});
+
+test("activity tools persist scoped activity over the protocol", async () => {
+  const client = await connect();
+  const { kp, token } = await authenticate(client);
+  const other = Keypair.random().publicKey();
+
+  const recorded = textOf(
+    await client.callTool({
+      name: "record_activity",
+      arguments: {
+        session: token,
+        events: [
+          {
+            id: "activity-protocol-1",
+            idempotency_key: "protocol-idem-1",
+            kind: "transaction",
+            wallet_address: other,
+            network: "public",
+            created_at: 100,
+            metadata: { secret_key: "hidden", kept: "visible" },
+          },
+        ],
+      },
+    }),
+  );
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].wallet_address, kp.publicKey());
+  assert.equal(recorded[0].network, "testnet");
+  assert.equal(recorded[0].metadata.secret_key, undefined);
+  assert.equal(recorded[0].metadata.kept, "visible");
+
+  const duplicate = textOf(
+    await client.callTool({
+      name: "record_activity",
+      arguments: { session: token, events: [{ id: "retry-id", idempotency_key: "protocol-idem-1", kind: "error" }] },
+    }),
+  );
+  assert.equal(duplicate[0].cursor, recorded[0].cursor);
+  assert.equal(duplicate[0].id, "activity-protocol-1");
+
+  const replayed = textOf(
+    await client.callTool({
+      name: "activity_since",
+      arguments: { session: token, cursor: 0 },
+    }),
+  );
+  assert.deepEqual(replayed.map((event) => event.id), ["activity-protocol-1"]);
 });
 
 test("base_shield_config reports desk bridge and worker readiness", async () => {

@@ -10,6 +10,7 @@ import type { MosaicStore } from "./store.js";
 
 export interface Session {
   address: string;
+  network: string;
   token: string;
   expiresAt: number;
 }
@@ -66,7 +67,7 @@ export class AuthService {
     if (!this.store) this.challenges.delete(challengeId);
     if (this.store) return this.store.createSession(address, "testnet").then(({ token }) => ({ token }));
     const token = randomBytes(32).toString("hex");
-    this.sessions.set(token, { address, token, expiresAt: Date.now() + SESSION_TTL_MS });
+    this.sessions.set(token, { address, network: "testnet", token, expiresAt: Date.now() + SESSION_TTL_MS });
     return { token };
   }
 
@@ -75,7 +76,7 @@ export class AuthService {
     if (this.store) {
       const session = await this.store.getSession(token);
       if (!session) throw new Error("invalid or expired session");
-      return { address: session.address, token, expiresAt: session.expires_at ?? Date.now() + SESSION_TTL_MS };
+      return { address: session.address, network: session.network, token, expiresAt: session.expires_at ?? Date.now() + SESSION_TTL_MS };
     }
     const s = this.sessions.get(token);
     if (!s || Date.now() > s.expiresAt) throw new Error("invalid or expired session");

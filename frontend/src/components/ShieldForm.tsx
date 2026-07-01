@@ -6,6 +6,18 @@ import { useRecovery } from '../RecoveryContext'
 import { useActivity } from '../ActivityContext'
 import { useMosaicServer } from '../MosaicServerContext'
 import { shieldTrustless } from '../trustless'
+import Banner from './ui/Banner'
+import Field from './ui/Field'
+import ProgressSteps from './ui/ProgressSteps'
+
+function parseAmount(amount: string, decimals: number): bigint | null {
+  if (amount.trim() === '') return null
+  try {
+    return BigInt(toRaw(amount, decimals))
+  } catch {
+    return null
+  }
+}
 
 /**
  * Shield a supported asset into the desk's custody. Generates fresh note secrets in-browser,
@@ -35,22 +47,35 @@ export default function ShieldForm({
   const mosaicServer = useMosaicServer()
   const recoveryReady = recovery.unlocked && !recovery.error
 
+  const asset = desk.assets.find((a) => a.asset_id === assetId)
+  const decimals = asset?.decimals ?? 7
+  const amountRaw = parseAmount(amount, decimals)
+  const amountError =
+    amount.trim() === ''
+      ? null
+      : amountRaw == null
+        ? `Enter a valid amount with at most ${decimals} decimal places.`
+        : amountRaw <= 0n
+          ? 'Amount must be greater than zero.'
+          : null
+  const valid = amountRaw != null && amountRaw > 0n
+
   async function submit(e: React.FormEvent) {
     e.preventDefault()
+    if (!valid) return
     setBusy(true)
     setError(null)
     setStatus(null)
     try {
-      const asset = desk.assets.find((a) => a.asset_id === assetId)!
-      const rawAmount = toRaw(amount, asset.decimals)
+      const rawAmount = amountRaw!.toString()
       if (mosaicServer.trusted && !trustless) {
         setStatus('Queueing shield…')
         const operation = await activity.enqueue({ kind: 'shield', desk_id: desk.id, asset_id: assetId, amount: rawAmount })
         setStatus(`Queued · ${operation.id.slice(0, 8)}`)
       } else {
-        setStatus('Submitting with Freighter…')
+        setStatus('Proving & submitting in browser…')
         const note = await shieldTrustless(desk, { address: userPubkey, assetId, amount: rawAmount })
-        setStatus(note.indexed ? 'Shielded' : 'Shielded · indexing')
+        setStatus(note.indexed ? 'Shielded ✓' : 'Shielded — indexing…')
       }
       onDone()
     } catch (e) {
@@ -62,9 +87,9 @@ export default function ShieldForm({
   }
 
   return (
-    <form onSubmit={submit} className="row" style={{ alignItems: 'flex-end' }}>
-      <div>
-        <label>Asset</label>
+    <form onSubmit={submit} className="stack">
+      {error && <Banner tone="err">{error}</Banner>}
+      <Field id="shield-asset" label="Asset">
         <select value={assetId} onChange={(e) => setAssetId(Number(e.target.value))}>
           {desk.assets.map((a) => (
             <option key={a.asset_id} value={a.asset_id}>
@@ -72,12 +97,11 @@ export default function ShieldForm({
             </option>
           ))}
         </select>
-      </div>
-      <div>
-        <label>Amount ({desk.assets.find((a) => a.asset_id === assetId)?.symbol ?? ''})</label>
+      </Field>
+      <Field id="shield-amount" label={`Amount (${asset?.symbol ?? ''})`} error={amountError}>
         <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
-      </div>
-      <button type="submit" disabled={busy || !recoveryReady || !!disabledReason}>
+      </Field>
+      <button className="btn-primary btn-block" type="submit" disabled={busy || !valid || !recoveryReady || !!disabledReason}>
         {busy
           ? 'Shielding…'
           : disabledReason
@@ -86,8 +110,8 @@ export default function ShieldForm({
               ? 'Shield from Stellar'
               : 'Enable / repair recovery first'}
       </button>
-      {status && <span className="muted">{status}</span>}
-      {error && <span className="err">{error}</span>}
+      <ProgressSteps running={busy} step={status} />
+      {!busy && status && !error && <div className="status-dot ok">{status}</div>}
     </form>
   )
 }

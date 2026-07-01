@@ -54,3 +54,56 @@ test("sqlite MCP store does not reclaim completed actions after lease expiry", a
   const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
   await assertCompletedActionIsNotReclaimed(openMosaicStore(`sqlite://${join(dir, "mcp.db")}`));
 });
+
+async function assertActivityPersistence(store) {
+  const address = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  const other = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBR5";
+  const first = await store.recordActivity(address, "testnet", [
+    {
+      id: "activity-1",
+      idempotency_key: "idem-1",
+      kind: "transaction",
+      wallet_address: other,
+      network: "public",
+      status: "submitted",
+      created_at: 100,
+      metadata: { proof: "secret-proof", nested: { tx_xdr: "secret-xdr", kept: "ok" } },
+    },
+  ]);
+  assert.equal(first.length, 1);
+  assert.equal(first[0].cursor, 1);
+  assert.equal(first[0].wallet_address, address);
+  assert.equal(first[0].network, "testnet");
+  assert.equal(first[0].metadata.proof, undefined);
+  assert.equal(first[0].metadata.nested.tx_xdr, undefined);
+  assert.equal(first[0].metadata.nested.kept, "ok");
+
+  const duplicate = await store.recordActivity(address, "testnet", [
+    { id: "activity-1-retry", idempotency_key: "idem-1", kind: "transaction", status: "succeeded" },
+  ]);
+  assert.equal(duplicate[0].cursor, first[0].cursor);
+  assert.equal(duplicate[0].id, "activity-1");
+  assert.equal(duplicate[0].status, "submitted");
+
+  const second = await store.recordActivity(address, "testnet", [
+    { id: "activity-2", kind: "error", created_at: 200 },
+  ]);
+  assert.ok(second[0].cursor > first[0].cursor);
+
+  await store.recordActivity(address, "public", [{ id: "activity-1", kind: "transaction", created_at: 300 }]);
+  await store.recordActivity(other, "testnet", [{ id: "activity-1", kind: "transaction", created_at: 400 }]);
+
+  assert.deepEqual((await store.activityAfter(address, "testnet", 0)).map((event) => event.id), ["activity-1", "activity-2"]);
+  assert.deepEqual((await store.activityAfter(address, "testnet", first[0].cursor)).map((event) => event.id), ["activity-2"]);
+  assert.deepEqual((await store.activityAfter(address, "public", 0)).map((event) => event.id), ["activity-1"]);
+  assert.deepEqual((await store.activityAfter(other, "testnet", 0)).map((event) => event.id), ["activity-1"]);
+}
+
+test("memory MCP store records scoped sanitized activity", async () => {
+  await assertActivityPersistence(new MemoryMosaicStore());
+});
+
+test("sqlite MCP store records scoped sanitized activity", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
+  await assertActivityPersistence(openMosaicStore(`sqlite://${join(dir, "mcp.db")}`));
+});

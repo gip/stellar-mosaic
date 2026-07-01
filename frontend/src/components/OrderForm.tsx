@@ -9,6 +9,10 @@ import { nowSeconds } from '../time'
 import { useRecovery } from '../RecoveryContext'
 import { useActivity } from '../ActivityContext'
 import { placeOrderTrustless } from '../trustless'
+import Field from './ui/Field'
+import ProgressSteps from './ui/ProgressSteps'
+import Button from './ui/Button'
+import HelpTip from './ui/HelpTip'
 
 type Side = 'SELL' | 'BUY'
 
@@ -133,11 +137,31 @@ export default function OrderForm({
         crosses(amountInRaw, minOutRaw, BigInt(o.amount_in), BigInt(o.min_out)),
     )
 
-  // Human-readable preview of what placing the order will do.
+  // Field-level errors (blank while the field is empty).
+  const amountError =
+    amountIn.trim() === ''
+      ? null
+      : amountInRaw == null
+        ? `Enter a valid amount with at most ${dec(assetIn)} decimal places.`
+        : amountInRaw <= 0n
+          ? 'Amount must be greater than zero.'
+          : amountInRaw > maxInRaw
+            ? `Exceeds max ${formatAmount(maxInRaw, dec(assetIn))} ${sym(assetIn)}.`
+            : plan?.kind === 'impossible'
+              ? plan.reason
+              : null
+  const priceError = (() => {
+    if (price.trim() === '') return null
+    try {
+      return parseRatio(price).num > 0n ? null : 'Enter a positive price.'
+    } catch {
+      return 'Enter a valid price.'
+    }
+  })()
+
+  // Human-readable preview of what placing the order will do (positive-path only).
   const preview = (() => {
-    if (amountInRaw == null) return null
-    if (amountInRaw > maxInRaw) return `Exceeds max ${formatAmount(maxInRaw, dec(assetIn))} ${sym(assetIn)}.`
-    if (plan?.kind === 'impossible') return plan.reason
+    if (amountInRaw == null || amountError) return null
     if (plan?.kind === 'assemble') {
       const single = plan.steps.length === 1 && plan.steps[0].op === 'split'
       if (single) return 'Will split a note to the exact amount, then place the order.'
@@ -159,7 +183,7 @@ export default function OrderForm({
     setError(null)
     try {
       if (trustless) {
-        setStatus('Submitting with Freighter…')
+        setStatus('Proving & submitting in browser…')
         await placeOrderTrustless(desk, {
           address: userPubkey,
           pairId,
@@ -187,72 +211,79 @@ export default function OrderForm({
   }
 
   return (
-    <form onSubmit={submit} className="row" style={{ alignItems: 'flex-end' }}>
-      <div>
-        <label>Pair</label>
-        <select value={pairId} onChange={(e) => setPairId(Number(e.target.value))}>
-          {desk.pairs.map((p) => (
-            <option key={p.pair_id} value={p.pair_id}>
-              {sym(p.base_asset)}/{sym(p.quote_asset)}
-            </option>
-          ))}
-        </select>
+    <form onSubmit={submit} className="stack">
+      <div className="row" style={{ gap: 'var(--sp-3)' }}>
+        <Field id="order-pair" label="Pair">
+          <select value={pairId} onChange={(e) => setPairId(Number(e.target.value))}>
+            {desk.pairs.map((p) => (
+              <option key={p.pair_id} value={p.pair_id}>
+                {sym(p.base_asset)}/{sym(p.quote_asset)}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field id="order-side" label="Side">
+          <select value={side} onChange={(e) => setSide(e.target.value as Side)}>
+            <option value="SELL">SELL {pair && sym(pair.base_asset)}</option>
+            <option value="BUY">BUY {pair && sym(pair.base_asset)}</option>
+          </select>
+        </Field>
       </div>
-      <div>
-        <label>Side</label>
-        <select value={side} onChange={(e) => setSide(e.target.value as Side)}>
-          <option value="SELL">SELL {pair && sym(pair.base_asset)}</option>
-          <option value="BUY">BUY {pair && sym(pair.base_asset)}</option>
-        </select>
-      </div>
-      <div>
-        <label>
-          Amount in ({sym(assetIn)}) · max {formatAmount(maxInRaw, dec(assetIn))}
-        </label>
-        <input
-          value={amountIn}
-          onChange={(e) => setAmountIn(e.target.value)}
-          inputMode="decimal"
-          placeholder={formatAmount(maxInRaw, dec(assetIn))}
-        />
-        <button
-          type="button"
-          style={{ padding: '2px 8px', marginLeft: 6 }}
-          onClick={() => setAmountIn(formatAmount(maxInRaw, dec(assetIn)))}
-          disabled={maxInRaw <= 0n}
-        >
-          max
-        </button>
-      </div>
-      <div>
-        <label>
-          Limit price ({pair && sym(pair.quote_asset)} per {pair && sym(pair.base_asset)})
-        </label>
+      <Field
+        id="order-amount"
+        label={`Amount in (${sym(assetIn)})`}
+        help={`Max ${formatAmount(maxInRaw, dec(assetIn))} available.`}
+        error={amountError}
+      >
+        <div className="field-row">
+          <input
+            value={amountIn}
+            onChange={(e) => setAmountIn(e.target.value)}
+            inputMode="decimal"
+            placeholder={formatAmount(maxInRaw, dec(assetIn))}
+            style={{ flex: 1 }}
+          />
+          <Button size="sm" onClick={() => setAmountIn(formatAmount(maxInRaw, dec(assetIn)))} disabled={maxInRaw <= 0n || busy}>
+            Max
+          </Button>
+        </div>
+      </Field>
+      <Field
+        id="order-price"
+        label={
+          <>
+            Limit price ({pair && sym(pair.quote_asset)} per {pair && sym(pair.base_asset)}){' '}
+            <HelpTip>Quote asset per 1 base asset. SELL fills at this price or higher; BUY at this price or lower.</HelpTip>
+          </>
+        }
+        error={priceError}
+      >
         <input value={price} onChange={(e) => setPrice(e.target.value)} inputMode="decimal" />
-      </div>
-      <div>
-        <label>Min out ({sym(assetOut)})</label>
+      </Field>
+      <Field id="order-minout" label={`Min out (${sym(assetOut)})`}>
         <input value={minOutRaw != null ? formatAmount(minOutRaw, dec(assetOut)) : ''} readOnly />
-      </div>
-      <div>
-        <label>
-          <input type="checkbox" checked={partial} onChange={(e) => setPartial(e.target.checked)} />{' '}
-          partial
-        </label>
-      </div>
-      <button type="submit" disabled={busy || !valid || !recoveryReady || !!disabledReason}>
+      </Field>
+      <label style={{ textTransform: 'none', color: 'var(--fg)', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <input type="checkbox" checked={partial} onChange={(e) => setPartial(e.target.checked)} />
+        Allow partial fills
+        <HelpTip>If on, the order can rest and fill in integer lots. If off, it fills fully or not at all.</HelpTip>
+      </label>
+      {willCross && valid && !busy && !error && (
+        <div className="banner warn" role="status">
+          <div className="banner-body">
+            Crosses the book — this order will match a resting {side === 'SELL' ? 'bid' : 'ask'} and
+            execute immediately (fully or partially) instead of resting.
+          </div>
+        </div>
+      )}
+      {preview && !error && <div className="muted">{preview}</div>}
+      <button className="btn-primary btn-block" type="submit" disabled={busy || !valid || !recoveryReady || !!disabledReason}>
         {busy ? 'Working…' : recoveryReady ? 'Place order' : 'Enable / repair recovery first'}
       </button>
-      {disabledReason && <span className="muted">{disabledReason}</span>}
-      {willCross && valid && !busy && !error && (
-        <span className="warn">
-          ⚠ Crosses the book — this order will match a resting {side === 'SELL' ? 'bid' : 'ask'} and
-          execute immediately (fully or partially) instead of resting.
-        </span>
-      )}
-      {preview && !error && <span className="muted">{preview}</span>}
-      {status && <span className="muted">{status}</span>}
-      {error && <span className="err">{error}</span>}
+      {disabledReason && <div className="muted">{disabledReason}</div>}
+      <ProgressSteps running={busy} step={status} />
+      {!busy && status && !error && <div className="status-dot ok">{status}</div>}
+      {error && <div className="banner err" role="alert">{error}</div>}
     </form>
   )
 }

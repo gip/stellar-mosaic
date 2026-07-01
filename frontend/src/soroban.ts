@@ -17,6 +17,7 @@ import {
 import { signAuthEntry } from '@stellar/freighter-api'
 import { Buffer } from 'buffer'
 import { SOROBAN_RPC_URL } from './config'
+import { errorMessage, transactionErrorMessage } from '@mosaic/sdk'
 
 // recipientField now lives in @mosaic/sdk (single source of truth); re-export it so existing
 // imports of './soroban' keep working.
@@ -35,6 +36,7 @@ export async function buildSponsoredShield(
   assetId: number,
   amount: string,
   ownerTagBytes: Uint8Array,
+  metadata?: Record<string, unknown>,
 ): Promise<string> {
   const srv = new rpc.Server(SOROBAN_RPC_URL)
   const args = [
@@ -51,7 +53,9 @@ export async function buildSponsoredShield(
     .setTimeout(120)
     .build()
   const sim = await srv.simulateTransaction(probe)
-  if (rpc.Api.isSimulationError(sim)) throw new Error(`simulation failed: ${sim.error}`)
+  if (rpc.Api.isSimulationError(sim)) {
+    throw new Error(transactionErrorMessage(sim.error, { contractId, method: 'shield', args, metadata }))
+  }
 
   // 2. User signs each auth entry via Freighter (signs hash(preimage); authorizeEntry verifies it).
   const validUntil = sim.latestLedger + 60
@@ -65,7 +69,7 @@ export async function buildSponsoredShield(
             address: userPubkey,
             networkPassphrase: PASSPHRASE,
           })
-          if (res.error) throw new Error(String(res.error))
+          if (res.error) throw new Error(errorMessage(res.error))
           if (!res.signedAuthEntry) throw new Error('Freighter returned no signature')
           return Buffer.from(res.signedAuthEntry, 'base64')
         },

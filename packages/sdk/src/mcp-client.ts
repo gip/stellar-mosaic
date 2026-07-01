@@ -10,6 +10,7 @@ import type {
   BaseDeploymentConfig,
   BaseShieldConfig,
   BaseShieldJob,
+  BookSide,
   CatalogAsset,
   ClientAction,
   Desk,
@@ -20,7 +21,7 @@ import type {
   ProposeAssetBody,
   WalletBackupEnvelope,
 } from "./types.js";
-import type { AssetDef, PairDef } from "./types.js";
+import type { ActivityEvent } from "./activity.js";
 import type { ClientActionLease, McpClient, StellarSigner, SubmitResult } from "./ports.js";
 
 export interface McpClientOptions {
@@ -146,17 +147,6 @@ class HttpMcpClient implements McpClient {
     return this.call("get_desk", { id });
   }
 
-  importDesk(body: {
-    name: string;
-    contract_id: string;
-    sponsor_pubkey: string;
-    event_start_ledger?: number | null;
-    assets: AssetDef[];
-    pairs: PairDef[];
-  }): Promise<Desk> {
-    return this.call("import_desk", this.auth({ body }));
-  }
-
   createDesk(body: {
     name: string;
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: string }[];
@@ -172,6 +162,10 @@ class HttpMcpClient implements McpClient {
 
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk> {
     return this.call("complete_base_deployment", this.auth({ id, body }));
+  }
+
+  getBook(deskId: string, pair: number, side: number): Promise<BookSide> {
+    return this.call("get_book", { desk_id: deskId, pair, side });
   }
 
   listAssets(): Promise<CatalogAsset[]> {
@@ -224,6 +218,14 @@ class HttpMcpClient implements McpClient {
 
   operationEventsSince(cursor: number): Promise<OperationEvent[]> {
     return this.call("operation_events_since", this.auth({ cursor }));
+  }
+
+  recordActivity(events: ActivityEvent[]): Promise<ActivityEvent[]> {
+    return this.call("record_activity", this.auth({ events }));
+  }
+
+  activitySince(cursor: number): Promise<ActivityEvent[]> {
+    return this.call("activity_since", this.auth({ cursor }));
   }
 
   async relayShield(deskId: string, txXdr: string, lease?: ClientActionLease): Promise<SubmitResult> {

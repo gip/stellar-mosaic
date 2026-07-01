@@ -10,6 +10,7 @@ import type {
   BaseDeploymentConfig,
   BaseShieldConfig,
   BaseShieldJob,
+  BookSide,
   CatalogAsset,
   ChainNote,
   ClientAction,
@@ -27,6 +28,7 @@ import type {
   TreeEvent,
   WalletBackupEnvelope,
 } from "./types.js";
+import type { ActivityEvent } from "./activity.js";
 export type { ActivityStore } from "./activity.js";
 
 /** Network coordinates shared by every RPC-touching adapter. */
@@ -51,6 +53,8 @@ export interface ContractCall {
   deskId?: string;
   contractId: string;
   method: string;
+  /** Public, non-secret metadata used to correlate transaction activity with the wallet action. */
+  metadata?: Record<string, unknown>;
   /** Method arguments, already converted to `@stellar/stellar-sdk` `xdr.ScVal`-compatible values
    * by the core. Typed as `unknown[]` here to keep the port free of the stellar-sdk types. */
   args: unknown[];
@@ -161,14 +165,6 @@ export interface McpClient {
   logout(): Promise<void>;
   listDesks(): Promise<Desk[]>;
   getDesk(id: string): Promise<Desk>;
-  importDesk(body: {
-    name: string;
-    contract_id: string;
-    sponsor_pubkey: string;
-    event_start_ledger?: number | null;
-    assets: AssetDef[];
-    pairs: PairDef[];
-  }): Promise<Desk>;
   createDesk(body: {
     name: string;
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: string }[];
@@ -177,6 +173,7 @@ export interface McpClient {
   }): Promise<Desk>;
   baseDeploymentConfig(): Promise<BaseDeploymentConfig>;
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk>;
+  getBook(deskId: string, pair: number, side: number): Promise<BookSide>;
   listAssets(): Promise<CatalogAsset[]>;
   proposeAsset(body: ProposeAssetBody): Promise<CatalogAsset>;
   trustAsset(id: string): Promise<{ ok: boolean }>;
@@ -190,6 +187,8 @@ export interface McpClient {
   completeClientAction(id: string, leaseToken: string, result: unknown): Promise<Operation>;
   failClientAction(id: string, leaseToken: string, error: string, retryable?: boolean): Promise<Operation>;
   operationEventsSince(cursor: number): Promise<OperationEvent[]>;
+  recordActivity(events: ActivityEvent[]): Promise<ActivityEvent[]>;
+  activitySince(cursor: number): Promise<ActivityEvent[]>;
   relayShield(deskId: string, txXdr: string, lease?: ClientActionLease): Promise<SubmitResult>;
   relayOrder(deskId: string, proofB64: string, publicInputsB64: string, lease?: ClientActionLease): Promise<SubmitResult>;
   relayJoin(deskId: string, proofB64: string, publicInputsB64: string, lease?: ClientActionLease): Promise<SubmitResult>;

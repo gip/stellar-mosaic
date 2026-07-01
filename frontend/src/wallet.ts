@@ -8,6 +8,7 @@ import {
   getNetworkDetails,
   signMessage,
 } from '@stellar/freighter-api'
+import { errorMessage } from '@mosaic/sdk'
 import { Networks } from '@stellar/stellar-sdk'
 
 function normalizeNetworkPassphrase(network: string | undefined, networkPassphrase: string | undefined): string {
@@ -39,7 +40,7 @@ export async function walletInstalled(): Promise<boolean> {
 /** Prompt the user to connect; returns the selected G... address. */
 export async function connect(): Promise<string> {
   const r = await requestAccess()
-  if (r.error) throw new Error(r.error)
+  if (r.error) throw new Error(errorMessage(r.error))
   if (!r.address) throw new Error('No address returned by Freighter')
   return r.address
 }
@@ -77,6 +78,6 @@ export async function signRecoveryMessage(
   networkPassphrase: string,
 ) {
   const r = await signMessage(message, { address, networkPassphrase })
-  if (r.error) throw new Error(String(r.error))
+  if (r.error) throw new Error(errorMessage(r.error))
   return r
 }

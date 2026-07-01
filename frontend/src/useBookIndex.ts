@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Networks } from '@stellar/stellar-sdk'
+import { errorMessage } from '@mosaic/sdk'
 import type { Desk } from './api'
-import { clearBookIndex, syncBookIndex, type BookIndexSnapshot } from './bookIndexer'
+import { clearBookIndex, syncBookIndex, syncTrustedBookIndex, type BookIndexSnapshot } from './bookIndexer'
 import type { StorageMode } from './StorageModeContext'
 
 const EMPTY: BookIndexSnapshot = {
@@ -12,6 +13,31 @@ const EMPTY: BookIndexSnapshot = {
   orders: [],
   assets: [],
   pairs: [],
+}
+
+function failedSnapshot(desk: Desk, scope: string, error: unknown): BookIndexSnapshot {
+  return {
+    status: 'error',
+    error: errorMessage(error),
+    lastLedger: 0,
+    lastSequence: '0',
+    targetSequence: '0',
+    orders: [],
+    assets: desk.assets.map((asset) => ({
+      id: `${scope}\u0000${asset.asset_id}`,
+      scope,
+      asset_id: asset.asset_id,
+      token: asset.token ?? '',
+      kind: asset.kind,
+    })),
+    pairs: desk.pairs.map((pair) => ({
+      id: `${scope}\u0000${pair.pair_id}`,
+      scope,
+      pair_id: pair.pair_id,
+      base_asset: pair.base_asset,
+      quote_asset: pair.quote_asset,
+    })),
+  }
 }
 
 export interface BookIndexState extends BookIndexSnapshot {
@@ -42,14 +68,18 @@ export function useBookIndex(mode: StorageMode, desk: Desk | null, networkPassph
       if (running) return
       running = true
       try {
-        const next = await syncBookIndex(
-          mode,
-          desk,
-          desk.sponsor_pubkey,
-          network,
-          desk.event_start_ledger,
+        const next = mode === 'trusted'
+          ? await syncTrustedBookIndex(desk, network)
+          : await syncBookIndex(
+            mode,
+            desk,
+            desk.sponsor_pubkey,
+            network,
+            desk.event_start_ledger,
         )
         if (alive) setStored({ scope, snapshot: next })
+      } catch (error) {
+        if (alive) setStored({ scope, snapshot: failedSnapshot(desk, scope, error) })
       } finally {
         running = false
       }

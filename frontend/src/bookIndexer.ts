@@ -735,6 +735,41 @@ export async function syncBookIndex(
   return snapshot(scope)
 }
 
+export async function syncTrustedBookIndex(
+  desk: Desk,
+  networkPassphrase: string = Networks.TESTNET,
+): Promise<BookIndexSnapshot> {
+  const scope = scopeOf('trusted', networkPassphrase, desk.contract_id)
+  const server = new rpc.Server(SOROBAN_RPC_URL)
+  const orderGroups = await Promise.all(
+    desk.pairs.flatMap((pair) => [
+      liveBook(server, desk.contract_id, desk.sponsor_pubkey, networkPassphrase, scope, pair.pair_id, 0),
+      liveBook(server, desk.contract_id, desk.sponsor_pubkey, networkPassphrase, scope, pair.pair_id, 1),
+    ]),
+  )
+  return {
+    status: 'synced',
+    lastLedger: 0,
+    lastSequence: '0',
+    targetSequence: '0',
+    orders: orderGroups.flat(),
+    assets: desk.assets.map((asset) => ({
+      id: `${scope}\u0000${asset.asset_id}`,
+      scope,
+      asset_id: asset.asset_id,
+      token: asset.token ?? '',
+      kind: asset.kind,
+    })),
+    pairs: desk.pairs.map((pair) => ({
+      id: `${scope}\u0000${pair.pair_id}`,
+      scope,
+      pair_id: pair.pair_id,
+      base_asset: pair.base_asset,
+      quote_asset: pair.quote_asset,
+    })),
+  }
+}
+
 export function ordersFor(snapshot: BookIndexSnapshot, pairId: number, side: number): IndexedOrder[] {
   const orders = snapshot.orders.filter((o) => o.pair_id === pairId && o.side === side)
   return orders.sort((a, b) => compareOrders(a, b, side))

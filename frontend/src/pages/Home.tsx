@@ -8,8 +8,10 @@ import { useStorageMode, type StorageMode } from '../StorageModeContext'
 import CreateDeskForm from '../components/CreateDeskForm'
 import ImportDeskForm from '../components/ImportDeskForm'
 import BaseDeploymentPanel from '../components/BaseDeploymentPanel'
+import DeskShareButton from '../components/DeskShareButton'
 
 const HIDDEN_DESKS_KEY = 'mosaic.hiddenDesks'
+type DeskAction = 'create' | 'import'
 
 function hiddenDesksKey(mode: StorageMode) {
   return `${HIDDEN_DESKS_KEY}.${mode}`
@@ -40,9 +42,13 @@ export default function Home() {
   const [desks, setDesks] = useState<Desk[] | null>(null)
   const [hiddenDeskIds, setHiddenDeskIds] = useState<string[]>(() => readHiddenDesks(storageMode.mode))
   const [error, setError] = useState<string | null>(null)
+  const [actionOpen, setActionOpen] = useState(false)
+  const [deskAction, setDeskAction] = useState<DeskAction>('create')
   const hiddenDeskSet = useMemo(() => new Set(hiddenDeskIds), [hiddenDeskIds])
   const visibleDesks = desks?.filter((desk) => !hiddenDeskSet.has(desk.id)) ?? null
   const hiddenDesks = desks?.filter((desk) => hiddenDeskSet.has(desk.id)) ?? []
+  const canImport = storageMode.mode === 'trustless'
+  const activeDeskAction = canImport ? deskAction : 'create'
 
   function hideDesk(id: string) {
     setHiddenDeskIds((current) => {
@@ -70,6 +76,16 @@ export default function Home() {
     }
   }
 
+  function openActions() {
+    if (!actionOpen) setDeskAction(address ? 'create' : canImport ? 'import' : 'create')
+    setActionOpen((open) => !open)
+  }
+
+  function doneWithAction() {
+    setActionOpen(false)
+    void load()
+  }
+
   useEffect(() => {
     let active = true
     queueMicrotask(() => {
@@ -92,44 +108,97 @@ export default function Home() {
   }, [storageMode.mode])
 
   return (
-    <>
-      <h2>Desks</h2>
-      {error && <p className="err">{error}</p>}
+    <div className="reading">
+      <div className="desk-toolbar">
+        <h2>Desks</h2>
+        <button
+          type="button"
+          className="desk-add-button"
+          aria-label="Add desk"
+          aria-expanded={actionOpen}
+          onClick={openActions}
+          title="Add desk"
+        >
+          +
+        </button>
+      </div>
+      {error && <div className="banner err" role="alert">{error}</div>}
       {desks === null && !error && <p className="muted">Loading…</p>}
-      {visibleDesks?.length === 0 && hiddenDesks.length === 0 && <p className="muted">No desks yet. Import one below.</p>}
+      {visibleDesks?.length === 0 && hiddenDesks.length === 0 && <p className="muted">No desks yet.</p>}
       {visibleDesks?.length === 0 && hiddenDesks.length > 0 && <p className="muted">No visible desks.</p>}
-      {visibleDesks?.map((d) => (
-        <div className="card" key={d.id}>
-          <div className="card-title-row">
-            <h3>
-              <Link to={`/desk/${d.id}`}>{d.name}</Link>
-            </h3>
-            <button type="button" onClick={() => hideDesk(d.id)} title="Hide from desk list">
-              Hide
+      {actionOpen && (
+        <div className="pane desk-action-panel">
+          <div className="pane-header">
+            <div className="segmented">
+              <button type="button" aria-pressed={activeDeskAction === 'create'} onClick={() => setDeskAction('create')}>
+                Create
+              </button>
+              {canImport && (
+                <button type="button" aria-pressed={activeDeskAction === 'import'} onClick={() => setDeskAction('import')}>
+                  Import
+                </button>
+              )}
+            </div>
+            <button className="btn-ghost btn-sm" type="button" onClick={() => setActionOpen(false)}>
+              Close
             </button>
           </div>
-          <div className="mono muted">{d.contract_id}</div>
-          <div style={{ marginTop: 8 }}>
-            {d.pairs.length === 0 && <span className="muted">no pairs</span>}
-            {d.pairs.map((p) => {
-              const base = d.assets.find((a) => a.asset_id === p.base_asset)?.symbol ?? p.base_asset
-              const quote =
-                d.assets.find((a) => a.asset_id === p.quote_asset)?.symbol ?? p.quote_asset
-              return (
-                <span className="pill" key={p.pair_id}>
-                  {base}/{quote}
-                </span>
-              )
-            })}
-          </div>
-          {d.base_deployment && (
-            <BaseDeploymentPanel
-              desk={d}
-              onUpdated={(updated) => setDesks((current) => current?.map((desk) => desk.id === updated.id ? updated : desk) ?? null)}
-            />
+          {activeDeskAction === 'create' ? (
+            address ? (
+              <>
+                {!mosaicServer.trusted && (
+                  <p className="muted">
+                    Trustless mode deploys from this browser with Freighter and stores desk metadata locally.
+                    Switch to Trusted mode only if you want sponsored deployment or server-backed workflows.
+                  </p>
+                )}
+                <CreateDeskForm mode={storageMode.mode} onDone={doneWithAction} allowSponsored={mosaicServer.trusted} />
+              </>
+            ) : (
+              <p className="muted">Connect your wallet to create a desk.</p>
+            )
+          ) : (
+            <ImportDeskForm onDone={doneWithAction} />
           )}
         </div>
-      ))}
+      )}
+      {visibleDesks && visibleDesks.length > 0 && (
+        <div className="card-grid">
+          {visibleDesks.map((d) => (
+            <div className="card" key={d.id}>
+              <div className="card-title-row">
+                <h3>
+                  <Link to={`/desk/${d.id}`}>{d.name}</Link>
+                </h3>
+                <button className="btn-ghost btn-sm" type="button" onClick={() => hideDesk(d.id)} title="Hide from desk list">
+                  Hide
+                </button>
+              </div>
+              <div className="mono muted">{d.contract_id}</div>
+              {storageMode.mode === 'trustless' && <DeskShareButton desk={d} />}
+              <div className="balances" style={{ marginTop: 'var(--sp-2)' }}>
+                {d.pairs.length === 0 && <span className="muted">no pairs</span>}
+                {d.pairs.map((p) => {
+                  const base = d.assets.find((a) => a.asset_id === p.base_asset)?.symbol ?? p.base_asset
+                  const quote =
+                    d.assets.find((a) => a.asset_id === p.quote_asset)?.symbol ?? p.quote_asset
+                  return (
+                    <span className="pill" key={p.pair_id}>
+                      {base}/{quote}
+                    </span>
+                  )
+                })}
+              </div>
+              {d.base_deployment && (
+                <BaseDeploymentPanel
+                  desk={d}
+                  onUpdated={(updated) => setDesks((current) => current?.map((desk) => desk.id === updated.id ? updated : desk) ?? null)}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       {hiddenDesks.length > 0 && (
         <details className="hidden-desks">
@@ -148,31 +217,6 @@ export default function Home() {
         </details>
       )}
 
-      {address ? (
-        <>
-          <h2>Create desk</h2>
-          {!mosaicServer.trusted && (
-            <p className="muted">
-              Trustless mode deploys from this browser with Freighter and stores desk metadata locally.
-              Switch to Trusted mode only if you want sponsored deployment or server-backed workflows.
-            </p>
-          )}
-          <CreateDeskForm mode={storageMode.mode} onDone={load} allowSponsored={mosaicServer.trusted} />
-
-          {mosaicServer.trusted && (
-            <details style={{ marginTop: 24 }}>
-              <summary className="muted" style={{ cursor: 'pointer' }}>
-                Import an existing contract instead
-              </summary>
-              <div style={{ marginTop: 12 }}>
-                <ImportDeskForm onDone={load} />
-              </div>
-            </details>
-          )}
-        </>
-      ) : (
-        <p className="muted">Connect your wallet to create or import a desk.</p>
-      )}
-    </>
+    </div>
   )
 }
