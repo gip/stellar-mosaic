@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "wasm_hash": "1140a0c93ca2728958de6783e23440debf2d95ce947055d835b910341a91e3f0",
+  "wasm_hash": "6d194051e1ea963d1b728558ab463b87735e4c8e9023d658ff86024b43251826",
   "vk_hashes": {
     "lift": "3ab366aed23c1f3e2cc6414753e7b3a4fbd18ee394b7919e20e705e94a2ca10a",
     "unshield": "b22a972af64f33d36e9d7690486e3dbc394239c9187dade96e68bf06fba6a406",
