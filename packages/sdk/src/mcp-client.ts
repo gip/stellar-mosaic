@@ -22,7 +22,6 @@ import type {
   WalletBackupEnvelope,
 } from "./types.js";
 import type { ActivityEvent } from "./activity.js";
-import type { AssetDef, PairDef } from "./types.js";
 import type { ClientActionLease, McpClient, StellarSigner, SubmitResult } from "./ports.js";
 
 export interface McpClientOptions {
@@ -146,17 +145,6 @@ class HttpMcpClient implements McpClient {
 
   getDesk(id: string): Promise<Desk> {
     return this.call("get_desk", { id });
-  }
-
-  importDesk(body: {
-    name: string;
-    contract_id: string;
-    sponsor_pubkey: string;
-    event_start_ledger?: number | null;
-    assets: AssetDef[];
-    pairs: PairDef[];
-  }): Promise<Desk> {
-    return this.call("import_desk", this.auth({ body }));
   }
 
   createDesk(body: {

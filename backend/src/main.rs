@@ -84,7 +84,6 @@ async fn main() -> anyhow::Result<()> {
             "/desks",
             get(handlers::list_desks).post(handlers::create_desk),
         )
-        .route("/desks/import", post(handlers::import_desk))
         .route("/desks/:id", get(handlers::get_desk))
         .route(
             "/desks/:id/base-deployment",

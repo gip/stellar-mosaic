@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BookSide, Desk, MosaicLogger, Operation, SubmitResult } from "@mosaic/sdk";
 import { z } from "zod";
@@ -152,25 +151,6 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   reg("list_desks", { description: "List shared desks.", inputSchema: {} }, async () => ok(await store.listDesks()));
   reg("get_desk", { description: "Get one desk.", inputSchema: { id: z.string() } }, async ({ id }) =>
     ok(await store.getDesk(String(id))),
-  );
-  reg(
-    "import_desk",
-    { description: "Import an already-deployed desk.", inputSchema: { session: z.string(), body: z.record(z.unknown()) } },
-    async (args) => {
-      await session(auth, args);
-      const b = body(args);
-      const desk: Desk = {
-        id: randomUUID(),
-        name: String(b.name ?? "Imported desk"),
-        contract_id: String(b.contract_id),
-        sponsor_pubkey: String(b.sponsor_pubkey),
-        event_start_ledger: b.event_start_ledger === undefined || b.event_start_ledger === null ? null : Number(b.event_start_ledger),
-        assets: (b.assets ?? []) as Desk["assets"],
-        pairs: (b.pairs ?? []) as Desk["pairs"],
-        base_deployment: null,
-      };
-      return ok(await store.insertDesk(desk, null));
-    },
   );
   reg(
     "create_desk",

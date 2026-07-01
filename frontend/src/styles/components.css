@@ -64,6 +64,20 @@ button[aria-pressed="true"] {
   width: 100%;
 }
 
+.desk-share {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: var(--sp-2);
+}
+.desk-share-fallback {
+  flex: 1 1 100%;
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
+}
+
 /* ---------------- Header / nav ---------------- */
 header.topbar {
   display: flex;
@@ -371,6 +385,29 @@ tbody tr:hover {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: var(--sp-3);
+}
+.desk-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.desk-toolbar h2 {
+  margin-bottom: var(--sp-2);
+}
+.desk-add-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+  font-weight: 600;
+}
+.desk-action-panel {
+  margin: var(--sp-3) 0 var(--sp-4);
 }
 .segmented {
   display: inline-flex;

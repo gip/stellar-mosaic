@@ -163,14 +163,6 @@ export interface McpClient {
   logout(): Promise<void>;
   listDesks(): Promise<Desk[]>;
   getDesk(id: string): Promise<Desk>;
-  importDesk(body: {
-    name: string;
-    contract_id: string;
-    sponsor_pubkey: string;
-    event_start_ledger?: number | null;
-    assets: AssetDef[];
-    pairs: PairDef[];
-  }): Promise<Desk>;
   createDesk(body: {
     name: string;
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: string }[];

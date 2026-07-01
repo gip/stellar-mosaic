@@ -9,6 +9,7 @@ import {
 } from '@stellar/stellar-sdk'
 import { currentAddress, network } from './wallet'
 import { SOROBAN_RPC_URL } from './config'
+import { errorMessage } from '@mosaic/sdk'
 
 interface SubmissionRecord {
   hash: string
@@ -83,7 +84,7 @@ export async function submitContractCall(
 
   const signed = await signTransaction(assembled.toXDR(), { address: source, networkPassphrase })
   if (signed.error || !signed.signedTxXdr) {
-    const message = signed.error ? String(signed.error) : 'Freighter returned no signed transaction.'
+    const message = signed.error ? errorMessage(signed.error) : 'Freighter returned no signed transaction.'
     await update(record, { status: 'failed', error: message })
     throw new Error(message)
   }

@@ -17,6 +17,7 @@ import {
 import { signAuthEntry } from '@stellar/freighter-api'
 import { Buffer } from 'buffer'
 import { SOROBAN_RPC_URL } from './config'
+import { errorMessage } from '@mosaic/sdk'
 
 // recipientField now lives in @mosaic/sdk (single source of truth); re-export it so existing
 // imports of './soroban' keep working.
@@ -65,7 +66,7 @@ export async function buildSponsoredShield(
             address: userPubkey,
             networkPassphrase: PASSPHRASE,
           })
-          if (res.error) throw new Error(String(res.error))
+          if (res.error) throw new Error(errorMessage(res.error))
           if (!res.signedAuthEntry) throw new Error('Freighter returned no signature')
           return Buffer.from(res.signedAuthEntry, 'base64')
         },

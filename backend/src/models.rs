@@ -165,13 +165,3 @@ pub struct NewPair {
     pub base_asset: u32,
     pub quote_asset: u32,
 }
-
-/// Body for importing an already-deployed contract as a desk (Phase 1 convenience / read-only).
-#[derive(Clone, Debug, Deserialize)]
-pub struct ImportDesk {
-    pub name: String,
-    pub contract_id: String,
-    pub sponsor_pubkey: String,
-    pub assets: Vec<Asset>,
-    pub pairs: Vec<Pair>,
-}

@@ -71,7 +71,7 @@ are migrated in place.
 - `POST|GET /operations` · `GET /operations/:id` · `POST /operations/:id/cancel`
 - `GET /operations/events` — durable SSE stream with `Last-Event-ID` resume
 - `POST /client-actions/next` and leased heartbeat/complete/fail routes
-- `GET  /desks` · `POST /desks` (deploy a new desk) · `POST /desks/import` (register existing)
+- `GET  /desks` · `POST /desks` (deploy a new desk)
 - `GET  /base-deployment-config` · `POST /desks/:id/base-deployment` (canonical Base deployment)
 - `GET  /desks/:id` · `GET /desks/:id/root` · `GET /desks/:id/book?pair=&side=`
 - `GET  /desks/:id/base-shield-config` · `GET|POST /desks/:id/base-shields`
