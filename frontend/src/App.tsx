@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useWallet } from './WalletContext'
-import RecoveryPanel from './components/RecoveryPanel'
+import { RecoveryNotice } from './components/RecoveryPanel'
 import ActivityDrawer from './components/ActivityDrawer'
 import StatusDot from './components/ui/StatusDot'
 import ThemeToggle from './components/ui/ThemeToggle'
@@ -63,9 +63,26 @@ export default function App() {
           <NavLink to="/activity" className={navClass}>
             Activity
           </NavLink>
+          <NavLink to="/settings" className={navClass}>
+            Settings
+          </NavLink>
         </nav>
         <div className="topbar-spacer" />
-        <ThemeToggle />
+        <div className="topbar-actions">
+          <ThemeToggle />
+          <a
+            className="topbar-icon-link"
+            href="https://github.com/gip/stellar-mosaic"
+            target="_blank"
+            rel="noreferrer"
+            title="Open GitHub repository"
+            aria-label="Open GitHub repository"
+          >
+            <svg viewBox="0 0 19 19" width="18" height="18" aria-hidden="true">
+              <use href="/icons.svg#github-icon" />
+            </svg>
+          </a>
+        </div>
         <div className="wallet-stack">
           <div className="wallet-chain">
             <span className="chain-label">Stellar Testnet</span>
@@ -159,7 +176,7 @@ export default function App() {
             </button>
           </div>
         )}
-        <RecoveryPanel />
+        <RecoveryNotice />
         <Outlet />
       </main>
       <ActivityDrawer />

@@ -112,9 +112,15 @@ header.topbar {
 .topbar-spacer {
   flex: 1;
 }
+.topbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
 
-/* Theme toggle — icon-only button reusing the base button token styles */
-.theme-toggle {
+/* Header icon controls reusing the base button token styles */
+.theme-toggle,
+.topbar-icon-link {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -123,11 +129,17 @@ header.topbar {
   height: 30px;
   flex: none;
   color: var(--fg-muted);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: var(--bg-elevated);
 }
-.theme-toggle:hover:not(:disabled) {
+.theme-toggle:hover:not(:disabled),
+.topbar-icon-link:hover {
+  border-color: var(--accent);
   color: var(--accent);
 }
-.theme-toggle svg {
+.theme-toggle svg,
+.topbar-icon-link svg {
   display: block;
 }
 
@@ -536,6 +548,31 @@ tbody tr:hover {
   flex: 1;
   min-width: 0;
 }
+.recovery-notice {
+  margin-bottom: var(--sp-4);
+}
+.recovery-notice-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-1);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-size: var(--fs-base);
+}
+.button-link:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 
 /* ---------------- Progress steps ---------------- */
 .progress {
@@ -892,6 +929,9 @@ tbody tr:hover {
   }
   .topbar-spacer {
     display: none;
+  }
+  .topbar-actions {
+    margin-left: auto;
   }
   .wallet-stack {
     width: 100%;

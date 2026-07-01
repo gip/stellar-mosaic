@@ -12,6 +12,7 @@ import Home from './pages/Home'
 import DeskPage from './pages/DeskPage'
 import AssetsPage from './pages/AssetsPage'
 import ActivityPage from './pages/ActivityPage'
+import SettingsPage from './pages/SettingsPage'
 import { ThemeProvider } from './ThemeContext'
 import { WalletProvider } from './WalletContext'
 import { MosaicServerProvider } from './MosaicServerContext'
@@ -49,6 +50,7 @@ const router = createBrowserRouter([
       { index: true, element: <Home /> },
       { path: 'assets', element: <AssetsPage /> },
       { path: 'activity', element: <ActivityPage /> },
+      { path: 'settings', element: <SettingsPage /> },
       { path: 'desk/:deskId', element: <DeskPage /> },
     ],
   },
