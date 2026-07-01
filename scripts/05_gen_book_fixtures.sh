@@ -79,6 +79,8 @@ emit_lift $RHS1 $SKS1 0 "$NF_S1" $A1 100  $A2 1500 $OS1 $CS1   $FAR    "$OL_S1";
 emit_lift $RHS2 $SKS2 1 "$NF_S2" $A1 100  $A2 1600 $OS2 "$CT_S2" $FAR   "$OL_S2"; prove_lift s2
 emit_lift $RHB1 $SKB1 2 "$NF_B1" $A2 2400 $A1 100  $OB1 $CB1   $FAR    "$OL_B1"; prove_lift b1
 emit_lift $RHS3 $SKS3 3 "$NF_S3" $A1 50   $A2 1000 $OS3 $CS3   $S3_EXP "$OL_S3"; prove_lift s3
+( cd "$LIFT" && bb write_vk -b target/lift.json -o target --scheme ultra_honk --oracle_hash keccak --output_format bytes_and_fields >/dev/null 2>&1
+  if [ -d target/vk ] && [ -f target/vk/vk ]; then mv target/vk/vk target/vk.tmp && rmdir target/vk && mv target/vk.tmp target/vk; fi )
 cp "$LIFT/target/vk" "$OUT/vk"   # lift VK (same circuit as the integration vk)
 
 echo ">>> proving cancel(S2)"
