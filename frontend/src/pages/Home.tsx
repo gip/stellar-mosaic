@@ -36,7 +36,7 @@ function writeHiddenDesks(mode: StorageMode, ids: string[]) {
 }
 
 export default function Home() {
-  const { address } = useWallet()
+  const { address, ready } = useWallet()
   const mosaicServer = useMosaicServer()
   const storageMode = useStorageMode()
   const [desks, setDesks] = useState<Desk[] | null>(null)
@@ -107,6 +107,11 @@ export default function Home() {
       active = false
     }
   }, [address, storageMode.mode])
+
+  // Wait for the wallet check to resolve before deciding there's no session — `address` starts
+  // out null on every mount, so trusting it before `ready` would flash the logged-out intro for
+  // an already-connected wallet (matches the ready-gating StorageModeContext already relies on).
+  if (!ready) return <div className="reading"><p className="muted">Loading…</p></div>
 
   if (!address) {
     return (
