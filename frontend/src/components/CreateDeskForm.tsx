@@ -125,9 +125,6 @@ export default function CreateDeskForm({
       if (effectiveDeployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
         throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
       }
-      if (!canSelfFund && stellarDeployment === 'self-funded') {
-        throw new Error('Trustless browser deploy is only available in Trustless mode.')
-      }
       if (effectiveStellarDeployment === 'self-funded' && effectiveDeployBase) {
         throw new Error('Base deployment setup currently requires the Mosaic Server sponsored deployment path.')
       }
