@@ -148,9 +148,14 @@ fn book_lifecycle_rest_partial_fill_cancel_prune() {
     assert!(client.book(&0, &SIDE_BUY).is_empty());
 
     // The buy taker crosses: fills S1 fully (100 a1 / 1500 a2), then S2 partially (56 a1 / 896 a2),
-    // then cannot afford another lot (4 a2 left) -> rests on the buy side. S3 is never reached.
+    // then cannot afford another lot (4 a2 left). B1's own lot is 2400/gcd(2400,100)=24 a2, so the
+    // 4 a2 leftover is sub-lot dust and gets refunded to B1 instead of resting. S3 is never reached.
     client.submit_order(&bytes(&env, P_B1), &bytes(&env, PI_B1));
-    assert_eq!(client.book_sequence(), 6, "remove S1 + update S2 + rest B1");
+    assert_eq!(
+        client.book_sequence(),
+        5,
+        "remove S1 + update S2 (dust B1 remainder is refunded, not upserted)"
+    );
 
     let sells = client.book(&0, &SIDE_SELL);
     assert_eq!(sells.len(), 2, "S1 fully consumed and removed");
@@ -164,17 +169,14 @@ fn book_lifecycle_rest_partial_fill_cancel_prune() {
     let s3 = sells.get(1).unwrap();
     assert_eq!(s3.remaining_in, 50, "S3 untouched");
 
-    let buys = client.book(&0, &SIDE_BUY);
-    assert_eq!(buys.len(), 1, "taker remainder rests");
-    assert_eq!(
-        buys.get(0).unwrap().remaining_in,
-        4,
-        "B1: 2400 - 1500 - 896 = 4 a2 left"
+    assert!(
+        client.book(&0, &SIDE_BUY).is_empty(),
+        "B1's sub-lot dust remainder is refunded, not rested"
     );
 
     // Conservation: nothing created or destroyed.
     //   a1 shielded 250 = minted(100 to taker + 56 to taker) 156 + locked(S2 44 + S3 50) 94 + buy-side a1 0
-    //   a2 shielded 2400 = minted(1500 to S1 + 896 to S2) 2396 + locked(B1 4)
+    //   a2 shielded 2400 = minted(1500 to S1 + 896 to S2) 2396 + refunded(B1 dust) 4
     // (locked amounts are the remaining_in above; minted amounts are asserted via the lot math.)
     assert_eq!(156 + 44 + 50, 250, "a1 conserved");
     assert_eq!(2396 + 4, 2400, "a2 conserved");
@@ -186,7 +188,7 @@ fn book_lifecycle_rest_partial_fill_cancel_prune() {
         &bytes(&env, CANCEL_PROOF),
         &bytes(&env, CANCEL_PI),
     );
-    assert_eq!(client.book_sequence(), 7, "cancel emits one removal");
+    assert_eq!(client.book_sequence(), 6, "cancel emits one removal");
     let sells = client.book(&0, &SIDE_SELL);
     assert_eq!(sells.len(), 1, "S2 cancelled");
     assert_eq!(sells.get(0).unwrap().remaining_in, 50, "only S3 remains");
@@ -208,7 +210,7 @@ fn book_lifecycle_rest_partial_fill_cancel_prune() {
     // S3 expires at t=5000; advance past it and prune permissionlessly.
     env.ledger().set_timestamp(6000);
     let removed = client.prune_expired(&0, &SIDE_SELL, &10);
-    assert_eq!(client.book_sequence(), 8, "prune emits one removal");
+    assert_eq!(client.book_sequence(), 7, "prune emits one removal");
     assert_eq!(removed, 1, "S3 pruned");
     assert!(
         client.book(&0, &SIDE_SELL).is_empty(),
@@ -320,7 +322,8 @@ fn indexer_reproduces_book_root_after_fills() {
 
     // Rebuild the tree off-chain: the four shields, then the book's `noteins` mints in emission
     // order. Fill of S1 mints (a1,100 -> B1 tag 9011) then (a2,1500 -> S1 tag 9001); fill of S2 mints
-    // (a1,56 -> 9011) then (a2,896 -> S2 tag 9006). output_owner_tags are the fixtures' literals.
+    // (a1,56 -> 9011) then (a2,896 -> S2 tag 9006); B1's 4 a2 sub-lot dust remainder is then refunded
+    // (a2,4 -> 9011). output_owner_tags are the fixtures' literals.
     let mut tree = NoteTree::new(&env);
     tree.ingest_shielded(A1, 100, OT_S1.try_into().unwrap());
     tree.ingest_shielded(A1, 100, OT_S2.try_into().unwrap());
@@ -330,6 +333,7 @@ fn indexer_reproduces_book_root_after_fills() {
     tree.ingest_note(A2, 1500, &tag_word(9001));
     tree.ingest_note(A1, 56, &tag_word(9011));
     tree.ingest_note(A2, 896, &tag_word(9006));
+    tree.ingest_note(A2, 4, &tag_word(9011));
 
     assert_eq!(
         u256_to_word(&tree.root()),

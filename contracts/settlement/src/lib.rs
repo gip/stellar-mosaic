@@ -1351,9 +1351,14 @@ impl Settlement {
             if !taker.partial_allowed {
                 return Err(Error::NotPartialAllowed); // fill-or-kill: revert the whole tx
             }
+            // A resting order can only ever fill in whole multiples of its own reduced
+            // price-ratio lot (see `compute_lots`); a remainder below one lot can never match
+            // again. Refund it now instead of resting a phantom order that would sit at a
+            // crossing price forever.
+            let taker_lot = taker.amount_in / gcd_i128(taker.amount_in, taker.min_out);
             let taker_u = side_to_u32(taker_side);
             let mut myside = book_load(&env, pair_id, taker_u);
-            if myside.len() < BOOK_CAPACITY {
+            if remaining_in >= taker_lot && myside.len() < BOOK_CAPACITY {
                 let entry = OrderEntry {
                     order_id: taker.nullifier.clone(),
                     amount_in: taker.amount_in,
@@ -1369,7 +1374,8 @@ impl Settlement {
                 book_store(&env, pair_id, taker_u, &myside);
                 publish_order_upserted(&env, &mut book_seq, pair_id, taker_u, &entry);
             } else {
-                // Book full: immediate-or-cancel the remainder back to the order's destination.
+                // Sub-lot dust, or book full: immediate-or-cancel the remainder back to the
+                // order's destination.
                 mint_note(
                     &env,
                     &h,
