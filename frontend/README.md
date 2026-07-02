@@ -8,7 +8,7 @@ durable FIFO sequencing, submission state, and progress history.
 
 ```bash
 pnpm install
-pnpm dev               # http://localhost:5173, proxies /api -> backend (127.0.0.1:8787)
+pnpm --filter frontend dev  # http://localhost:5173, proxies /api -> backend (127.0.0.1:8787)
 ```
 
 The backend (`../backend`) must be running. Override its URL with `MOSAIC_BACKEND` (build-time) or
