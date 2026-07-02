@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ActivityHistory, errorMessage, type ActivityEvent } from '@mosaic/sdk'
-import { ApiError, api, type Desk, type Operation, type OperationRequest } from './api'
+import { ApiError, api, type BaseShieldJob, type Desk, type Operation, type OperationRequest } from './api'
 import type { AssetCatalog } from './components/activityModel'
 import { executeClientAction, reconcileOperationJournals, rollbackClientAction } from './operationExecutor'
 import { useRecovery } from './RecoveryContext'
@@ -24,6 +24,50 @@ interface ActivityState {
 }
 
 const Ctx = createContext<ActivityState | null>(null)
+
+// The Base deposit tx of a shield job, read back from the deposit Activity event the form logged at
+// submit time (grouped by the job id). Lets the terminal mint event re-assert that tx as succeeded so
+// the Base leg's dot flips green alongside the Stellar one.
+function baseDepositTxHash(activities: ActivityEvent[], jobId: string): string | undefined {
+  const deposit = activities.find((event) => {
+    const metadata = event.metadata as { action_id?: string; base_tx_hash?: string } | undefined
+    return metadata?.action_id === jobId && (metadata?.base_tx_hash || event.tx_hash)
+  })
+  const metadata = deposit?.metadata as { base_tx_hash?: string } | undefined
+  return metadata?.base_tx_hash ?? deposit?.tx_hash
+}
+
+// The Activity event for a Base shield's terminal leg: the Stellar mint tx on success, or the failure.
+// Grouped with the Base deposit tx by `action_id` (the job id) so both legs render as one entry.
+function baseShieldTerminalEvent(job: BaseShieldJob, wallet: string, baseTxHash?: string): ActivityEvent {
+  const base = baseTxHash ? { base_tx_hash: baseTxHash } : {}
+  if (job.status === 'failed') {
+    return {
+      kind: 'error',
+      action: 'shield_from_base',
+      method: 'shield_from_base',
+      status: 'failed',
+      wallet_address: wallet,
+      desk_id: job.desk_id,
+      message: job.error ?? undefined,
+      idempotency_key: `base-shield-fail:${job.id}`,
+      created_at: Date.now(),
+      metadata: { action_id: job.id, source: 'base', ...base },
+    }
+  }
+  return {
+    kind: 'transaction',
+    action: 'shield_from_base',
+    method: 'shield_from_base',
+    status: 'succeeded',
+    wallet_address: wallet,
+    desk_id: job.desk_id,
+    tx_hash: job.stellar_tx_hash ?? undefined,
+    idempotency_key: `base-shield-mint:${job.id}`,
+    created_at: Date.now(),
+    metadata: { action_id: job.id, source: 'base', stellar_tx_hash: job.stellar_tx_hash ?? undefined, ...base },
+  }
+}
 
 export function ActivityProvider({ children }: { children: ReactNode }) {
   const wallet = useWallet()
@@ -209,6 +253,47 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       window.clearInterval(interval)
     }
   }, [activityStore, connected, refreshActivities, storageMode.trusted, wallet.address, wallet.networkPassphrase])
+
+  // Reconcile in-flight Base shields into Activity, independent of the ShieldFromBaseForm lifecycle.
+  // A Base shield takes ~10–15 min to prove + finalize + mint, so the form that started it is usually
+  // long gone by the time the Stellar note is minted. Poll every job across the user's desks and log
+  // each terminal leg once — the mint tx (turning the entry green + linking the Stellar tx) or the
+  // failure — grouped with the Base deposit tx by the job id. The store dedups by idempotency key; the
+  // pre-check just avoids re-refreshing the UI every tick once a leg is already recorded.
+  useEffect(() => {
+    if (!connected || !storageMode.trusted || !wallet.address || desks.length === 0) return
+    let alive = true
+    const tick = async () => {
+      if (!alive) return
+      let existing: ActivityEvent[] | null = null
+      let recorded = false
+      for (const desk of desks) {
+        let jobs: BaseShieldJob[]
+        try {
+          jobs = await api.listBaseShields(desk.id)
+        } catch {
+          continue
+        }
+        for (const job of jobs) {
+          if (job.status !== 'active' && job.status !== 'failed') continue
+          const key = job.status === 'active' ? `base-shield-mint:${job.id}` : `base-shield-fail:${job.id}`
+          if (!existing) existing = await activityStore.list().catch(() => [])
+          if (existing.some((event) => event.idempotency_key === key)) continue
+          await activityStore
+            .record(baseShieldTerminalEvent(job, wallet.address!, baseDepositTxHash(existing, job.id)))
+            .catch(() => {})
+          recorded = true
+        }
+      }
+      if (alive && recorded) await refreshActivities()
+    }
+    void tick()
+    const interval = window.setInterval(() => void tick(), 4000)
+    return () => {
+      alive = false
+      window.clearInterval(interval)
+    }
+  }, [connected, storageMode.trusted, wallet.address, desks, activityStore, refreshActivities])
 
   // Any tab may poll, but the backend lease lets only one execute the private step.
   useEffect(() => {

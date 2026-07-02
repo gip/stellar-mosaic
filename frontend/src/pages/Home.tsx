@@ -202,12 +202,14 @@ export default function Home() {
                 <h3>
                   <Link to={`/desk/${d.id}`}>{d.name}</Link>
                 </h3>
-                <button className="btn-ghost btn-sm" type="button" onClick={() => hideDesk(d.id)} title="Hide from desk list">
-                  Hide
-                </button>
+                <div className="row" style={{ gap: 'var(--sp-2)' }}>
+                  {storageMode.mode === 'trustless' && <DeskShareButton desk={d} />}
+                  <button className="btn-ghost btn-sm" type="button" onClick={() => hideDesk(d.id)} title="Hide from desk list">
+                    Hide
+                  </button>
+                </div>
               </div>
               <div className="mono muted">{d.contract_id}</div>
-              {storageMode.mode === 'trustless' && <DeskShareButton desk={d} />}
               <div className="balances" style={{ marginTop: 'var(--sp-2)' }}>
                 {d.pairs.length === 0 && <span className="muted">no pairs</span>}
                 {d.pairs.map((p) => {
