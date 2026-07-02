@@ -10,6 +10,7 @@ export interface TransactionLine {
   activity?: ActivityEvent
   status?: string
   label: string
+  description: string
   createdAt?: number
 }
 
@@ -66,6 +67,7 @@ export function activityGroups(activities: ActivityEvent[], operations: Operatio
         activity,
         status: txStatus(activity),
         label: txLabel(activity),
+        description: txDescription(activity),
         createdAt: activity.created_at,
       })
     }
@@ -108,6 +110,7 @@ function upsertTxLine(group: ActivityGroup, line: TransactionLine) {
   if (statusRank(line.status) >= statusRank(existing.status)) existing.status = line.status
   existing.activity = line.activity ?? existing.activity
   existing.label = line.label
+  existing.description = line.description
   existing.createdAt = Math.max(existing.createdAt ?? 0, line.createdAt ?? 0) || existing.createdAt
 }
 
@@ -210,6 +213,8 @@ function actionForValue(value?: string): ActivityAction | undefined {
     deploy: 'Deploy',
     update_wasm: 'Deploy',
     upload_wasm: 'Deploy',
+    deploy_base_bridge: 'Deploy',
+    configure_base_bridge: 'Deploy',
     shield: 'Shield',
     shield_from_base: 'Shield',
     unshield: 'Unshield',
@@ -237,6 +242,52 @@ function txLabel(activity: ActivityEvent) {
   if (activity.method) return title(activity.method)
   if (activity.action) return title(activity.action)
   return activity.kind === 'backend_operation' ? title(metadataString(activity.metadata, ['event_type']) ?? 'transaction') : activityType(activity)
+}
+
+// A short, human-readable description of what an individual transaction does.
+// Trustless mode: derived from the specific wallet method/action so multi-step
+// groups (e.g. a Base-bridge deploy) get a distinct phrase per transaction.
+// Trusted mode: derived from the backend operation's event type.
+function txDescription(activity: ActivityEvent): string {
+  const specific = describeMethod(activity.method) ?? describeMethod(activity.action)
+  if (specific) return specific
+  if (activity.kind === 'backend_operation') {
+    const eventType = metadataString(activity.metadata, ['event_type'])
+    const described = describeEventType(eventType)
+    if (described) return described
+    if (eventType) return title(eventType)
+  }
+  return txLabel(activity)
+}
+
+function describeMethod(value?: string): string | undefined {
+  if (!value) return undefined
+  return ({
+    create_desk: 'Create desk',
+    create_contract: 'Deploy contract',
+    update_wasm: 'Upload code',
+    upload_wasm: 'Upload code',
+    deploy_base_bridge: 'Deploy Base bridge',
+    configure_base_bridge: 'Configure bridge',
+    shield: 'Deposit funds',
+    shield_from_base: 'Bridge from Base',
+    unshield: 'Withdraw funds',
+    submit_order: 'Submit order',
+    place_order: 'Submit order',
+    cancel_order: 'Cancel order',
+  } as Record<string, string>)[value]
+}
+
+function describeEventType(value?: string): string | undefined {
+  if (!value) return undefined
+  return ({
+    staged: 'Prepare',
+    prepared: 'Prepare',
+    queued: 'Queue',
+    submitted: 'Submit to chain',
+    confirmed: 'Confirm on chain',
+    failed: 'Failed',
+  } as Record<string, string>)[value]
 }
 
 function txStatus(activity: ActivityEvent) {
@@ -445,8 +496,20 @@ function transactionHashes(activity: ActivityEvent) {
 }
 
 export function txUrl(tx: string, activity: ActivityEvent) {
-  if (/^0x[0-9a-f]{64}$/i.test(tx)) return `https://sepolia.basescan.org/tx/${tx}`
+  if (isBaseTx(tx)) return `https://sepolia.basescan.org/tx/${tx}`
   return `https://stellar.expert/explorer/${stellarExpertNetwork(activity)}/tx/${tx.replace(/^0x/i, '')}`
+}
+
+export function txNetworkLabel(tx: string, activity: ActivityEvent) {
+  if (isBaseTx(tx)) return 'Base Sepolia'
+  const network = stellarExpertNetwork(activity)
+  if (network === 'public') return 'Stellar Mainnet'
+  if (network === 'futurenet') return 'Stellar Futurenet'
+  return 'Stellar Testnet'
+}
+
+function isBaseTx(tx: string) {
+  return /^0x[0-9a-f]{64}$/i.test(tx)
 }
 
 export function stellarAddressUrl(address: string) {

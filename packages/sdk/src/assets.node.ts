@@ -35,5 +35,9 @@ export async function loadSettlementWasm(): Promise<Uint8Array> {
   return new Uint8Array(readFileSync(assetPath("settlement.wasm")));
 }
 
+export async function loadMosaicBridge(): Promise<unknown> {
+  return JSON.parse(readFileSync(assetPath("MosaicBridge.json"), "utf8")) as unknown;
+}
+
 /** A {@link CircuitProvider} backed by the bundled ACIR — the default for `createNodeClient`. */
 export const circuitProvider: CircuitProvider = (name) => loadCircuit(name);

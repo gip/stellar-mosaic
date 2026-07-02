@@ -21,7 +21,7 @@ import { FriendbotFunder } from "./friendbot.js";
 import { SqliteStore } from "./sqliteStore.js";
 import { circuitProvider } from "./assets.node.js";
 import { replayNoteEvents } from "./eventReplay.js";
-import type { Deployer, McpClient, NetworkConfig, NoteStore } from "./ports.js";
+import type { BaseBridgeDeployer, Deployer, McpClient, NetworkConfig, NoteStore } from "./ports.js";
 import type { DeskConfig, Field } from "./types.js";
 import { getMosaicLogger, type MosaicLogger } from "./logging.js";
 import type { ActivityStore } from "./activity.js";
@@ -48,6 +48,8 @@ export interface NodeClientOptions {
   mcp?: McpClient;
   /** Optional deployer (e.g. one that shells to the `stellar` CLI) enabling `client.deploy`. */
   deployer?: Deployer;
+  /** Optional Base bridge deployer for callers that provide a Node EVM wallet adapter. */
+  baseBridgeDeployer?: BaseBridgeDeployer;
   /** Optional logger. Defaults to the SDK console logger. */
   logger?: MosaicLogger;
   /** Optional durable event cache for local replay across process restarts. */
@@ -143,6 +145,7 @@ export function createNodeClient(opts: NodeClientOptions): NodeClient {
     logger,
     funder,
     deployer: opts.deployer,
+    baseBridgeDeployer: opts.baseBridgeDeployer,
     mcp: opts.mcp,
   });
   return { client, desks };

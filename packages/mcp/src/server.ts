@@ -84,7 +84,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   const store = opts.store ?? new MemoryMosaicStore();
   const auth = opts.auth ?? new AuthService(store);
   const relays = opts.relays ?? new StellarCliRelayer({ store });
-  const deploy = opts.deploy ?? new SponsoredStellarDeployHandlers();
+  const deploy = opts.deploy ?? new SponsoredStellarDeployHandlers({ store });
   const books = opts.books ?? {
     getBook: async ({ desk_id, pair, side }) => new StellarBookReader().getBook(await store.getDesk(desk_id), pair, side),
   };

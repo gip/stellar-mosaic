@@ -61,6 +61,7 @@ export interface DeskConfig {
   sponsor?: string;
   assets: AssetDef[];
   pairs: PairDef[];
+  baseDeployment?: BaseDeployment | null;
 }
 
 export type NoteRole = "asset" | "order-output" | "order-cancel";
@@ -213,6 +214,9 @@ export interface BaseDeploymentConfig {
   reason: string | null;
   abi: unknown | null;
   bytecode: string | null;
+  router_id?: string | null;
+  image_id?: string | null;
+  config_id?: string | null;
 }
 
 export interface BaseShieldConfig {

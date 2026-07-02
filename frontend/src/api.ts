@@ -1,7 +1,9 @@
 import { Noir } from '@noir-lang/noir_js'
 import { Asset as StellarAsset, BASE_FEE, Contract, Networks, nativeToScVal, rpc, scValToNative, TransactionBuilder } from '@stellar/stellar-sdk'
 import {
+  BASE_SEPOLIA_CONFIG_ID,
   ChainEventSource,
+  DeployDeskError,
   errorMessage,
   LocalPathProvider,
   makeNoirCompressor,
@@ -27,7 +29,7 @@ import {
   type WalletBackupEnvelope,
 } from '@mosaic/sdk'
 import { createBrowserClient } from '@mosaic/sdk/browser'
-import { circuitProvider } from '@mosaic/sdk/assets/browser'
+import { circuitProvider, loadProtocolRelease } from '@mosaic/sdk/assets/browser'
 import { createMcpClient } from '@mosaic/sdk/mcp-client'
 import type { Abi, Hex } from 'viem'
 import { FreighterSigner } from './sdk/freighterSigner'
@@ -46,8 +48,9 @@ import { currentAddress } from './wallet'
 import { defaultCatalogAssets, mergeCatalogAssets } from './defaultCatalog'
 import { parseDeskShare } from './deskShare'
 import { initNoirWasm } from './noirWasm'
-import { MCP_URL, SOROBAN_RPC_URL } from './config'
+import { BASE_ROUTER_ID, MCP_URL, SOROBAN_RPC_URL } from './config'
 import type { StorageMode } from './StorageModeContext'
+import { ethereumProvider } from './base'
 
 export type AssetKind = 'Stellar' | 'Dual' | 'BaseRepresented'
 export type Asset = AssetDef & { token: string | null }
@@ -362,7 +365,7 @@ export const api = {
     name: string
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
-    base_deployment?: { deployer_address: string }
+    base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] }
   }) => wrap(async () => {
     const desk = (await mcp.createDesk(body)) as Desk
     deskCache('trusted').set(desk.id, desk)
@@ -372,6 +375,7 @@ export const api = {
     name: string
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
+    base_assets?: { asset_id: number; symbol: string; token: string }[]
   }) => wrap(async () => {
     const address = await currentAddress()
     if (!address) throw new ApiError(401, 'Connect Freighter before deploying a trustless desk.')
@@ -382,11 +386,13 @@ export const api = {
       store: new IndexedDbStore('trustless'),
       activity: browserActivityStore('trustless'),
       initNoir: initNoirWasm,
+      ethProvider: body.base_assets?.length ? ethereumProvider() : undefined,
       // No persistent eventCache: this one-shot deploy client must not seed the long-lived reconcile
       // source's cache scope with a cursor (which would later resume reads past freshly-shielded notes).
     })
     const startLedger = (await new rpc.Server(SOROBAN_RPC_URL).getLatestLedger()).sequence
-    const deployed = await client.deploy({
+    const release = body.base_assets?.length ? await loadProtocolRelease() : null
+    const deployArgs = {
       name: body.name,
       assets: body.assets.map((asset) => ({
         asset_id: asset.asset_id,
@@ -396,7 +402,37 @@ export const api = {
         kind: asset.kind,
       })),
       pairs: body.pairs,
-    })
+      ...(body.base_assets?.length
+        ? {
+            base: {
+              assets: body.base_assets,
+              router_id: BASE_ROUTER_ID,
+              image_id: release?.bridge_image_id ?? '',
+              config_id: BASE_SEPOLIA_CONFIG_ID,
+            },
+          }
+        : {}),
+    }
+    let deployed
+    try {
+      deployed = await client.deploy(deployArgs)
+    } catch (cause) {
+      if (cause instanceof DeployDeskError && cause.partialDesk) {
+        const partial = {
+          id: cause.partialDesk.id,
+          name: cause.partialDesk.name ?? body.name,
+          contract_id: cause.partialDesk.contractId,
+          sponsor_pubkey: address,
+          assets: cause.partialDesk.assets,
+          pairs: cause.partialDesk.pairs,
+          event_start_ledger: startLedger,
+          base_deployment: cause.partialDesk.baseDeployment ?? null,
+        } as Desk
+        await putLocalDesk('trustless', partial)
+        deskCache('trustless').set(partial.id, partial)
+      }
+      throw cause
+    }
     const desk = {
       id: deployed.id,
       name: deployed.name ?? body.name,
@@ -405,7 +441,7 @@ export const api = {
       assets: deployed.assets,
       pairs: deployed.pairs,
       event_start_ledger: startLedger,
-      base_deployment: null,
+      base_deployment: deployed.baseDeployment ?? null,
     } as Desk
     await putLocalDesk('trustless', desk)
     deskCache('trustless').set(desk.id, desk)

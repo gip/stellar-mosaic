@@ -151,7 +151,7 @@ class HttpMcpClient implements McpClient {
     name: string;
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: string }[];
     pairs: { base_asset: number; quote_asset: number }[];
-    base_deployment?: { deployer_address: string };
+    base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] };
   }): Promise<Desk> {
     return this.call("create_desk", this.auth({ body }));
   }

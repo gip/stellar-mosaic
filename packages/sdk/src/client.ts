@@ -21,6 +21,7 @@ import { errorMessage, getMosaicLogger, serializeError, type MosaicLogger } from
 import type {
   Deployer,
   EthSigner,
+  BaseBridgeDeployer,
   Funder,
   McpClient,
   NetworkConfig,
@@ -29,6 +30,7 @@ import type {
   StellarSigner,
   Submitter,
 } from "./ports.js";
+import { baseTokenAddress } from "./baseSepolia.js";
 import { SIDE_SELL, type Amount, type AssetDef, type DeskConfig, type Field, type Note, type PairDef, type Side } from "./types.js";
 
 const ZERO_FIELD: Field = "0x" + "0".repeat(64);
@@ -55,6 +57,7 @@ export interface MosaicPorts {
   logger?: MosaicLogger;
   funder?: Funder;
   deployer?: Deployer;
+  baseBridgeDeployer?: BaseBridgeDeployer;
   ethSigner?: EthSigner;
   mcp?: McpClient;
   /** Notified after note mutations (e.g. to trigger a UI refresh). */
@@ -88,6 +91,16 @@ export interface UnshieldParams {
 export interface CancelParams {
   deskId: string;
   noteId: string;
+}
+
+export class DeployDeskError extends Error {
+  readonly partialDesk?: DeskConfig;
+
+  constructor(message: string, partialDesk?: DeskConfig, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "DeployDeskError";
+    this.partialDesk = partialDesk;
+  }
 }
 
 export interface NoteLoop {
@@ -145,6 +158,12 @@ export class MosaicClient {
 
   private scvBytes(bytes: Uint8Array): xdr.ScVal {
     return xdr.ScVal.scvBytes(Buffer.from(bytes));
+  }
+
+  private hexBytes(hex: string, bytes: number): Uint8Array {
+    const raw = hex.startsWith("0x") ? hex.slice(2) : hex;
+    if (!new RegExp(`^[0-9a-fA-F]{${bytes * 2}}$`).test(raw)) throw new Error(`expected ${bytes}-byte hex value`);
+    return Uint8Array.from(Buffer.from(raw, "hex"));
   }
 
   private symbolOf(desk: DeskConfig, assetId: number): string {
@@ -880,9 +899,16 @@ export class MosaicClient {
     name?: string;
     assets: AssetDef[];
     pairs: Omit<PairDef, "pair_id">[];
+    base?: {
+      assets: { asset_id: number; symbol: string; token: string }[];
+      router_id: string;
+      image_id: string;
+      config_id: string;
+    };
   }): Promise<DeskConfig> {
     const actionId = this.actionId();
     const wallet = await this.walletAddress();
+    let partialDesk: DeskConfig | undefined;
     await this.recordActivity({
       kind: "user_action",
       action: "create_desk",
@@ -927,7 +953,7 @@ export class MosaicClient {
           },
         });
       }
-      const desk = {
+      const desk: DeskConfig = {
         id: crypto.randomUUID(),
         name: params.name,
         contractId: deployed.contractId,
@@ -935,6 +961,87 @@ export class MosaicClient {
         assets: params.assets,
         pairs: params.pairs.map((p, i) => ({ ...p, pair_id: i })),
       };
+      partialDesk = desk;
+      const baseAssets = params.base?.assets ?? [];
+      if (params.base && baseAssets.length > 0) {
+        if (!this.p.baseBridgeDeployer) throw new DeployDeskError("No BaseBridgeDeployer configured.", partialDesk);
+        const assetIds = baseAssets.map((asset) => asset.asset_id);
+        const tokens = baseAssets.map((asset) => baseTokenAddress(asset.token));
+        desk.baseDeployment = {
+          status: "awaiting_wallet",
+          deployer_address: "",
+          tx_hash: null,
+          bridge_address: null,
+          error: null,
+          assets: baseAssets.map((asset, index) => ({ asset_id: asset.asset_id, symbol: asset.symbol, token: tokens[index] })),
+        };
+        partialDesk = desk;
+        await this.recordActivity({
+          kind: "user_action",
+          action: "deploy_base_bridge",
+          status: "started",
+          wallet_address: wallet,
+          desk_id: desk.id,
+          contract_id: deployed.contractId,
+          metadata: { action_id: actionId, asset_ids: assetIds },
+        });
+        let base;
+        try {
+          base = await this.p.baseBridgeDeployer.deploy({ assetIds, tokens });
+        } catch (error) {
+          desk.baseDeployment = { ...desk.baseDeployment, status: "failed", error: errorMessage(error) };
+          throw new DeployDeskError(errorMessage(error), desk, { cause: error });
+        }
+        desk.baseDeployment = {
+          ...desk.baseDeployment,
+          status: "configuring",
+          deployer_address: base.deployer,
+          tx_hash: base.txHash,
+          bridge_address: base.bridgeAddress,
+          error: null,
+        };
+        partialDesk = desk;
+        await this.recordActivity({
+          kind: "user_action",
+          action: "deploy_base_bridge",
+          status: "succeeded",
+          wallet_address: wallet,
+          desk_id: desk.id,
+          contract_id: deployed.contractId,
+          tx_hash: base.txHash,
+          metadata: { action_id: actionId, bridge_address: base.bridgeAddress, deployer: base.deployer },
+        });
+        let res;
+        try {
+          res = await this.p.submitter.submit({
+            deskId: desk.id,
+            contractId: desk.contractId,
+            method: "configure_base_bridge",
+            metadata: { action_id: actionId, bridge_address: base.bridgeAddress },
+            args: [
+              new Address(params.base.router_id).toScVal(),
+              this.scvBytes(this.hexBytes(params.base.image_id, 32)),
+              this.scvBytes(this.hexBytes(params.base.config_id, 32)),
+              this.scvBytes(this.hexBytes(base.bridgeAddress, 20)),
+            ],
+          });
+        } catch (error) {
+          desk.baseDeployment = { ...desk.baseDeployment, status: "failed", error: errorMessage(error) };
+          throw new DeployDeskError(errorMessage(error), desk, { cause: error });
+        }
+        desk.baseDeployment = { ...desk.baseDeployment, status: "active" };
+        partialDesk = desk;
+        await this.recordActivity({
+          kind: "user_action",
+          action: "configure_base_bridge",
+          status: "succeeded",
+          wallet_address: wallet,
+          desk_id: desk.id,
+          contract_id: deployed.contractId,
+          tx_hash: res.txHash,
+          metadata: { action_id: actionId, bridge_address: base.bridgeAddress },
+        });
+      }
       await this.recordActivity({
         kind: "user_action",
         action: "create_desk",
@@ -961,6 +1068,9 @@ export class MosaicClient {
         message: errorMessage(error),
         metadata: { action_id: actionId, error: serializeError(error) },
       });
+      if (partialDesk && !(error instanceof DeployDeskError)) {
+        throw new DeployDeskError(errorMessage(error), partialDesk, { cause: error });
+      }
       throw error;
     }
   }

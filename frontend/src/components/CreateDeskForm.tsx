@@ -36,7 +36,6 @@ export default function CreateDeskForm({
   const [pairs, setPairs] = useState<PairRow[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [deployBase, setDeployBase] = useState(false)
   const [deploymentConfig, setDeploymentConfig] = useState<BaseDeploymentConfig | null>(null)
   const [estimatedFee, setEstimatedFee] = useState<bigint | null>(null)
   const [createdDesk, setCreatedDesk] = useState<Desk | null>(null)
@@ -44,8 +43,6 @@ export default function CreateDeskForm({
   const ethereum = useEthereumWallet()
   const canSelfFund = mode === 'trustless'
   const effectiveStellarDeployment = canSelfFund ? stellarDeployment : 'sponsored'
-  const canDeployBase = allowSponsored && effectiveStellarDeployment === 'sponsored'
-  const effectiveDeployBase = canDeployBase && deployBase
 
   useEffect(() => {
     let active = true
@@ -73,7 +70,7 @@ export default function CreateDeskForm({
   const effectiveDeploymentConfig = allowSponsored ? deploymentConfig : null
 
   useEffect(() => {
-    if (!effectiveDeployBase || !ethereum.address || !ethereum.connectedToBase || !effectiveDeploymentConfig?.available || !effectiveDeploymentConfig.abi || !effectiveDeploymentConfig.bytecode || baseAssets.length === 0) {
+    if (baseAssets.length === 0 || !ethereum.address || !ethereum.connectedToBase || !effectiveDeploymentConfig?.available || !effectiveDeploymentConfig.abi || !effectiveDeploymentConfig.bytecode) {
       return
     }
     estimateBridgeDeployment({
@@ -82,7 +79,7 @@ export default function CreateDeskForm({
       assetIds: baseAssets.map((asset) => assetIdOf(asset.id)),
       tokens: baseAssets.map((asset) => baseTokenAddress(asset) as Address),
     }).then((value) => setEstimatedFee(value.maxFee)).catch(() => setEstimatedFee(null))
-  }, [effectiveDeployBase, ethereum.address, ethereum.connectedToBase, effectiveDeploymentConfig, baseAssets, assetIdOf])
+  }, [ethereum.address, ethereum.connectedToBase, effectiveDeploymentConfig, baseAssets, assetIdOf])
 
   function toggleAsset(id: string) {
     const removing = selected.includes(id)
@@ -116,28 +113,28 @@ export default function CreateDeskForm({
       if (assets.length === 0) throw new Error('Select at least one asset.')
       if (assets.length >= 2 && deskPairs.length === 0)
         throw new Error('Add at least one trading pair (base / quote).')
-      if (effectiveDeployBase && (!ethereum.address || !ethereum.connectedToBase)) {
+      const deployBase = baseAssets.length > 0
+      if (deployBase && (!ethereum.address || !ethereum.connectedToBase)) {
         throw new Error('Connect MetaMask on Base Sepolia first.')
       }
-      if (effectiveDeployBase && baseAssets.length === 0) {
-        throw new Error('Select at least one asset with a Base Sepolia ERC-20 mapping.')
-      }
-      if (effectiveDeployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
+      if (deployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
         throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
       }
-      if (effectiveStellarDeployment === 'self-funded' && effectiveDeployBase) {
-        throw new Error('Base deployment setup currently requires the Mosaic Server sponsored deployment path.')
-      }
+      const baseMappings = baseAssets.map((asset) => ({
+        asset_id: assetIdOf(asset.id),
+        symbol: asset.symbol,
+        token: baseTokenAddress(asset),
+      }))
       const deskBody = {
         name,
         assets,
         pairs: deskPairs,
-        ...(effectiveDeployBase && ethereum.address
-          ? { base_deployment: { deployer_address: ethereum.address } }
+        ...(deployBase && ethereum.address && effectiveStellarDeployment === 'sponsored'
+          ? { base_deployment: { deployer_address: ethereum.address, assets: baseMappings } }
           : {}),
       }
       const desk = effectiveStellarDeployment === 'self-funded'
-        ? await api.createDeskSelfFunded({ name, assets, pairs: deskPairs })
+        ? await api.createDeskSelfFunded({ name, assets, pairs: deskPairs, base_assets: baseMappings })
         : await api.createDesk(deskBody)
       setCreatedDesk(desk)
       setName('')
@@ -169,7 +166,7 @@ export default function CreateDeskForm({
     )
   }
 
-  const effectiveEstimatedFee = effectiveDeployBase && ethereum.connectedToBase ? estimatedFee : null
+  const effectiveEstimatedFee = baseAssets.length > 0 && ethereum.connectedToBase ? estimatedFee : null
 
   return (
     <form onSubmit={submit} style={{ maxWidth: 560 }}>
@@ -279,24 +276,15 @@ export default function CreateDeskForm({
         </>
       )}
 
-      {ethereum.address && canDeployBase && (
+      {ethereum.address && baseAssets.length > 0 && (
         <div className="base-deployment">
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={effectiveDeployBase}
-              disabled={!ethereum.connectedToBase || !effectiveDeploymentConfig?.available || baseAssets.length === 0}
-              onChange={(event) => setDeployBase(event.target.checked)}
-            />
-            Deploy a MosaicBridge contract on Base Sepolia
-          </label>
+          <strong>Base Sepolia bridge</strong>
           <p className="warn">
-            Optional and unchecked by default. Your MetaMask account pays Base Sepolia ETH for deployment gas.
+            A MosaicBridge contract will be deployed automatically. Your MetaMask account pays Base Sepolia ETH for deployment gas.
           </p>
-          {!effectiveDeploymentConfig?.available && <p className="muted">{effectiveDeploymentConfig?.reason ?? 'Base deployment configuration is unavailable.'}</p>}
-          {baseAssets.length === 0 && <p className="muted">Select an asset with a Base Sepolia ERC-20 mapping to enable deployment.</p>}
-          {baseAssets.length > 0 && <p className="muted">Will register: {baseAssets.map((asset) => `${asset.symbol} (#${assetIdOf(asset.id)})`).join(', ')}</p>}
-          {deployBase && ethereum.balance !== null && <div>Base balance: {displayEth(ethereum.balance)} ETH</div>}
+          {effectiveStellarDeployment === 'sponsored' && !effectiveDeploymentConfig?.available && <p className="muted">{effectiveDeploymentConfig?.reason ?? 'Base deployment configuration is unavailable.'}</p>}
+          <p className="muted">Will register: {baseAssets.map((asset) => `${asset.symbol} (#${assetIdOf(asset.id)})`).join(', ')}</p>
+          {ethereum.balance !== null && <div>Base balance: {displayEth(ethereum.balance)} ETH</div>}
           {effectiveEstimatedFee !== null && <div>Estimated maximum fee: {displayEth(effectiveEstimatedFee)} ETH</div>}
         </div>
       )}

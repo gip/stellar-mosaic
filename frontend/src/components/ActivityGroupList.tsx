@@ -1,10 +1,10 @@
-import StatusDot from './ui/StatusDot'
 import {
   type ActivityGroup,
   formatStatus,
   short,
   statusTone,
   stellarAddressUrl,
+  txNetworkLabel,
   txUrl,
 } from './activityModel'
 
@@ -25,6 +25,7 @@ export default function ActivityGroupList({
               <div className="activity-summary-heading">
                 <h4>{group.action}</h4>
                 {group.createdAt && <time dateTime={new Date(group.createdAt).toISOString()} title={absoluteTime(group.createdAt)}>{timeAgo(group.createdAt)}</time>}
+                <span className={`activity-status-mark ${statusTone(group.status)}`} title={group.error ? `${formatStatus(group.status)}: ${group.error}` : formatStatus(group.status)} aria-label={formatStatus(group.status)}>{statusMark(group.status)}</span>
               </div>
               <span className="activity-summary-text" title={group.summary}>{renderLinkedSummary(group.summary)}</span>
               {group.error && <span className="activity-summary-error" title={group.error}>{group.error}</span>}
@@ -32,21 +33,30 @@ export default function ActivityGroupList({
             <div className="activity-tx-list">
               {group.lines.flatMap((line, lineIndex) => {
                 if (!line.tx || !line.activity) return []
+                const network = txNetworkLabel(line.tx, line.activity)
                 return (
-                  <a className="mono activity-tx-link" href={txUrl(line.tx, line.activity)} target="_blank" rel="noreferrer" title={`${line.label}: ${line.tx}`} key={`${group.id}:${line.id}:${lineIndex}`}>
-                    {short(line.tx)}
-                  </a>
+                  <div className="activity-tx-line" key={`${group.id}:${line.id}:${lineIndex}`}>
+                    <a className="mono activity-tx-link" href={txUrl(line.tx, line.activity)} target="_blank" rel="noreferrer" title={`${line.description} (${network}): ${line.tx}`}>
+                      {short(line.tx)}
+                    </a>
+                    <span className="activity-tx-desc">{line.description} ({network})</span>
+                  </div>
                 )
               })}
             </div>
-            <StatusDot tone={statusTone(group.status)} title={group.error ? `${formatStatus(group.status)}: ${group.error}` : formatStatus(group.status)}>
-              <span className="activity-status-label">{formatStatus(group.status)}</span>
-            </StatusDot>
           </div>
         </section>
       ))}
     </div>
   )
+}
+
+function statusMark(status?: string) {
+  const tone = statusTone(status)
+  if (tone === 'ok') return '✓'
+  if (tone === 'err') return '✕'
+  if (tone === 'busy') return '⧗'
+  return '•'
 }
 
 function renderLinkedSummary(value: string) {
