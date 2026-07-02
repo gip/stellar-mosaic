@@ -1,34 +1,31 @@
-mod auth;
-mod base_deploy;
-mod base_shield;
-mod catalog;
-mod config;
-mod db;
-mod deploy;
-mod durable_indexer;
-mod error;
-mod handlers;
-mod indexer;
-mod models;
-mod operations;
-mod prove;
-mod stellar;
-mod validate;
+//! Mosaic prove service — an async submit/poll HTTP wrapper around the `bridge-prover`.
+//!
+//! Scope is deliberately tiny: prove a Base deposit (STARK -> Groth16) and serve the artifacts. All
+//! desk/relayer/indexer orchestration and the Base->Stellar shield lifecycle now live in the MCP
+//! server (`packages/mcp`), which drives this service over HTTP and owns finality + `shield_from_base`.
 
-use axum::extract::DefaultBodyLimit;
+mod config;
+mod error;
+mod prove;
+mod prove_manager;
+mod prover;
+
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use config::Config;
-use db::Db;
+use prove_manager::ProveManager;
+use serde_json::{json, Value};
 use std::sync::Arc;
-use stellar::Stellar;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 pub struct AppState {
     pub config: Config,
-    pub db: Db,
-    pub stellar: Stellar,
+    pub prover: ProveManager,
+}
+
+async fn health() -> Json<Value> {
+    Json(json!({ "status": "ok", "service": "mosaic-prove" }))
 }
 
 #[tokio::main]
@@ -41,93 +38,24 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env();
-    tracing::info!(bind=%config.bind, network=%config.network, database=%if config.database_url.starts_with("postgres") {"postgres"} else {"sqlite"}, "starting mosaic-backend");
+    if config.base_rpc.is_none() {
+        tracing::warn!("MOSAIC_BASE_RPC is unset; prove requests will be rejected until it is set");
+    }
+    if config.prover_token.is_none() {
+        tracing::warn!("MOSAIC_PROVER_TOKEN is unset; prove requests will be rejected until it is set");
+    }
+    tracing::info!(bind = %config.bind, prover_dir = %config.prover_dir.display(), "starting mosaic prove service");
 
-    let db = Db::open(&config.database_url).await?;
-    let stellar = Stellar::new(&config);
     let bind = config.bind.clone();
     let state = Arc::new(AppState {
+        prover: ProveManager::new(config.clone()),
         config,
-        db,
-        stellar,
     });
-
-    let worker_state = state.clone();
-    tokio::spawn(async move {
-        loop {
-            if let Err(error) = worker_state.db.promote_queued().await {
-                tracing::error!(%error, "operation queue promotion failed");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-    });
-    tokio::spawn(durable_indexer::run(state.clone()));
-    // Base->Stellar shield worker (WS6): only runs when a Base RPC is configured.
-    if state.config.base_rpc.is_some() {
-        tokio::spawn(base_shield::run(state.clone()));
-    } else {
-        tracing::info!("base-shield worker disabled (set MOSAIC_BASE_RPC to enable)");
-    }
 
     let app = Router::new()
-        .route("/health", get(handlers::health))
-        .route("/prove/base-deposit", post(prove::prove_base_deposit))
-        .route("/validate/relay", post(validate::validate_relay))
-        .merge(auth::routes())
-        .merge(operations::routes())
-        .merge(catalog::routes())
-        .route(
-            "/base-deployment-config",
-            get(base_deploy::deployment_config),
-        )
-        .route(
-            "/desks",
-            get(handlers::list_desks).post(handlers::create_desk),
-        )
-        .route("/desks/:id", get(handlers::get_desk))
-        .route(
-            "/desks/:id/base-deployment",
-            post(base_deploy::complete_deployment),
-        )
-        .route("/desks/:id/root", get(handlers::get_root))
-        .route("/desks/:id/book", get(handlers::get_book))
-        .route("/desks/:id/notes", get(handlers::get_notes))
-        .route("/desks/:id/fills", get(handlers::get_fills))
-        .route("/desks/:id/note-proof", get(handlers::get_note_proof))
-        .route(
-            "/desks/:id/base-shield-config",
-            get(handlers::get_base_shield_config),
-        )
-        .route(
-            "/desks/:id/base-shields",
-            get(handlers::list_base_shields).post(handlers::enqueue_base_shield),
-        )
-        .route(
-            "/client-actions/relay/desks/:id/shield",
-            post(handlers::shield_submit),
-        )
-        .route(
-            "/client-actions/relay/desks/:id/order",
-            post(handlers::relay_order),
-        )
-        .route(
-            "/client-actions/relay/desks/:id/join",
-            post(handlers::relay_join),
-        )
-        .route(
-            "/client-actions/relay/desks/:id/unshield",
-            post(handlers::relay_unshield),
-        )
-        .route(
-            "/client-actions/relay/desks/:id/cancel",
-            post(handlers::relay_cancel),
-        )
-        .route(
-            "/wallet-backups/:backup_id",
-            get(handlers::get_wallet_backup).put(handlers::put_wallet_backup),
-        )
-        // Base64 expands the 2 MiB decoded ciphertext; handlers enforce the decoded limit.
-        .layer(DefaultBodyLimit::max(3 * 1024 * 1024))
+        .route("/health", get(health))
+        .route("/prove/base-deposit", post(prove::submit_prove))
+        .route("/prove/base-deposit/:job_id", get(prove::get_prove))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);

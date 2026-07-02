@@ -39,6 +39,9 @@ export default function CreateDeskForm({
   const [estimatedFee, setEstimatedFee] = useState<bigint | null>(null)
   // Trustless desks may optionally also deploy a Base Sepolia bridge for their Base-backed assets.
   const [deployBaseBridge, setDeployBaseBridge] = useState(true)
+  // Off by default: mint Base deposits as soon as they are proven. On makes the worker wait for
+  // Base L1 finality before minting (safer against a Base reorg, but adds several minutes).
+  const [waitForFinality, setWaitForFinality] = useState(false)
   const ethereum = useEthereumWallet()
   const canSelfFund = mode === 'trustless'
   const effectiveStellarDeployment: 'sponsored' | 'self-funded' = canSelfFund ? 'self-funded' : 'sponsored'
@@ -138,7 +141,7 @@ export default function CreateDeskForm({
         if (deployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
           throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
         }
-        await api.createDeskSelfFunded({ name, assets, pairs: deskPairs, base_assets: deployBase ? baseMappings : undefined })
+        await api.createDeskSelfFunded({ name, assets, pairs: deskPairs, base_assets: deployBase ? baseMappings : undefined, require_finality: deployBase ? waitForFinality : undefined })
         resetForm()
         onDone()
         return
@@ -147,7 +150,7 @@ export default function CreateDeskForm({
       // Trusted/sponsored: the MCP server deploys everything — the Stellar contract and the Base
       // bridge (paid by the operator sponsor key) — and records the deploy activity itself, so there
       // is nothing to sign in the browser. The returned desk already reflects the bridge status.
-      await api.createDesk({ name, assets, pairs: deskPairs, base_assets: deployBase ? baseMappings : undefined })
+      await api.createDesk({ name, assets, pairs: deskPairs, base_assets: deployBase ? baseMappings : undefined, require_finality: deployBase ? waitForFinality : undefined })
       resetForm()
       onDone()
     } catch (e) {
@@ -286,6 +289,14 @@ export default function CreateDeskForm({
                 </p>
               )}
               <p className="muted">Will register: {baseAssets.map((asset) => `${asset.symbol} (#${assetIdOf(asset.id)})`).join(', ')}</p>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0' }}>
+                <input
+                  type="checkbox"
+                  checked={waitForFinality}
+                  onChange={(e) => setWaitForFinality(e.target.checked)}
+                />
+                Wait for Base L1 finality before minting (safer, adds several minutes)
+              </label>
             </>
           )}
         </div>

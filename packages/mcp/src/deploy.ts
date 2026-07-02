@@ -177,7 +177,8 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
     };
 
     if (baseAssets.length > 0) {
-      desk.base_deployment = await this.deployAndConfigureBase(desk, sponsor.secret(), baseAssets, record);
+      const requireFinality = body.require_finality === true;
+      desk.base_deployment = await this.deployAndConfigureBase(desk, sponsor.secret(), baseAssets, record, requireFinality);
     }
     return { desk, sponsorSecret: sponsor.secret() };
   }
@@ -190,6 +191,7 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
     sponsorSecret: string,
     baseAssets: BaseAssetMapping[],
     record: (event: Partial<ActivityEvent> & Pick<ActivityEvent, "kind">) => Promise<void>,
+    requireFinality = false,
   ): Promise<Desk["base_deployment"]> {
     const deployerAddress = privateKeyToAccount(normalizePrivateKey(this.baseDeployerKey!)).address;
     const base: NonNullable<Desk["base_deployment"]> = {
@@ -199,6 +201,7 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
       bridge_address: null,
       error: null,
       assets: baseAssets,
+      require_finality: requireFinality,
     };
     try {
       const deployed = await this.deployBridgeOnBase(baseAssets);
@@ -338,7 +341,7 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
         desk_id: desk.id,
         metadata: { action_id: actionId, name: desk.name, ...(event.metadata ?? {}) },
       });
-    const base_deployment = await this.deployAndConfigureBase(desk, sponsor, setup.assets, record);
+    const base_deployment = await this.deployAndConfigureBase(desk, sponsor, setup.assets, record, setup.require_finality ?? false);
     return this.store.insertDesk({ ...desk, base_deployment }, null);
   }
 

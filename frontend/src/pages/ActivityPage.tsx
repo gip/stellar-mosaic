@@ -3,8 +3,8 @@ import ActivityGroupList from '../components/ActivityGroupList'
 import { activityGroups } from '../components/activityModel'
 
 export default function ActivityPage() {
-  const { operations, activities } = useActivity()
-  const groups = activityGroups(activities, operations)
+  const { operations, activities, catalog } = useActivity()
+  const groups = activityGroups(activities, operations, catalog)
   return (
     <div className="reading activity-page">
       <h2>Activity</h2>

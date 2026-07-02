@@ -66,12 +66,63 @@ export interface InjectedEthereumProvider {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>
   on?: (event: string, listener: (...args: unknown[]) => void) => void
   removeListener?: (event: string, listener: (...args: unknown[]) => void) => void
+  isMetaMask?: boolean
+  providers?: InjectedEthereumProvider[]
+}
+
+// --- EIP-6963 provider discovery ---------------------------------------------
+// Grabbing `window.ethereum` blindly is fragile when several wallet extensions inject at once: they
+// race for that single slot, so we may end up driving (or waking a wedged transport in) the wrong
+// wallet. EIP-6963 replaces the race with an event handshake — each wallet announces itself with a
+// stable `rdns`, letting us pick MetaMask (`io.metamask*`) deterministically. We register the
+// announcement listener at module load and immediately request announcements; the protocol is
+// symmetric (wallets also announce proactively on their own load), so either ordering is covered.
+interface Eip6963ProviderDetail {
+  info: { uuid: string; name: string; icon: string; rdns: string }
+  provider: InjectedEthereumProvider
+}
+
+const announcedProviders = new Map<string, Eip6963ProviderDetail>()
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('eip6963:announceProvider', (event) => {
+    const detail = (event as CustomEvent<Eip6963ProviderDetail>).detail
+    if (detail?.info?.rdns && detail.provider) announcedProviders.set(detail.info.rdns, detail)
+  })
+  window.dispatchEvent(new Event('eip6963:requestProvider'))
+}
+
+/** Prefer a MetaMask provider (exact `io.metamask`, then any `io.metamask*` build like Flask/MMI). */
+function metaMaskFromAnnouncements(): InjectedEthereumProvider | null {
+  const exact = announcedProviders.get('io.metamask')
+  if (exact) return exact.provider
+  for (const detail of announcedProviders.values()) {
+    if (detail.info.rdns.startsWith('io.metamask')) return detail.provider
+  }
+  return null
+}
+
+/** Deterministically resolve the injected provider, preferring MetaMask. Falls back through the
+ * legacy `window.ethereum.providers` array and finally any single injected wallet, so non-MetaMask
+ * setups keep working. */
+function selectInjectedProvider(): InjectedEthereumProvider | null {
+  const announced = metaMaskFromAnnouncements()
+  if (announced) return announced
+
+  const injected = (window as unknown as { ethereum?: InjectedEthereumProvider }).ethereum
+  if (!injected) return null
+  // Some wallets expose every injected provider on a `.providers` array when they collide.
+  if (Array.isArray(injected.providers)) {
+    const mm = injected.providers.find((p) => p.isMetaMask)
+    if (mm) return mm
+  }
+  return injected
 }
 
 export function ethereumProvider(): InjectedEthereumProvider {
-  const e = (window as unknown as { ethereum?: InjectedEthereumProvider }).ethereum
-  if (!e) throw new Error('No EVM wallet found. Install MetaMask (or another injected wallet).')
-  return e
+  const provider = selectInjectedProvider()
+  if (!provider) throw new Error('No EVM wallet found. Install MetaMask (or another injected wallet).')
+  return provider
 }
 
 // Kept as a local alias so existing transaction helpers remain concise.

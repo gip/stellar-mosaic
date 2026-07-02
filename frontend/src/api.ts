@@ -7,6 +7,7 @@ import {
   errorMessage,
   LocalPathProvider,
   makeNoirCompressor,
+  readDeskCustody,
   replayNoteEvents,
   type AssetDef,
   type ActivityEvent,
@@ -19,6 +20,7 @@ import {
   type ChainNote,
   type ClientAction,
   type Desk as SdkDesk,
+  type DeskCustody,
   type Fill,
   type NoteProof,
   type Operation,
@@ -48,7 +50,7 @@ import { currentAddress } from './wallet'
 import { defaultCatalogAssets, mergeCatalogAssets } from './defaultCatalog'
 import { parseDeskShare } from './deskShare'
 import { initNoirWasm } from './noirWasm'
-import { BASE_ROUTER_ID, MCP_URL, SOROBAN_RPC_URL } from './config'
+import { BASE_ROUTER_ID, BASE_RPC_URL, MCP_URL, SOROBAN_RPC_URL } from './config'
 import type { StorageMode } from './StorageModeContext'
 import { ethereumProvider } from './base'
 
@@ -59,6 +61,7 @@ export type CatalogAsset = SdkCatalogAsset
 export type ProposeAssetBody = SdkProposeAssetBody
 export type Desk = Omit<SdkDesk, 'assets'> & { assets: Asset[] }
 export type BaseAssetMapping = { asset_id: number; symbol: string; token: string }
+export type { DeskCustody }
 export type BaseDeployment = NonNullable<SdkDesk['base_deployment']>
 export type BaseDeploymentConfig = Omit<SdkBaseDeploymentConfig, 'abi' | 'bytecode'> & {
   abi: Abi | null
@@ -366,6 +369,7 @@ export const api = {
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
     base_assets?: { asset_id: number; symbol: string; token: string }[]
+    require_finality?: boolean
   }) => wrap(async () => {
     const desk = (await mcp.createDesk(body)) as Desk
     deskCache('trusted').set(desk.id, desk)
@@ -376,6 +380,7 @@ export const api = {
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
     base_assets?: { asset_id: number; symbol: string; token: string }[]
+    require_finality?: boolean
   }) => wrap(async () => {
     const address = await currentAddress()
     if (!address) throw new ApiError(401, 'Connect Freighter before deploying a trustless desk.')
@@ -409,6 +414,7 @@ export const api = {
               router_id: BASE_ROUTER_ID,
               image_id: release?.bridge_image_id ?? '',
               config_id: BASE_SEPOLIA_CONFIG_ID,
+              require_finality: body.require_finality === true,
             },
           }
         : {}),
@@ -462,6 +468,16 @@ export const api = {
       return desk
     }),
   getBook: (id: string, pair: number, side: number) => wrap(() => mcp.getBook(id, pair, side)),
+  getDeskCustody: (mode: StorageMode, id: string): Promise<DeskCustody> =>
+    wrap(async () => {
+      if (mode === 'trusted') return mcp.getDeskCustody(id)
+      const desk = await getDesk(mode, id)
+      return readDeskCustody({
+        desk,
+        stellar: { rpcUrl: SOROBAN_RPC_URL, networkPassphrase: Networks.TESTNET },
+        baseRpcUrl: BASE_RPC_URL,
+      })
+    }),
   listCatalogAssets: (mode: StorageMode) =>
     wrap(() => mode === 'trusted' ? mcp.listAssets() : localCatalog(mode)),
   proposeAsset: (mode: StorageMode, body: ProposeAssetBody) =>

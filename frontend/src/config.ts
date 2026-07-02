@@ -17,6 +17,12 @@ export const SOROBAN_RPC_URL = absoluteHttpUrl(
 )
 
 export const MCP_URL = absoluteHttpUrl(import.meta.env.VITE_MCP_URL, DEFAULT_MCP_URL, 'VITE_MCP_URL')
+
+/** Optional Base Sepolia RPC for read-only custody totals. When unset, viem's built-in transport is
+ * used (no wallet required). */
+export const BASE_RPC_URL = typeof import.meta.env.VITE_BASE_RPC === 'string' && import.meta.env.VITE_BASE_RPC.trim()
+  ? import.meta.env.VITE_BASE_RPC.trim()
+  : undefined
 export const BASE_ROUTER_ID = typeof import.meta.env.VITE_BASE_ROUTER_ID === 'string' && import.meta.env.VITE_BASE_ROUTER_ID.trim()
   ? import.meta.env.VITE_BASE_ROUTER_ID.trim()
   : DEFAULT_BASE_ROUTER_ID

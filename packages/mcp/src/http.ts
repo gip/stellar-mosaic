@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { baseShieldConfigFromEnv } from "./baseShield.js";
+import { startBaseShieldWorker } from "./baseShieldWorker.js";
 import { createMosaicMcpServer, type MosaicMcpOptions } from "./server.js";
 import { openMosaicStore } from "./store.js";
 
@@ -77,11 +78,19 @@ export async function startHttpServer(opts: HttpServerOptions = {}): Promise<{ c
   );
   const store = opts.store ?? openMosaicStore(process.env.MOSAIC_DATABASE_URL);
   const transports = new Map<string, Transport>();
+  const baseShield = opts.baseShield ?? baseShieldConfigFromEnv();
   const serverOptions: MosaicMcpOptions = {
     ...opts,
     store,
-    baseShield: opts.baseShield ?? baseShieldConfigFromEnv(),
+    baseShield,
   };
+
+  // The durable Base->Stellar shield worker runs once per HTTP server when a prove service is set.
+  const worker = baseShield
+    ? startBaseShieldWorker(store, baseShield, {
+        logger: { info: (m) => opts.logger?.info?.(m), warn: (m) => opts.logger?.warn?.(m) },
+      })
+    : undefined;
 
   const http = createServer(async (req, res) => {
     const corsOk = writeCors(req, res, corsOrigins);
@@ -143,6 +152,7 @@ export async function startHttpServer(opts: HttpServerOptions = {}): Promise<{ c
     url: `http://${host}:${port}/mcp`,
     close: () =>
       new Promise((resolve, reject) => {
+        worker?.stop();
         http.close((error) => (error ? reject(error) : resolve()));
       }),
   };

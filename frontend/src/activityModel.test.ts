@@ -33,7 +33,7 @@ test('shield action and transaction activity collapse into one formatted group',
   const groups = activityGroups(activities, [])
   assert.equal(groups.length, 1)
   assert.equal(groups[0].action, 'Shield')
-  assert.equal(groups[0].summary, '10 XLM')
+  assert.equal(groups[0].summary, '10 XLM from Stellar Testnet')
   assert.equal(groups[0].lines.length, 1)
 })
 
@@ -68,7 +68,7 @@ test('legacy shield transaction without action id merges into matching action gr
   const groups = activityGroups(activities, [])
   assert.equal(groups.length, 1)
   assert.equal(groups[0].action, 'Shield')
-  assert.equal(groups[0].summary, '10 XLM')
+  assert.equal(groups[0].summary, '10 XLM from Stellar Testnet')
   assert.equal(groups[0].lines.length, 1)
 })
 
@@ -361,12 +361,51 @@ test('trusted backend operation events with operation id collapse into one opera
     },
   ]
 
-  const groups = activityGroups(activities, [operation])
+  // Trusted-mode backend events carry no asset metadata, so the desk catalog resolves the symbol
+  // and decimals (asset id + raw amount come from the operation request).
+  const catalog = { asset: (deskId: string | undefined, assetId: number) =>
+    deskId === 'desk-2' && assetId === 1 ? { symbol: 'XLM', decimals: 7 } : undefined }
+  const groups = activityGroups(activities, [operation], catalog)
   assert.equal(groups.length, 1)
   assert.equal(groups[0].id, `operation:${operationId}`)
   assert.equal(groups[0].action, 'Shield')
   assert.equal(groups[0].status, 'succeeded')
-  assert.equal(groups[0].summary, 'Asset #1, 100000000')
+  assert.equal(groups[0].summary, '10 XLM from Stellar Testnet')
   assert.equal(groups[0].lines.length, 1)
   assert.equal(groups[0].lines[0].description, 'Confirm on chain')
+})
+
+test('base shield deposit and mint collapse into one group linking both txs', () => {
+  const jobId = 'job-base-1'
+  const baseTx = `0x${'a'.repeat(64)}`
+  const stellarTx = 'f'.repeat(64)
+  const activities: ActivityEvent[] = [
+    {
+      kind: 'transaction',
+      method: 'shield_from_base',
+      status: 'succeeded',
+      desk_id: 'desk-3',
+      tx_hash: stellarTx,
+      metadata: { action_id: jobId, source: 'base', stellar_tx_hash: stellarTx },
+      created_at: 5,
+    },
+    {
+      kind: 'transaction',
+      method: 'shield_from_base',
+      status: 'running',
+      desk_id: 'desk-3',
+      tx_hash: baseTx,
+      metadata: { action_id: jobId, source: 'base', asset_id: 3, symbol: 'ETH', decimals: 18, amount: '1000000000000000000', base_tx_hash: baseTx },
+      created_at: 4,
+    },
+  ]
+
+  const groups = activityGroups(activities, [])
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].action, 'Shield')
+  assert.equal(groups[0].summary, '1 ETH from Base Sepolia')
+  assert.equal(groups[0].lines.length, 2)
+  const byTx = new Map(groups[0].lines.map((line) => [line.tx, line]))
+  assert.equal(txNetworkLabel(baseTx, byTx.get(baseTx)!.activity!), 'Base Sepolia')
+  assert.equal(txNetworkLabel(stellarTx, byTx.get(stellarTx)!.activity!), 'Stellar Testnet')
 })

@@ -107,3 +107,71 @@ test("sqlite MCP store records scoped sanitized activity", async () => {
   const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
   await assertActivityPersistence(openMosaicStore(`sqlite://${join(dir, "mcp.db")}`));
 });
+
+const BASE_BRIDGE = "0xabababababababababababababababababababab";
+
+async function insertBaseDesk(store) {
+  await store.insertDesk(
+    {
+      id: "desk-base",
+      name: "Base desk",
+      contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      sponsor_pubkey: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+      event_start_ledger: 1,
+      assets: [],
+      pairs: [],
+      base_deployment: { status: "active", bridge_address: BASE_BRIDGE, deployer_address: "0x0", tx_hash: "0x0", error: null, assets: [] },
+    },
+    "SA_SPONSOR_SECRET",
+  );
+}
+
+async function assertBaseShieldLifecycle(store) {
+  await insertBaseDesk(store);
+
+  // Drift guard: a bridge that isn't the desk's configured one is rejected.
+  await assert.rejects(() => store.enqueueBaseShield("desk-base", "0xdead", 1), /bridge mismatch/);
+  // Unknown desk is rejected too.
+  await assert.rejects(() => store.enqueueBaseShield("nope", BASE_BRIDGE, 1), /not found|no configured/);
+
+  const job = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 7);
+  assert.equal(job.status, "proving");
+  // Idempotent enqueue returns the same job.
+  assert.equal((await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 7)).id, job.id);
+
+  const next = await store.nextBaseShield();
+  assert.equal(next.id, job.id, "proving job is picked up");
+
+  await store.baseShieldProved(job.id, 42, "cd".repeat(32), "aa", "bb", true);
+  const proved = (await store.listBaseShields("desk-base")).find((j) => j.id === job.id);
+  assert.equal(proved.status, "awaiting_finality");
+  assert.equal(proved.block_number, 42);
+  assert.equal(proved.block_hash, "cd".repeat(32));
+  assert.equal(proved.seal_hex, "aa");
+  assert.equal(proved.journal_hex, "bb");
+
+  await store.baseShieldStatus(job.id, "minting");
+  assert.equal((await store.nextBaseShield()).status, "minting");
+
+  await store.baseShieldStatus(job.id, "active", "ef".repeat(32));
+  assert.equal(await store.nextBaseShield(), null, "terminal jobs are not picked up");
+  const minted = (await store.listBaseShields("desk-base")).find((j) => j.id === job.id);
+  assert.equal(minted.stellar_tx_hash, "ef".repeat(32), "mint tx hash is persisted for the UI");
+
+  // A second job can fail and reports its message.
+  const job2 = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 8);
+  await store.baseShieldFailed(job2.id, "boom");
+  const failed = (await store.listBaseShields("desk-base")).find((j) => j.id === job2.id);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.error, "boom");
+  assert.equal(await store.nextBaseShield(), null);
+}
+
+test("memory MCP store advances base-shield jobs and guards bridge drift", async () => {
+  await assertBaseShieldLifecycle(new MemoryMosaicStore());
+});
+
+test("sqlite MCP store advances base-shield jobs and guards bridge drift", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
+  await assertBaseShieldLifecycle(openMosaicStore(`sqlite://${join(dir, "mcp.db")}`));
+});

@@ -4,7 +4,6 @@
 // separate code path.
 
 import type {
-  Amount,
   AssetDef,
   AuthSession,
   BaseDeploymentConfig,
@@ -28,6 +27,7 @@ import type {
   TreeEvent,
   WalletBackupEnvelope,
 } from "./types.js";
+import type { DeskCustody } from "./custody.js";
 import type { ActivityEvent } from "./activity.js";
 export type { ActivityStore } from "./activity.js";
 
@@ -209,11 +209,14 @@ export interface McpClient {
     base_assets?: { asset_id: number; symbol: string; token: string }[];
     /** Legacy browser-wallet deploy shape; superseded by server-side deployment. */
     base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] };
+    /** Wait for Base L1 finality before minting shielded notes. Default false. */
+    require_finality?: boolean;
   }): Promise<Desk>;
   baseDeploymentConfig(): Promise<BaseDeploymentConfig>;
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk>;
   retryBaseDeployment(id: string): Promise<Desk>;
   getBook(deskId: string, pair: number, side: number): Promise<BookSide>;
+  getDeskCustody(id: string): Promise<DeskCustody>;
   listAssets(): Promise<CatalogAsset[]>;
   proposeAsset(body: ProposeAssetBody): Promise<CatalogAsset>;
   trustAsset(id: string): Promise<{ ok: boolean }>;
@@ -255,15 +258,6 @@ export interface McpClient {
   baseShieldConfig(deskId: string): Promise<BaseShieldConfig>;
   enqueueBaseShield(deskId: string, body: { expected_bridge: string; deposit_id: number }): Promise<BaseShieldJob>;
   listBaseShields(deskId: string): Promise<BaseShieldJob[]>;
-  /** Run a Base→Stellar shield: prove the Base deposit (RISC Zero/Steel, server-side), await
-   * finality, attest the block, and call `shield_from_base`. Returns the minted note's owner tag. */
-  baseShield(params: {
-    contractId: string;
-    asset_id: number;
-    amount: Amount;
-    owner_tag: Field;
-    baseTxHash: string;
-  }): Promise<{ owner_tag: Field; txHash: string }>;
 }
 
 export interface ClientActionLease {

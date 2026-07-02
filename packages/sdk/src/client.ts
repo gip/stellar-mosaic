@@ -917,6 +917,8 @@ export class MosaicClient {
       router_id: string;
       image_id: string;
       config_id: string;
+      /** Wait for Base L1 finality before minting shielded notes. Default false. */
+      require_finality?: boolean;
     };
   }): Promise<DeskConfig> {
     const actionId = this.actionId();
@@ -987,6 +989,7 @@ export class MosaicClient {
           bridge_address: null,
           error: null,
           assets: baseAssets.map((asset, index) => ({ asset_id: asset.asset_id, symbol: asset.symbol, token: tokens[index] })),
+          require_finality: params.base.require_finality === true,
         };
         partialDesk = desk;
         await this.recordActivity({
@@ -1133,13 +1136,24 @@ export class MosaicClient {
     return { stop: () => clearInterval(interval) };
   }
 
-  /** Base -> Stellar shield. Requires an {@link McpClient}; errors clearly otherwise. */
+  /**
+   * Base -> Stellar shield via the durable server worker. Requires an {@link McpClient}.
+   *
+   * The Base deposit must already be made *with the returned note's owner tag* — that is the privacy
+   * binding, so the caller derives the note here, deposits on Base with `note.owner_tag`, and passes
+   * the resulting `deposit_id`. This enqueues the durable prove -> finality -> mint job and polls it
+   * to a terminal state. (The browser client drives the same MCP tools directly and need not block.)
+   */
   async shieldFromBase(params: {
     deskId: string;
     asset_id: number;
     amount: Amount;
-    baseTxHash: string;
-  }): Promise<{ owner_tag: Field; txHash: string }> {
+    /** The MosaicBridge deposit counter for the on-chain deposit (bound to `note.owner_tag`). */
+    deposit_id: number;
+    /** Poll cadence + ceiling while waiting for the ~10-minute prove + finality to complete. */
+    pollIntervalMs?: number;
+    timeoutMs?: number;
+  }): Promise<{ owner_tag: Field; note_id: string; job_id: string; status: string }> {
     const actionId = this.actionId();
     const wallet = await this.walletAddress();
     await this.recordActivity({
@@ -1148,12 +1162,15 @@ export class MosaicClient {
       status: "started",
       wallet_address: wallet,
       desk_id: params.deskId,
-      tx_hash: params.baseTxHash,
-      metadata: { action_id: actionId, asset_id: params.asset_id, amount: params.amount, base_tx_hash: params.baseTxHash },
+      metadata: { action_id: actionId, asset_id: params.asset_id, amount: params.amount, deposit_id: params.deposit_id },
     });
     try {
       if (!this.p.mcp) throw new Error("Base shielding requires an MCP (configure `mcp`).");
       const desk = await this.p.desks.get(params.deskId);
+      const config = await this.p.mcp.baseShieldConfig(params.deskId);
+      if (!config.available || !config.bridge) {
+        throw new Error(`Base shielding is not available for this desk (${config.reason ?? "unavailable"}).`);
+      }
       const sk = randomField();
       const rho = randomField();
       const owner_tag = await this.wallet.noteTag(sk, rho);
@@ -1182,17 +1199,14 @@ export class MosaicClient {
         desk_id: desk.id,
         note_id: note.id,
         owner_tag,
-        tx_hash: params.baseTxHash,
-        metadata: { action_id: actionId, asset_id: params.asset_id, amount: params.amount },
+        metadata: { action_id: actionId, asset_id: params.asset_id, amount: params.amount, deposit_id: params.deposit_id },
       });
-      const result = await this.p.mcp.baseShield({
-        contractId: desk.contractId,
-        asset_id: params.asset_id,
-        amount: params.amount,
-        owner_tag,
-        baseTxHash: params.baseTxHash,
+      const job = await this.p.mcp.enqueueBaseShield(params.deskId, {
+        expected_bridge: config.bridge,
+        deposit_id: params.deposit_id,
       });
-      await this.notes.update(note.id, { txHash: result.txHash });
+      const final = await this.pollBaseShield(params.deskId, job.id, params.pollIntervalMs, params.timeoutMs);
+      if (final.status === "failed") throw new Error(final.error ?? "base shield failed on the server");
       await this.recordActivity({
         kind: "user_action",
         action: "shield_from_base",
@@ -1201,10 +1215,9 @@ export class MosaicClient {
         desk_id: desk.id,
         note_id: note.id,
         owner_tag,
-        tx_hash: result.txHash,
-        metadata: { action_id: actionId, base_tx_hash: params.baseTxHash },
+        metadata: { action_id: actionId, deposit_id: params.deposit_id, job_id: job.id },
       });
-      return result;
+      return { owner_tag, note_id: note.id, job_id: job.id, status: final.status };
     } catch (error) {
       await this.recordActivity({
         kind: "error",
@@ -1212,11 +1225,30 @@ export class MosaicClient {
         status: "failed",
         wallet_address: wallet,
         desk_id: params.deskId,
-        tx_hash: params.baseTxHash,
         message: errorMessage(error),
         metadata: { action_id: actionId, error: serializeError(error) },
       });
       throw error;
+    }
+  }
+
+  /** Poll a durable base-shield job until it reaches a terminal state (or the timeout elapses). */
+  private async pollBaseShield(
+    deskId: string,
+    jobId: string,
+    intervalMs = 12_000,
+    timeoutMs = 30 * 60_000,
+  ): Promise<{ status: string; error?: string | null }> {
+    if (!this.p.mcp) throw new Error("Base shielding requires an MCP (configure `mcp`).");
+    const deadline = nowMs() + timeoutMs;
+    for (;;) {
+      const jobs = await this.p.mcp.listBaseShields(deskId);
+      const job = jobs.find((j) => j.id === jobId);
+      if (job && (job.status === "active" || job.status === "failed")) {
+        return { status: job.status, error: job.error };
+      }
+      if (nowMs() > deadline) return { status: "failed", error: "timed out waiting for base shield" };
+      await new Promise((r) => setTimeout(r, intervalMs));
     }
   }
 

@@ -66,6 +66,40 @@ export interface MosaicStore {
   ): Promise<{ generation: number }>;
   enqueueBaseShield(deskId: string, bridge: string, depositId: number): Promise<BaseShieldJob>;
   listBaseShields(deskId: string): Promise<BaseShieldJob[]>;
+  /** Oldest base-shield job still in a non-terminal state (proving|awaiting_finality|minting). */
+  nextBaseShield(): Promise<BaseShieldJob | null>;
+  /** Persist the proof + committed block and advance the job. When `requireFinality` is true the job
+   * moves to `awaiting_finality` (the worker then waits for Base L1 finality); otherwise it goes
+   * straight to `minting`. */
+  baseShieldProved(
+    id: string,
+    blockNumber: number,
+    blockHash: string,
+    sealHex: string,
+    journalHex: string,
+    requireFinality: boolean,
+  ): Promise<void>;
+  /** Move a job to a new status (e.g. `minting`, `active`). */
+  baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void>;
+  /** Move a job to the terminal `failed` state with a message. */
+  baseShieldFailed(id: string, error: string): Promise<void>;
+}
+
+/** Base-shield job states that the worker still needs to advance. */
+const BASE_SHIELD_ACTIVE = new Set(["proving", "awaiting_finality", "minting"]);
+
+/**
+ * Reject a base-shield enqueue whose bridge disagrees with what the desk was actually configured
+ * with on-chain (recorded at deploy). This is the drift guard: a stale front-end must not queue a
+ * job that would prove against the wrong bridge.
+ */
+async function assertBridgeMatches(store: MosaicStore, deskId: string, bridge: string): Promise<void> {
+  const desk = await store.getDesk(deskId);
+  const configured = desk.base_deployment?.bridge_address ?? null;
+  if (!configured) throw new Error(`desk ${deskId} has no configured Base bridge`);
+  if (configured.toLowerCase() !== bridge.toLowerCase()) {
+    throw new Error(`bridge mismatch: desk ${deskId} is configured for ${configured}, not ${bridge}`);
+  }
 }
 
 function tokenHash(value: string): string {
@@ -419,6 +453,7 @@ export class MemoryMosaicStore implements MosaicStore {
   }
 
   async enqueueBaseShield(deskId: string, bridge: string, depositId: number): Promise<BaseShieldJob> {
+    await assertBridgeMatches(this, deskId, bridge);
     const key = `${deskId}\0${bridge}\0${depositId}`;
     const existing = this.baseShields.get(key);
     if (existing) return clone(existing);
@@ -438,6 +473,49 @@ export class MemoryMosaicStore implements MosaicStore {
 
   async listBaseShields(deskId: string): Promise<BaseShieldJob[]> {
     return [...this.baseShields.values()].filter((job) => job.desk_id === deskId).map(clone);
+  }
+
+  private baseShieldById(id: string): BaseShieldJob | undefined {
+    for (const job of this.baseShields.values()) if (job.id === id) return job;
+    return undefined;
+  }
+
+  async nextBaseShield(): Promise<BaseShieldJob | null> {
+    for (const job of this.baseShields.values()) {
+      if (BASE_SHIELD_ACTIVE.has(job.status)) return clone(job);
+    }
+    return null;
+  }
+
+  async baseShieldProved(
+    id: string,
+    blockNumber: number,
+    blockHash: string,
+    sealHex: string,
+    journalHex: string,
+    requireFinality: boolean,
+  ): Promise<void> {
+    const job = this.baseShieldById(id);
+    if (!job) throw new Error(`base-shield job ${id} not found`);
+    job.status = requireFinality ? "awaiting_finality" : "minting";
+    job.block_number = blockNumber;
+    job.block_hash = blockHash;
+    job.seal_hex = sealHex;
+    job.journal_hex = journalHex;
+  }
+
+  async baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void> {
+    const job = this.baseShieldById(id);
+    if (!job) throw new Error(`base-shield job ${id} not found`);
+    job.status = status;
+    if (stellarTxHash) job.stellar_tx_hash = stellarTxHash;
+  }
+
+  async baseShieldFailed(id: string, error: string): Promise<void> {
+    const job = this.baseShieldById(id);
+    if (!job) throw new Error(`base-shield job ${id} not found`);
+    job.status = "failed";
+    job.error = error;
   }
 
   private addEvent(operation: Operation, event_type: string, state: string, message: string, details: unknown): void {
@@ -831,6 +909,7 @@ export class SqliteMosaicStore implements MosaicStore {
   }
 
   async enqueueBaseShield(deskId: string, bridge: string, depositId: number): Promise<BaseShieldJob> {
+    await assertBridgeMatches(this, deskId, bridge);
     const key = `${deskId}\0${bridge}\0${depositId}`;
     const existing = parseJson<BaseShieldJob>(
       this.db.prepare("SELECT json FROM base_shields WHERE key = ?").get(key) as { json: string } | undefined,
@@ -854,6 +933,64 @@ export class SqliteMosaicStore implements MosaicStore {
     return (this.db.prepare("SELECT json FROM base_shields WHERE desk_id = ?").all(deskId) as { json: string }[]).map(
       (row) => JSON.parse(row.json) as BaseShieldJob,
     );
+  }
+
+  private baseShieldRowById(id: string): { key: string; job: BaseShieldJob } | undefined {
+    // base_shields is keyed by (desk, bridge, deposit); look a job up by its id (small table). The
+    // key is reconstructed from the job fields rather than the read-back `key` column, which
+    // node:sqlite truncates at the embedded NUL separator (the stored/bound value is intact).
+    const rows = this.db.prepare("SELECT json FROM base_shields").all() as { json: string }[];
+    for (const row of rows) {
+      const job = JSON.parse(row.json) as BaseShieldJob;
+      if (job.id === id) return { key: `${job.desk_id}\0${job.bridge}\0${job.deposit_id}`, job };
+    }
+    return undefined;
+  }
+
+  private writeBaseShield(key: string, job: BaseShieldJob): void {
+    this.db.prepare("UPDATE base_shields SET json = ? WHERE key = ?").run(JSON.stringify(job), key);
+  }
+
+  async nextBaseShield(): Promise<BaseShieldJob | null> {
+    // Oldest first: rowid is monotonic in insertion order.
+    const rows = this.db.prepare("SELECT json FROM base_shields ORDER BY rowid ASC").all() as { json: string }[];
+    for (const row of rows) {
+      const job = JSON.parse(row.json) as BaseShieldJob;
+      if (BASE_SHIELD_ACTIVE.has(job.status)) return job;
+    }
+    return null;
+  }
+
+  async baseShieldProved(
+    id: string,
+    blockNumber: number,
+    blockHash: string,
+    sealHex: string,
+    journalHex: string,
+    requireFinality: boolean,
+  ): Promise<void> {
+    const row = this.baseShieldRowById(id);
+    if (!row) throw new Error(`base-shield job ${id} not found`);
+    this.writeBaseShield(row.key, {
+      ...row.job,
+      status: requireFinality ? "awaiting_finality" : "minting",
+      block_number: blockNumber,
+      block_hash: blockHash,
+      seal_hex: sealHex,
+      journal_hex: journalHex,
+    });
+  }
+
+  async baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void> {
+    const row = this.baseShieldRowById(id);
+    if (!row) throw new Error(`base-shield job ${id} not found`);
+    this.writeBaseShield(row.key, { ...row.job, status, ...(stellarTxHash ? { stellar_tx_hash: stellarTxHash } : {}) });
+  }
+
+  async baseShieldFailed(id: string, error: string): Promise<void> {
+    const row = this.baseShieldRowById(id);
+    if (!row) throw new Error(`base-shield job ${id} not found`);
+    this.writeBaseShield(row.key, { ...row.job, status: "failed", error });
   }
 
   private putOperation(operation: Operation): void {

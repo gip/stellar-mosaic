@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { errorMessage } from '@mosaic/sdk'
+import { errorMessage, type ActivityEvent } from '@mosaic/sdk'
 import { bytesToHex } from 'viem'
 import { api, type BaseShieldConfig, type BaseShieldJob, type Desk } from '../api'
 import { toRaw } from '../amount'
@@ -7,6 +7,7 @@ import { randomField, fieldToBytes32 } from '../crypto'
 import { noteTag } from '../noir'
 import { addNote } from '../notes'
 import { baseShield } from '../base'
+import { browserActivityStore } from '../sdk/indexedDbStore'
 import { useRecovery } from '../RecoveryContext'
 import { useEthereumWallet } from '../EthereumWalletContext'
 import Field from './ui/Field'
@@ -18,6 +19,16 @@ const STATUS_LABEL: Record<string, string> = {
   minting: 'Verifying on Stellar + minting…',
   active: 'Active — note minted ✓',
   failed: 'Failed',
+}
+
+// Best-effort: a Base shield must never fail because Activity logging did (the on-chain state and the
+// job row are authoritative). Base shields are trusted-mode only.
+async function recordBaseShieldActivity(event: ActivityEvent): Promise<void> {
+  try {
+    await browserActivityStore('trusted').record(event)
+  } catch {
+    /* Activity is best-effort UI state. */
+  }
 }
 
 /**
@@ -125,7 +136,36 @@ export default function ShieldFromBaseForm({
         const j = jobs.find((x) => x.id === jobId)
         if (j) {
           setJob(j)
-          if (j.status === 'active' || j.status === 'failed') stopped = true
+          if (j.status === 'active') {
+            stopped = true
+            // Record the Stellar mint tx under the same group (`action_id`) as the Base deposit.
+            await recordBaseShieldActivity({
+              kind: 'transaction',
+              action: 'shield_from_base',
+              method: 'shield_from_base',
+              status: 'succeeded',
+              wallet_address: userPubkey ?? undefined,
+              desk_id: desk.id,
+              tx_hash: j.stellar_tx_hash ?? undefined,
+              idempotency_key: `base-shield-mint:${j.id}`,
+              created_at: Date.now(),
+              metadata: { action_id: j.id, source: 'base', stellar_tx_hash: j.stellar_tx_hash ?? undefined },
+            })
+          } else if (j.status === 'failed') {
+            stopped = true
+            await recordBaseShieldActivity({
+              kind: 'error',
+              action: 'shield_from_base',
+              method: 'shield_from_base',
+              status: 'failed',
+              wallet_address: userPubkey ?? undefined,
+              desk_id: desk.id,
+              message: j.error ?? undefined,
+              idempotency_key: `base-shield-fail:${j.id}`,
+              created_at: Date.now(),
+              metadata: { action_id: j.id, source: 'base' },
+            })
+          }
         }
       } catch {
         /* transient; keep polling */
@@ -137,7 +177,7 @@ export default function ShieldFromBaseForm({
       else void tick()
     }, 4000)
     return () => clearInterval(iv)
-  }, [jobId, desk.id])
+  }, [jobId, desk.id, userPubkey])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -167,7 +207,7 @@ export default function ShieldFromBaseForm({
       const ownerTagHex = bytesToHex(fieldToBytes32(owner_tag))
 
       setStatus('Approve + shield on Base (sign in your wallet)…')
-      const { depositId } = await baseShield({
+      const { depositId, txHash: baseTxHash } = await baseShield({
         bridge: addr as `0x${string}`,
         assetId: selectedAssetId,
         amount: BigInt(rawAmount),
@@ -200,6 +240,30 @@ export default function ShieldFromBaseForm({
       })
       setJobId(created.id)
       setJob(created)
+      // Surface the Base deposit in the Activity tab immediately: a Shield "from Base Sepolia" with
+      // the Base Sepolia tx. Its `action_id` (the job id) groups it with the Stellar mint tx recorded
+      // once the worker finishes — so the entry links both legs of the bridge.
+      await recordBaseShieldActivity({
+        kind: 'transaction',
+        action: 'shield_from_base',
+        method: 'shield_from_base',
+        status: 'running',
+        wallet_address: userPubkey ?? undefined,
+        desk_id: desk.id,
+        tx_hash: baseTxHash,
+        idempotency_key: `base-shield-deposit:${created.id}`,
+        created_at: Date.now(),
+        metadata: {
+          action_id: created.id,
+          source: 'base',
+          asset_id: selectedAssetId,
+          symbol: asset.symbol,
+          decimals: asset.decimals,
+          amount: rawAmount,
+          base_tx_hash: baseTxHash,
+          deposit_id: depositId,
+        },
+      })
       onDone()
     } catch (e) {
       setError(errorMessage(e))

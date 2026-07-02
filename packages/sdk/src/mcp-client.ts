@@ -5,7 +5,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type {
-  Amount,
   AuthSession,
   BaseDeploymentConfig,
   BaseShieldConfig,
@@ -14,13 +13,13 @@ import type {
   CatalogAsset,
   ClientAction,
   Desk,
-  Field,
   Operation,
   OperationEvent,
   OperationRequest,
   ProposeAssetBody,
   WalletBackupEnvelope,
 } from "./types.js";
+import type { DeskCustody } from "./custody.js";
 import type { ActivityEvent } from "./activity.js";
 import type { ClientActionLease, McpClient, StellarSigner, SubmitResult } from "./ports.js";
 
@@ -153,6 +152,8 @@ class HttpMcpClient implements McpClient {
     pairs: { base_asset: number; quote_asset: number }[];
     base_assets?: { asset_id: number; symbol: string; token: string }[];
     base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] };
+    /** Wait for Base L1 finality before minting shielded notes. Default false. */
+    require_finality?: boolean;
   }): Promise<Desk> {
     return this.call("create_desk", this.auth({ body }));
   }
@@ -171,6 +172,10 @@ class HttpMcpClient implements McpClient {
 
   getBook(deskId: string, pair: number, side: number): Promise<BookSide> {
     return this.call("get_book", { desk_id: deskId, pair, side });
+  }
+
+  getDeskCustody(id: string): Promise<DeskCustody> {
+    return this.call("get_desk_custody", { id });
   }
 
   listAssets(): Promise<CatalogAsset[]> {
@@ -326,17 +331,6 @@ class HttpMcpClient implements McpClient {
 
   listBaseShields(deskId: string): Promise<BaseShieldJob[]> {
     return this.call("list_base_shields", { desk_id: deskId });
-  }
-
-  async baseShield(params: {
-    contractId: string;
-    asset_id: number;
-    amount: Amount;
-    owner_tag: Field;
-    baseTxHash: string;
-  }): Promise<{ owner_tag: Field; txHash: string }> {
-    if (!this.sessionToken) throw new Error("Call authenticate() before baseShield().");
-    return this.call("base_shield", { session: this.sessionToken, ...params });
   }
 }
 
