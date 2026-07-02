@@ -336,8 +336,14 @@ export class MosaicClient {
 
   // --- assemble (join/split) --------------------------------------------------------------------
 
-  /** Produce one confirmed note of exactly `target` of `asset_id` (split/merge as needed). */
-  async assemble(deskId: string, asset_id: number, target: Amount): Promise<{ note: Note }> {
+  /** Produce one confirmed note of exactly `target` of `asset_id` (split/merge as needed). When a
+   * `parent` operation drives the assembly, its join steps record under that operation's activity. */
+  async assemble(
+    deskId: string,
+    asset_id: number,
+    target: Amount,
+    parent?: { actionId: string; kind: string },
+  ): Promise<{ note: Note }> {
     const actionId = this.actionId();
     const wallet = await this.walletAddress();
     await this.recordActivity({
@@ -367,7 +373,7 @@ export class MosaicClient {
         });
         return { note };
       }
-      const note = await this.runAssembly(deskId, plan.steps, all, wallet);
+      const note = await this.runAssembly(deskId, plan.steps, all, wallet, parent);
       await this.recordActivity({
         kind: "user_action",
         action: "assemble",
@@ -398,6 +404,7 @@ export class MosaicClient {
     steps: AssemblyStep[],
     pool: Note[],
     walletAddress?: string,
+    parent?: { actionId: string; kind: string },
   ): Promise<Note> {
     const byId = new Map(pool.map((n) => [n.id, n]));
     const resolve = (ref: JoinInputRef, prev: Note | null) =>
@@ -407,7 +414,7 @@ export class MosaicClient {
       const a = resolve(step.a, prev);
       const b = step.op === "join" ? resolve(step.b, prev) : null;
       if (!a || (step.op === "join" && !b)) throw new Error("A note is no longer available; please retry.");
-      const { target } = await this.executeJoin(deskId, a, b, BigInt(step.targetRaw), BigInt(step.changeRaw));
+      const { target } = await this.executeJoin(deskId, a, b, BigInt(step.targetRaw), BigInt(step.changeRaw), parent);
       prev = await this.waitForConfirm(deskId, target.id, walletAddress);
     }
     if (!prev) throw new Error("Empty assembly plan.");
@@ -420,8 +427,12 @@ export class MosaicClient {
     b: Note | null,
     targetRaw: bigint,
     changeRaw: bigint,
+    parent?: { actionId: string; kind: string },
   ): Promise<{ target: Note; change: Note | null }> {
-    const actionId = this.actionId();
+    // When a parent (order/unshield) drives this join, record it under the parent's activity group
+    // (same action_id + kind) so every on-chain step of the operation shows as its own transaction
+    // line. Standalone `assemble` calls keep their own group.
+    const actionId = parent?.actionId ?? this.actionId();
     const wallet = await this.walletAddress();
     const desk = await this.p.desks.get(deskId);
     const sk_out1 = randomField();
@@ -523,6 +534,7 @@ export class MosaicClient {
       owner_tag: target.owner_tag,
       metadata: {
         action_id: actionId,
+        kind: parent?.kind,
         input_note_ids: [a.id, b?.id].filter(Boolean),
         target_amount: targetRaw.toString(),
         change_note_id: change?.id,
@@ -544,13 +556,14 @@ export class MosaicClient {
     await this.recordActivity({
       kind: "user_action",
       action: "join",
+      method: "join",
       status: "succeeded",
       wallet_address: wallet,
       desk_id: desk.id,
       tx_hash: res.txHash,
       note_id: target.id,
       owner_tag: target.owner_tag,
-      metadata: { action_id: actionId, change_note_id: change?.id, status: res.status },
+      metadata: { action_id: actionId, kind: parent?.kind, change_note_id: change?.id, status: res.status },
     });
     return { target, change };
   }
@@ -582,7 +595,7 @@ export class MosaicClient {
       const assetIn = params.side === SIDE_SELL ? pair.base_asset : pair.quote_asset;
       const assetOut = params.side === SIDE_SELL ? pair.quote_asset : pair.base_asset;
 
-      const offer = (await this.assemble(params.deskId, assetIn, params.amountIn)).note;
+      const offer = (await this.assemble(params.deskId, assetIn, params.amountIn, { actionId, kind: "place_order" })).note;
       await this.waitForConfirm(params.deskId, offer.id, wallet);
       const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
 
@@ -722,7 +735,7 @@ export class MosaicClient {
     try {
       const desk = await this.p.desks.get(params.deskId);
       const asset = desk.assets.find((a) => a.asset_id === params.asset_id);
-      const offer = (await this.assemble(params.deskId, params.asset_id, params.amount)).note;
+      const offer = (await this.assemble(params.deskId, params.asset_id, params.amount, { actionId, kind: "unshield" })).note;
       await this.waitForConfirm(params.deskId, offer.id, wallet);
       const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
 

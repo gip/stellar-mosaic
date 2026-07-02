@@ -145,7 +145,7 @@ async function executeShield(
   return { transaction, indexed }
 }
 
-async function exactInput(desk: Desk, assetId: number, amount: bigint): Promise<Note> {
+async function exactInput(desk: Desk, assetId: number, amount: bigint, operationId: string): Promise<Note> {
   const notes = await notesForDesk(MODE, desk.id, (await api.getAuthSession()).address)
   const plan = planAssembly(notes, assetId, amount)
   if (plan.kind === 'impossible') throw new Error(plan.reason)
@@ -154,7 +154,8 @@ async function exactInput(desk: Desk, assetId: number, amount: bigint): Promise<
     if (!note) throw new Error('The selected private note is no longer available.')
     return note
   }
-  return runAssembly(MODE, desk, plan.steps, notes)
+  // Thread the operation id so each assembly `join` records under this operation's activity group.
+  return runAssembly(MODE, desk, plan.steps, notes, undefined, operationId)
 }
 
 async function executeOrder(
@@ -168,7 +169,7 @@ async function executeOrder(
   const assetOut = request.side === 'SELL' ? pair.quote_asset : pair.base_asset
   const base = desk.assets.find((a) => a.asset_id === pair.base_asset)
   const quote = desk.assets.find((a) => a.asset_id === pair.quote_asset)
-  const offer = await exactInput(desk, assetIn, BigInt(request.amount_in))
+  const offer = await exactInput(desk, assetIn, BigInt(request.amount_in), operationId)
   const membership = await waitForNoteProof(desk.id, offer.owner_tag)
   await updateNote(MODE, offer.id, { operation_id: operationId, operation_state: 'reserved' })
 
@@ -201,7 +202,7 @@ async function executeOrder(
     },
   }
   await stageRecoverableNote(output, MODE)
-  await submitDirectOrSponsored(
+  const transaction = await submitDirectOrSponsored(
     desk.contract_id,
     'submit_order',
     [
@@ -211,9 +212,10 @@ async function executeOrder(
     () => api.relayOrder(desk.id, b64(bundle.proof), b64(bundle.publicInputs)),
   )
   await updateNote(MODE, offer.id, { status: 'spent', operation_state: 'committed' })
-  await updateNote(MODE, output.id, { operation_state: 'committed' })
+  await updateNote(MODE, output.id, { operation_state: 'committed', txHash: transaction })
   await syncRecoveryNow()
   return {
+    tx_hash: transaction,
     output_tag: terms.output_owner_tag,
     pair_id: request.pair_id,
     side: request.side,
@@ -236,12 +238,13 @@ async function executeUnshieldOperation(
   request: Extract<OperationRequest, { kind: 'unshield' }>,
   operationId: string,
 ) {
-  const note = await exactInput(desk, request.asset_id, BigInt(request.amount))
+  const note = await exactInput(desk, request.asset_id, BigInt(request.amount), operationId)
   await updateNote(MODE, note.id, { operation_id: operationId, operation_state: 'reserved' })
-  await executeUnshield(MODE, desk, note, request.recipient)
+  const transaction = await executeUnshield(MODE, desk, note, request.recipient)
   await updateNote(MODE, note.id, { operation_state: 'committed' })
   await syncRecoveryNow()
   return {
+    tx_hash: transaction,
     recipient: request.recipient,
     asset_id: request.asset_id,
     symbol: desk.assets.find((a) => a.asset_id === request.asset_id)?.symbol ?? `#${request.asset_id}`,
@@ -268,7 +271,7 @@ async function executeCancel(
     operation_state: 'pending-output',
   }
   await stageRecoverableNote(refund, MODE)
-  await submitDirectOrSponsored(
+  const transaction = await submitDirectOrSponsored(
     desk.contract_id,
     'cancel_order',
     [
@@ -279,10 +282,11 @@ async function executeCancel(
     ],
     () => api.relayCancel(desk.id, c.pairId, c.side, b64(bundle.proof), b64(bundle.publicInputs)),
   )
-  await updateNote(MODE, note.id, { status: 'cancelled', cancelledAt: nowMs(), operation_state: 'committed' })
-  await updateNote(MODE, refund.id, { operation_state: 'committed' })
+  await updateNote(MODE, note.id, { status: 'cancelled', cancelledAt: nowMs(), operation_state: 'committed', txHash: transaction })
+  await updateNote(MODE, refund.id, { operation_state: 'committed', txHash: transaction })
   await syncRecoveryNow()
   return {
+    tx_hash: transaction,
     return_owner_tag,
     cancelled_note_id: note.id,
     pair_id: c.pairId,

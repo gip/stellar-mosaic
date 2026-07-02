@@ -133,11 +133,13 @@ export async function submitDirectOrSponsored(
   contractId: string,
   method: string,
   args: xdr.ScVal[],
-  sponsored: () => Promise<unknown>,
+  sponsored: () => Promise<{ result?: string }>,
 ): Promise<string | undefined> {
   if (submissionMode() === 'sponsored') {
-    await sponsored()
-    return undefined
+    // The relayer runs the transaction server-side and returns its hash. Surface it (rather than
+    // dropping it) so the operation's activity carries the on-chain tx, matching direct mode.
+    const outcome = await sponsored()
+    return typeof outcome?.result === 'string' ? outcome.result : undefined
   }
   return submitContractCall(contractId, method, args)
 }

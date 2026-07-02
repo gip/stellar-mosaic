@@ -365,7 +365,7 @@ export const api = {
     name: string
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
-    base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] }
+    base_assets?: { asset_id: number; symbol: string; token: string }[]
   }) => wrap(async () => {
     const desk = (await mcp.createDesk(body)) as Desk
     deskCache('trusted').set(desk.id, desk)
@@ -451,6 +451,13 @@ export const api = {
   completeBaseDeployment: (id: string, body: { tx_hash: string; bridge_address: string }) =>
     wrap(async () => {
       const desk = (await mcp.completeBaseDeployment(id, body)) as Desk
+      deskCache('trusted').set(desk.id, desk)
+      return desk
+    }),
+  // Trusted mode: ask the server to re-run its own Base bridge deploy for a desk whose bridge failed.
+  retryBaseDeployment: (id: string) =>
+    wrap(async () => {
+      const desk = (await mcp.retryBaseDeployment(id)) as Desk
       deskCache('trusted').set(desk.id, desk)
       return desk
     }),

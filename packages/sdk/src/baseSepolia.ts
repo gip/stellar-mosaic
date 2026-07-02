@@ -78,6 +78,36 @@ function initCode(artifact: MosaicBridgeArtifact, account: Address, assetIds: nu
   });
 }
 
+export interface BridgeDeploymentCall {
+  /** Deployer/owner address bound into the constructor. */
+  account: Address;
+  /** Normalized token addresses (native sentinel resolved), parallel to `assetIds`. */
+  tokens: Address[];
+  /** Calldata for the CREATE2 proxy: `salt ++ initCode`. Send it to {@link CREATE2_PROXY}. */
+  data: Hex;
+  /** Deterministic address the proxy will deploy the bridge to. */
+  bridgeAddress: Address;
+}
+
+/**
+ * Build the CREATE2-proxy calldata and resulting bridge address for a MosaicBridge deployment.
+ * Single-sources the salt/init-code/address derivation so the browser wallet path
+ * ({@link BaseSepoliaBridgeDeployer}) and the server-side sponsor path (MCP) stay byte-identical.
+ */
+export function buildBridgeDeployment(
+  artifact: MosaicBridgeArtifact,
+  account: string,
+  assetIds: number[],
+  tokens: string[],
+): BridgeDeploymentCall {
+  const deployer = normalizeAddress(account, "EVM account");
+  const normalizedTokens = validateMappings(assetIds, tokens);
+  const salt = randomSalt();
+  const creation = initCode(artifact, deployer, assetIds, normalizedTokens);
+  const data = concat([salt, creation]);
+  return { account: deployer, tokens: normalizedTokens, data, bridgeAddress: getCreate2Address({ from: CREATE2_PROXY, salt, bytecode: creation }) };
+}
+
 function validateMappings(assetIds: number[], tokens: string[]): Address[] {
   if (assetIds.length === 0) throw new Error("At least one Base asset mapping is required.");
   if (assetIds.length !== tokens.length) throw new Error("Base asset ids and token addresses must have equal length.");
@@ -118,19 +148,8 @@ export class BaseSepoliaBridgeDeployer implements BaseBridgeDeployer {
 
   private async deploymentCall(assetIds: number[], tokens: string[], account?: string) {
     const artifact = await this.loadMosaicBridge();
-    const deployer = account ? normalizeAddress(account, "EVM account") : await this.account();
-    const normalizedTokens = validateMappings(assetIds, tokens);
-    const salt = randomSalt();
-    const creation = initCode(artifact, deployer, assetIds, normalizedTokens);
-    const data = concat([salt, creation]);
-    return {
-      artifact,
-      account: deployer,
-      assetIds,
-      tokens: normalizedTokens,
-      data,
-      bridgeAddress: getCreate2Address({ from: CREATE2_PROXY, salt, bytecode: creation }),
-    };
+    const deployer = account ?? (await this.account());
+    return { artifact, assetIds, ...buildBridgeDeployment(artifact, deployer, assetIds, tokens) };
   }
 
   private async estimateCall(call: { account: Address; data: Hex }): Promise<BaseBridgeEstimate> {
@@ -166,10 +185,16 @@ export class BaseSepoliaBridgeDeployer implements BaseBridgeDeployer {
     });
     const receipt = await client.waitForTransactionReceipt({ hash: txHash });
     if (receipt.status !== "success") throw new Error(`The Base bridge deployment transaction reverted (${txHash}).`);
+    // The proxy CREATE2-deploys the bridge in an internal call, so `call.bridgeAddress` is the
+    // deterministic result of a *fresh* random salt: a successful receipt therefore guarantees code
+    // will exist there (an occupied slot is impossible; a constructor revert would revert the proxy
+    // and fail the receipt). Code can still lag a confirmed receipt on load-balanced RPCs — and the
+    // smart-account/relayer path adds a beat — so poll to smooth the common case, but never discard a
+    // confirmed deploy just because a read replica is behind. On exhausting the poll, return anyway;
+    // discarding here would strand the deployed bridge and make a retry mint a second one.
     for (let attempt = 1; attempt <= 8; attempt++) {
       const code = await client.getCode({ address: call.bridgeAddress });
       if (code && code !== "0x") break;
-      if (attempt === 8) throw new Error(`No contract code is visible at ${call.bridgeAddress} after deployment ${txHash}.`);
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
     return { txHash, bridgeAddress: call.bridgeAddress, deployer: call.account };

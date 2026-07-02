@@ -269,6 +269,7 @@ function describeMethod(value?: string): string | undefined {
     upload_wasm: 'Upload code',
     deploy_base_bridge: 'Deploy Base bridge',
     configure_base_bridge: 'Configure bridge',
+    join: 'Combine notes',
     shield: 'Deposit funds',
     shield_from_base: 'Bridge from Base',
     unshield: 'Withdraw funds',

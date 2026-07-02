@@ -73,12 +73,22 @@ soroban-sdk 25.1.0, so the settlement contract — on 26.0.1 — cross-calls it 
 `env.invoke_contract` instead of linking the crate). Deploy the router separately; configure the
 settlement contract with `configure_base_bridge(router, image_id, config_id, bridge)`.
 
-The web desk-creation flow can deploy this bridge from MetaMask on Base Sepolia. It is an explicit,
-unchecked opt-in because the connected account pays ETH for gas. The Stellar desk is created first;
-the browser then deploys the canonical contract with all selected Base ERC-20 mappings in its
-constructor. Before attaching it, the backend independently checks the deployment receipt, exact
-runtime bytecode, owner, and mappings through `MOSAIC_BASE_RPC`. Failed attachment is retryable and
-reuses the already-paid deployment.
+Desk creation deploys this bridge in one of two ways, by mode:
+
+- **Trusted (MCP-served) desks**: the server deploys *everything*. `create_desk` deploys the Stellar
+  settlement contract (friendbot-funded sponsor keypair) and, for desks with Base-backed assets, the
+  `MosaicBridge` on Base Sepolia — signed and paid by a single operator key (`MOSAIC_BASE_DEPLOYER_KEY`),
+  which also becomes the bridge owner — then calls `configure_base_bridge`. The browser never touches
+  MetaMask; the server records the deploy activity (Stellar deploy + bridge deploy + configure, with
+  tx hashes) which the wallet pulls back via `activity_since`. A failed bridge deploy leaves the
+  Stellar desk intact and is retried server-side with `retry_base_deployment`.
+- **Trustless (self-funded) desks**: the browser wallet pays, so it deploys the bridge from MetaMask
+  on Base Sepolia as part of the SDK `client.deploy` flow, with all selected Base ERC-20 mappings in
+  the constructor. The (legacy) `complete_base_deployment` path independently checks the deployment
+  receipt, exact runtime bytecode, owner, and mappings through `MOSAIC_BASE_RPC` before attaching.
+
+Both paths deploy through the canonical CREATE2 proxy (`buildBridgeDeployment` in the SDK), so the
+init-code and resulting address derivation are byte-identical across browser and server.
 
 ## Backend automation (WS6-backend)
 

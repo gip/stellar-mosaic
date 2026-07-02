@@ -25,8 +25,9 @@ export interface RelayHandlers {
 }
 
 export interface DeployHandlers {
-  createDesk(body: Record<string, unknown>, creator: string): Promise<{ desk: Desk; sponsorSecret?: string | null }>;
+  createDesk(body: Record<string, unknown>, creator: string, network?: string): Promise<{ desk: Desk; sponsorSecret?: string | null }>;
   completeBaseDeployment(id: string, body: Record<string, unknown>, address: string): Promise<Desk>;
+  retryBaseDeployment(id: string, address?: string, network?: string): Promise<Desk>;
   baseDeploymentConfig(): Promise<unknown>;
 }
 
@@ -157,7 +158,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     { description: "Create and deploy a desk.", inputSchema: { session: z.string(), body: z.record(z.unknown()) } },
     async (args) => {
       const s = await session(auth, args);
-      const created = await deploy.createDesk(body(args), s.address);
+      const created = await deploy.createDesk(body(args), s.address, s.network);
       return ok(await store.insertDesk(created.desk, created.sponsorSecret ?? null));
     },
   );
@@ -170,6 +171,14 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     async (args) => {
       const s = await session(auth, args);
       return ok(await deploy.completeBaseDeployment(String(args.id), body(args), s.address));
+    },
+  );
+  reg(
+    "retry_base_deployment",
+    { description: "Re-run the server-side Base bridge deploy for a desk whose bridge is not yet active.", inputSchema: { session: z.string(), id: z.string() } },
+    async (args) => {
+      const s = await session(auth, args);
+      return ok(await deploy.retryBaseDeployment(String(args.id), s.address, s.network));
     },
   );
 

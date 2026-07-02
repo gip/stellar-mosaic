@@ -2,8 +2,10 @@
 // proving + relaying a `join` and for driving a multi-join sequence:
 // each join's outputs are unindexed until they land on-chain and reconcile, and the next join needs
 // its input's membership proof, so the steps are inherently sequential and gated on confirmation.
+import type { ActivityEvent } from '@mosaic/sdk'
 import type { Desk } from './api'
 import { api } from './api'
+import { browserActivityStore } from './sdk/indexedDbStore'
 import { randomField } from './crypto'
 import { joinTerms, noteNullifier } from './noir'
 import { proveJoin, proveUnshield, b64 } from './prove'
@@ -34,7 +36,7 @@ export async function executeUnshield(
   note: Note,
   to: string,
   onStatus?: Status,
-): Promise<void> {
+): Promise<string | undefined> {
   onStatus?.('Deriving unshield terms…')
   const [nullifier, recipient] = await Promise.all([
     noteNullifier(note.sk, note.rho),
@@ -58,7 +60,7 @@ export async function executeUnshield(
   })
 
   onStatus?.('Submitting…')
-  await submitDirectOrSponsored(
+  const transaction = await submitDirectOrSponsored(
     desk.contract_id,
     'unshield',
     [
@@ -71,7 +73,8 @@ export async function executeUnshield(
 
   // The relay only resolves after the sponsored transaction succeeds. Preserve the confirmed note
   // on every earlier failure so the user can retry without corrupting local wallet state.
-  await updateNoteAndSync(note.id, { status: 'spent' }, mode)
+  await updateNoteAndSync(note.id, { status: 'spent', txHash: transaction }, mode)
+  return transaction
 }
 
 // A null padding note: 32 zero siblings + zero index bits. The join circuit only checks note 2's
@@ -94,6 +97,7 @@ export async function executeJoin(
   targetRaw: bigint,
   changeRaw: bigint,
   onStatus?: Status,
+  operationId?: string,
 ): Promise<JoinResult> {
   const sk_out1 = randomField()
   const rho_out1 = randomField()
@@ -191,7 +195,7 @@ export async function executeJoin(
   change = change ? staged[1] : null
 
   onStatus?.('Submitting…')
-  await submitDirectOrSponsored(
+  const transaction = await submitDirectOrSponsored(
     desk.contract_id,
     'join',
     [
@@ -201,8 +205,37 @@ export async function executeJoin(
     () => api.relayJoin(desk.id, b64(bundle.proof), b64(bundle.publicInputs)),
   )
 
+  await updateNote(mode, target.id, { txHash: transaction })
+  if (change) await updateNote(mode, change.id, { txHash: transaction })
   await updateNote(mode, a.id, { status: 'spent' })
   if (b) await updateNote(mode, b.id, { status: 'spent' })
+  // Surface the join as its own transaction line under the parent order/unshield group (via
+  // operation_id), so every on-chain step of an assembled operation is visible — not just the
+  // terminal settle. Best-effort: a join must never fail on activity logging. Mirrors the SDK
+  // client's per-join activity in trustless mode.
+  try {
+    await browserActivityStore(mode).record({
+      kind: 'user_action',
+      action: 'join',
+      method: 'join',
+      status: 'succeeded',
+      wallet_address: a.wallet_address,
+      desk_id: desk.id,
+      operation_id: operationId,
+      note_id: target.id,
+      owner_tag: target.owner_tag,
+      tx_hash: transaction,
+      idempotency_key: transaction ? `join:${desk.id}:${transaction}` : undefined,
+      metadata: {
+        input_note_ids: [a.id, b?.id].filter(Boolean),
+        target_amount: targetRaw.toString(),
+        change_note_id: change?.id,
+        change_amount: changeRaw.toString(),
+      },
+    } as ActivityEvent)
+  } catch {
+    /* Activity is best-effort UI state; the on-chain join is authoritative. */
+  }
   await syncRecoveryNow()
   return { target, change }
 }
@@ -248,6 +281,7 @@ export async function runAssembly(
   steps: AssemblyStep[],
   notes: Note[],
   onStatus?: Status,
+  operationId?: string,
 ): Promise<Note> {
   const byId = new Map(notes.map((n) => [n.id, n]))
   const resolve = (ref: { type: 'note'; id: string } | { type: 'prev' }, prev: Note | null) =>
@@ -259,7 +293,7 @@ export async function runAssembly(
     const b = s.op === 'join' ? resolve(s.b, prev) : null
     if (!a || (s.op === 'join' && !b)) throw new Error('A note is no longer available; please retry.')
     onStatus?.(`Preparing note — ${s.op} ${i + 1}/${steps.length}…`)
-    const { target } = await executeJoin(mode, desk, a, b, BigInt(s.targetRaw), BigInt(s.changeRaw), onStatus)
+    const { target } = await executeJoin(mode, desk, a, b, BigInt(s.targetRaw), BigInt(s.changeRaw), onStatus, operationId)
     onStatus?.(`Waiting for confirmation (${i + 1}/${steps.length})…`)
     prev = await waitForConfirm(mode, desk.id, target.id, target.wallet_address)
   }

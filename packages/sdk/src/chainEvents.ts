@@ -96,6 +96,11 @@ interface ContractState {
   acc: TreeEvent[];
   fills: Fill[];
   latestLedger?: number;
+  /** RPC event ids already ingested into `acc`/`fills` this session. Lives on the shared state (not
+   * per-fetch) so overlapping fetches can never double-append the same event — the defect that
+   * produced duplicate leaves and a replay root that never existed on-chain. Not persisted: the
+   * cursor already prevents re-fetching old events across sessions. */
+  seen: Set<string>;
 }
 
 export interface ChainEventSnapshot {
@@ -132,6 +137,19 @@ export class ChainEventSource {
   private readonly cache?: ChainEventCache;
   private readonly cacheKey: (contractId: string) => string;
   private readonly activity: ActivityHistory;
+  /** Per-contract tail of in-flight `events()` work, so concurrent callers run serially against the
+   * shared {@link ContractState} instead of racing into it. */
+  private readonly locks = new Map<string, Promise<unknown>>();
+
+  /** Run `fn` after any in-flight work for this contract completes, chaining the next caller behind
+   * it. All mutation of a contract's {@link ContractState} goes through here. */
+  private async serialize<T>(contractId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.locks.get(contractId) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    // Keep the chain alive but swallow rejections so one failed fetch doesn't wedge later callers.
+    this.locks.set(contractId, run.then(noop, noop));
+    return run;
+  }
 
   constructor(opts: {
     network: NetworkConfig;
@@ -150,8 +168,15 @@ export class ChainEventSource {
     this.activity = new ActivityHistory(opts.activity);
   }
 
-  /** Fetch any new events for a contract and return the full insertion-ordered tree-event list. */
+  /** Fetch any new events for a contract and return the full insertion-ordered tree-event list.
+   * Serialized per contract: concurrent callers (order flow, note/fill polls, reconcile) would
+   * otherwise interleave inside {@link fetchPages} and double-append the same page into the shared
+   * `acc`, yielding duplicate leaves and a replay root that never existed on-chain. */
   async events(contractId: string, startLedger?: number, recovery?: ChainEventRecovery): Promise<TreeEvent[]> {
+    return this.serialize(contractId, () => this.fetchEvents(contractId, startLedger, recovery));
+  }
+
+  private async fetchEvents(contractId: string, startLedger?: number, recovery?: ChainEventRecovery): Promise<TreeEvent[]> {
     const st = await this.loadState(contractId);
     const filters = [{ type: "contract" as const, contractIds: [contractId] }];
     const requested = startLedger ?? this.startLedger;
@@ -217,6 +242,7 @@ export class ChainEventSource {
       acc: [...(cached?.treeEvents ?? [])],
       fills: [...(cached?.fills ?? [])],
       latestLedger: cached?.latestLedger,
+      seen: new Set(),
     };
     this.state.set(contractId, st);
     return st;
@@ -238,7 +264,19 @@ export class ChainEventSource {
     filters: { type: "contract"; contractIds: string[] }[],
     startLedger?: number,
   ): Promise<void> {
-    const seen = new Set<string>();
+    // About to (re)read from `startLedger` with a non-empty accumulator — i.e. a cached snapshot
+    // carried events but no cursor to resume from. We have no per-event ids for those cached events
+    // to dedup against, so appending a fresh genesis scan on top of them would duplicate every leaf.
+    // Rebuild from scratch instead (the scan below repopulates `acc`/`fills`/`seen` in order).
+    if (!st.cursor && st.acc.length > 0) {
+      this.logger.warn("chain events resuming from start ledger over cached events; rebuilding to avoid duplicates", {
+        contractId,
+        cachedEvents: st.acc.length,
+      });
+      st.acc = [];
+      st.fills = [];
+      st.seen.clear();
+    }
     for (;;) {
       let page: rpc.Api.GetEventsResponse;
       const beforeTree = st.acc.length;
@@ -255,8 +293,8 @@ export class ChainEventSource {
       }
       for (const ev of page.events) {
         const id = eventId(ev);
-        if (seen.has(id)) continue;
-        seen.add(id);
+        if (st.seen.has(id)) continue;
+        st.seen.add(id);
         const t = parseTreeEvent(ev);
         if (t) st.acc.push(t);
         const fill = parseFillEvent(ev);
@@ -293,6 +331,7 @@ export class ChainEventSource {
     st.cursor = undefined;
     st.acc = [];
     st.fills = [];
+    st.seen.clear();
     st.latestLedger = undefined;
 
     if (hadHistory) {
@@ -377,6 +416,9 @@ export class ChainEventSource {
     }
   }
 }
+
+/** Swallow a settled promise's value/rejection — used to keep the per-contract lock chain alive. */
+function noop(): void {}
 
 export interface LedgerRange {
   oldest: number;

@@ -205,10 +205,14 @@ export interface McpClient {
     name: string;
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: string }[];
     pairs: { base_asset: number; quote_asset: number }[];
+    /** Base token mappings the server registers on a server-deployed bridge (Trusted mode). */
+    base_assets?: { asset_id: number; symbol: string; token: string }[];
+    /** Legacy browser-wallet deploy shape; superseded by server-side deployment. */
     base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] };
   }): Promise<Desk>;
   baseDeploymentConfig(): Promise<BaseDeploymentConfig>;
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk>;
+  retryBaseDeployment(id: string): Promise<Desk>;
   getBook(deskId: string, pair: number, side: number): Promise<BookSide>;
   listAssets(): Promise<CatalogAsset[]>;
   proposeAsset(body: ProposeAssetBody): Promise<CatalogAsset>;

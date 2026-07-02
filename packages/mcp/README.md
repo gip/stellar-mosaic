@@ -38,6 +38,24 @@ and only authentication is available. To enable it, set:
 The pipeline mirrors `backend/src/base_shield.rs`: prove (in the `eth_getProof` window) → await Base
 finality → attest block hash → `shield_from_base` via the sponsor.
 
+## Server-side desk deployment (Trusted mode)
+
+In Trusted mode the server deploys **everything** for `create_desk`: the Stellar settlement contract
+(a fresh friendbot-funded sponsor keypair) and — for desks with Base-backed assets — the
+`MosaicBridge` on Base Sepolia, deployed and owned by a single operator-funded key. The browser never
+signs; the server records the deploy activity (with tx hashes) which the wallet pulls via
+`activity_since`. A failed bridge deploy leaves the Stellar desk in place and is retried with
+`retry_base_deployment`.
+
+| Env | Meaning |
+| --- | --- |
+| `MOSAIC_BASE_RPC` | Base Sepolia RPC URL (also used by `base_shield`) |
+| `MOSAIC_BASE_DEPLOYER_KEY` | operator EVM private key (32-byte hex, funded with Base Sepolia ETH) that deploys and owns bridges |
+| `MOSAIC_BASE_ROUTER_ID` | RISC Zero router id bound into `configure_base_bridge` (defaults to the pinned Base Sepolia router) |
+
+`base_deployment_config` reports `server_deploys: true` once `MOSAIC_BASE_RPC` and
+`MOSAIC_BASE_DEPLOYER_KEY` are set; without them a desk that needs a bridge is rejected up front.
+
 ## Clients
 
 - `@mosaic/sdk/mcp-client` — `createMcpClient({ url })` returns an `McpClient` (Streamable HTTP) that

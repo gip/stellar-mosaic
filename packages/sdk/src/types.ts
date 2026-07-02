@@ -209,6 +209,8 @@ export interface Desk {
 
 export interface BaseDeploymentConfig {
   available: boolean;
+  /** Trusted mode: the server holds a funded deployer key and deploys the bridge itself. */
+  server_deploys?: boolean;
   chain_id: number;
   network: "base-sepolia";
   reason: string | null;

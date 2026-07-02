@@ -229,6 +229,105 @@ test('base bridge deployment surfaces the Base Sepolia tx as a BaseScan-linked l
   assert.equal(txNetworkLabel(stellarLine.tx!, stellarLine.activity!), 'Stellar Testnet')
 })
 
+test('trustless: assembly join txs surface as lines under the parent place-order group', () => {
+  const actionId = 'action-order-assembled'
+  const joinTx1 = '1'.repeat(64)
+  const joinTx2 = '2'.repeat(64)
+  const orderTx = '3'.repeat(64)
+  const activities: ActivityEvent[] = [
+    {
+      kind: 'user_action',
+      action: 'join',
+      method: 'join',
+      status: 'succeeded',
+      tx_hash: joinTx1,
+      metadata: { action_id: actionId, kind: 'place_order' },
+      created_at: 1,
+    },
+    {
+      kind: 'user_action',
+      action: 'join',
+      method: 'join',
+      status: 'succeeded',
+      tx_hash: joinTx2,
+      metadata: { action_id: actionId, kind: 'place_order' },
+      created_at: 2,
+    },
+    {
+      kind: 'user_action',
+      action: 'place_order',
+      status: 'succeeded',
+      tx_hash: orderTx,
+      metadata: {
+        action_id: actionId,
+        pair_id: 0,
+        side: 'SELL',
+        base_symbol: 'XLM',
+        quote_symbol: 'USDC',
+        base_decimals: 7,
+        quote_decimals: 7,
+        amount_in: '250000000',
+        min_out: '50000000',
+        partial_allowed: false,
+      },
+      created_at: 3,
+    },
+  ]
+
+  const groups = activityGroups(activities, [])
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].action, 'Place Order')
+  const txs = groups[0].lines.map((line) => line.tx)
+  assert.ok(txs.includes(joinTx1) && txs.includes(joinTx2) && txs.includes(orderTx), 'every on-chain step is a line')
+  assert.equal(groups[0].lines.find((line) => line.tx === joinTx1)?.description, 'Combine notes')
+})
+
+test('trusted: an operation join line collapses into its operation group', () => {
+  const operationId = 'operation-order-assembled'
+  const joinTx = '4'.repeat(64)
+  const orderTx = '5'.repeat(64)
+  const operation: Operation = {
+    id: operationId,
+    address: 'G'.padEnd(56, 'B'),
+    network: 'testnet',
+    desk_id: 'desk-3',
+    kind: 'place_order',
+    request: { kind: 'place_order', desk_id: 'desk-3', pair_id: 0, side: 'SELL', amount_in: '250000000', min_out: '50000000', partial_allowed: false },
+    status: 'succeeded',
+    created_at: 1,
+    updated_at: 4,
+    submitted: true,
+  }
+  const activities: ActivityEvent[] = [
+    {
+      kind: 'user_action',
+      action: 'join',
+      method: 'join',
+      status: 'succeeded',
+      operation_id: operationId,
+      tx_hash: joinTx,
+      metadata: {},
+      created_at: 2,
+    },
+    {
+      kind: 'backend_operation',
+      operation_id: operationId,
+      status: 'succeeded',
+      message: 'On-chain transaction confirmed',
+      metadata: { event_type: 'confirmed', details: { tx_hash: orderTx } },
+      created_at: 3,
+    },
+  ]
+
+  const groups = activityGroups(activities, [operation])
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].id, `operation:${operationId}`)
+  assert.equal(groups[0].action, 'Place Order')
+  const txs = groups[0].lines.map((line) => line.tx)
+  assert.ok(txs.includes(joinTx) && txs.includes(orderTx), 'the join and the settle both appear as lines')
+  assert.equal(groups[0].lines.find((line) => line.tx === joinTx)?.description, 'Combine notes')
+})
+
 test('trusted backend operation events with operation id collapse into one operation group', () => {
   const operationId = 'operation-shield-1'
   const operation: Operation = {
