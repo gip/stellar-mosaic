@@ -52,7 +52,10 @@ export default function App() {
     <>
       <header className="topbar">
         <h1 className="brand">
-          <Link to="/">MOSAIC</Link>
+          <Link to="/">
+            <span className="brand-word">MOSAIC</span>
+            <span className="brand-logo" role="img" aria-label="Mosaic logo" />
+          </Link>
         </h1>
         <nav className="topnav">
           <NavLink to="/" end className={navClass}>
@@ -73,21 +76,6 @@ export default function App() {
           )}
         </nav>
         <div className="topbar-spacer" />
-        <div className="topbar-actions">
-          <ThemeToggle />
-          <a
-            className="topbar-icon-link"
-            href="https://github.com/gip/stellar-mosaic"
-            target="_blank"
-            rel="noreferrer"
-            title="Open GitHub repository"
-            aria-label="Open GitHub repository"
-          >
-            <svg viewBox="0 0 19 19" width="18" height="18" aria-hidden="true">
-              <use href="/icons.svg#github-icon" />
-            </svg>
-          </a>
-        </div>
         <div className="wallet-stack">
           <div className="wallet-chain">
             <span className="chain-label">Stellar Testnet</span>
@@ -161,6 +149,21 @@ export default function App() {
               </button>
             )}
           </div>
+        </div>
+        <div className="topbar-actions">
+          <ThemeToggle />
+          <a
+            className="topbar-icon-link"
+            href="https://github.com/gip/stellar-mosaic"
+            target="_blank"
+            rel="noreferrer"
+            title="Open GitHub repository"
+            aria-label="Open GitHub repository"
+          >
+            <svg viewBox="0 0 19 19" width="18" height="18" aria-hidden="true">
+              <use href="/icons.svg#github-icon" />
+            </svg>
+          </a>
         </div>
       </header>
       <main className="app-main">

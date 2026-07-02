@@ -105,39 +105,42 @@
   --content-max: 1440px;
   --reading-max: 920px;
 
-  /* ---- Dark palette (default) ---- */
-  --bg: #0b0d10;
-  --bg-panel: #111419;
-  --bg-elevated: #161b22;
-  --bg-inset: #0d1014;
-  --bg-hover: #1b212a;
+  /* ---- Dark palette (default) — warm amber-on-black "Edge" identity ---- */
+  --bg: #0b0906;
+  --bg-panel: #100d09;
+  --bg-elevated: #17120c;
+  --bg-inset: #0d0a07;
+  --bg-hover: #1c150d;
 
-  --fg: #e6e9ef;
-  --fg-muted: #8b94a3;
-  --fg-dim: #5c6573;
-  --fg-onaccent: #04130f;
+  --fg: #ece3d4;
+  --fg-muted: #9a8f7d;
+  --fg-dim: #6f6555;
+  --fg-onaccent: #1a1206;
 
-  --line: #20262e;
-  --line-strong: #2c333d;
+  --line: #2a2117;
+  --line-strong: #3a2e1f;
 
-  --accent: #2dd4bf;
-  --accent-hover: #5ce0d0;
-  --accent-dim: rgba(45, 212, 191, 0.14);
+  --accent: #e0a860;
+  --accent-hover: #eec084;
+  --accent-dim: rgba(224, 168, 96, 0.14);
 
-  --buy: #3fb950;
-  --buy-dim: rgba(63, 185, 80, 0.14);
-  --sell: #f85149;
-  --sell-dim: rgba(248, 81, 73, 0.14);
+  /* Brand logo tint (masked wireframe); amber on the dark backdrop. */
+  --logo-fill: #e0a860;
 
-  --ok: #3fb950;
-  --err: #f85149;
-  --warn: #d29922;
-  --info: #58a6ff;
+  --buy: #6fbf73;
+  --buy-dim: rgba(111, 191, 115, 0.14);
+  --sell: #e06a5c;
+  --sell-dim: rgba(224, 106, 92, 0.14);
 
-  --ok-dim: rgba(63, 185, 80, 0.13);
-  --err-dim: rgba(248, 81, 73, 0.13);
-  --warn-dim: rgba(210, 153, 34, 0.13);
-  --info-dim: rgba(88, 166, 255, 0.13);
+  --ok: #6fbf73;
+  --err: #e06a5c;
+  --warn: #e0a860;
+  --info: #d4a76a;
+
+  --ok-dim: rgba(111, 191, 115, 0.13);
+  --err-dim: rgba(224, 106, 92, 0.13);
+  --warn-dim: rgba(224, 168, 96, 0.13);
+  --info-dim: rgba(212, 167, 106, 0.13);
 
   --shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
   --shadow-2: 0 8px 28px rgb(0 0 0 / 50%);
@@ -168,6 +171,9 @@
   --accent: #0d9488;
   --accent-hover: #0b827a;
   --accent-dim: rgba(13, 148, 136, 0.12);
+
+  /* Teal (light-theme accent) keeps the masked logo readable on the near-white backdrop. */
+  --logo-fill: #0d9488;
 
   --buy: #1a7f37;
   --buy-dim: rgba(26, 127, 55, 0.12);
