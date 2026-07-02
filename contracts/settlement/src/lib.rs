@@ -2330,3 +2330,316 @@ mod hash_equivalence {
         }
     }
 }
+
+/// Pure matching-math tests: the lot decomposition (`compute_lots`), the crossing predicate
+/// (`cross_amounts`), the gcd helper, and the price-time book ordering (`entry_better` /
+/// `book_insert_sorted`). These are the fund-critical arithmetic primitives the whole settlement path
+/// (`settle_exact` and the on-chain book) is built on, and none of them need a ZK proof to exercise —
+/// so we can hammer them with thousands of randomized cases plus hand-checked corner cases and assert
+/// the invariants that keep value conserved: fills execute at EXACTLY the maker's limit price with no
+/// rounding, and never consume more than either party's locked balance.
+#[cfg(test)]
+mod settlement_math_tests {
+    extern crate std;
+    use super::{
+        book_insert_sorted, compute_lots, cross_amounts, entry_better, gcd_i128, OrderEntry,
+        SIDE_BUY, SIDE_SELL,
+    };
+    use soroban_sdk::{testutils::Ledger, BytesN, Env, Vec};
+
+    /// An env with an unlimited metering budget: the U256 crossing/ordering helpers charge the host
+    /// budget, and the randomized loops here run far more of them than the small default budget allows.
+    fn env() -> Env {
+        let env = Env::default();
+        env.ledger().set_protocol_version(26);
+        env.cost_estimate().budget().reset_unlimited();
+        env
+    }
+
+    /// Deterministic xorshift64* PRNG so the randomized cases are reproducible (no external crate).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545F4914F6CDD1D)
+        }
+        /// Uniform in `[1, hi]` (hi >= 1).
+        fn range1(&mut self, hi: i128) -> i128 {
+            1 + (self.next() % (hi as u64)) as i128
+        }
+    }
+
+    /// Textbook Euclid reference for `gcd_i128`.
+    fn ref_gcd(mut a: i128, mut b: i128) -> i128 {
+        while b != 0 {
+            let t = a % b;
+            a = b;
+            b = t;
+        }
+        a
+    }
+
+    #[test]
+    fn gcd_matches_reference_over_random_pairs() {
+        let mut rng = Rng(0x1234_5678_9abc_def0);
+        for _ in 0..20_000 {
+            let a = rng.range1(1_000_000);
+            let b = rng.range1(1_000_000);
+            assert_eq!(gcd_i128(a, b), ref_gcd(a, b), "gcd({a},{b})");
+        }
+        // Edge: gcd(x, 0) == x (Euclid's identity; both args here are always > 0 in production).
+        assert_eq!(gcd_i128(42, 0), 42);
+        assert_eq!(gcd_i128(1, 1), 1);
+    }
+
+    /// `cross_amounts` must equal the exact rational comparison
+    /// `a_min_out/a_amount_in <= b_amount_in/b_min_out`, i.e. `a_min_out*b_min_out <=
+    /// a_amount_in*b_amount_in`. We keep the randomized inputs < 2^31 so the reference i128 products
+    /// cannot overflow, then separately probe the boundary and the 2^126 overflow-safety case.
+    #[test]
+    fn cross_amounts_matches_exact_rational() {
+        let env = env();
+        let mut rng = Rng(0xdead_beef_cafe_f00d);
+        let cap = 1i128 << 30;
+        for _ in 0..20_000 {
+            let a_in = rng.range1(cap);
+            let a_out = rng.range1(cap);
+            let b_in = rng.range1(cap);
+            let b_out = rng.range1(cap);
+            let expected = a_out.checked_mul(b_out).unwrap() <= a_in.checked_mul(b_in).unwrap();
+            assert_eq!(
+                cross_amounts(&env, a_in, a_out, b_in, b_out),
+                expected,
+                "cross({a_in},{a_out},{b_in},{b_out})"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_amounts_boundary_and_overflow_safe() {
+        let env = env();
+        // Exactly equal limit prices cross (<=): 100 base @ 2000 quote vs 2000 quote @ 100 base.
+        assert!(cross_amounts(&env, 100, 2000, 2000, 100));
+        // One unit worse on the ask -> does not cross.
+        assert!(!cross_amounts(&env, 100, 2001, 2000, 100));
+        // Strictly favourable -> crosses.
+        assert!(cross_amounts(&env, 100, 1500, 2000, 100));
+        // Factors near 2^126: i128 products (~2^252) would overflow; the U256 path must not panic and
+        // must still compare correctly. Equal cross-products => crosses.
+        let big = 1i128 << 126;
+        assert!(cross_amounts(&env, big, big, big, big));
+        assert!(!cross_amounts(&env, big, big, big - 1, big));
+    }
+
+    /// The core fund-safety property of the lot decomposition. For every random maker order and taker
+    /// balance, on BOTH sides, verify: the lot ratio is the maker's reduced price; `k_maker`/`k_taker`
+    /// are exact floors of each side's locked balance over its per-lot cost; and a `min(k_maker,
+    /// k_taker)`-lot fill (a) never consumes more than either locked balance and (b) trades base for
+    /// quote at EXACTLY the maker's limit price (no integer rounding => exact conservation).
+    #[test]
+    fn compute_lots_invariants_random() {
+        let mut rng = Rng(0x0f0f_0f0f_1234_9999);
+        for _ in 0..50_000 {
+            let maker_is_sell = rng.next() & 1 == 0;
+            let m_amount_in = rng.range1(50_000);
+            let m_min_out = rng.range1(50_000);
+            let m_remaining_in = rng.range1(m_amount_in); // resting balance <= original offer
+            let taker_remaining_in = rng.range1(1_000_000);
+
+            let (k_maker, k_taker, base_lot, quote_lot) = compute_lots(
+                maker_is_sell,
+                m_amount_in,
+                m_min_out,
+                m_remaining_in,
+                taker_remaining_in,
+            );
+
+            // (1) The lot is the maker's price ratio reduced to lowest terms.
+            let g = ref_gcd(m_amount_in, m_min_out);
+            let (exp_base, exp_quote) = if maker_is_sell {
+                (m_amount_in / g, m_min_out / g)
+            } else {
+                (m_min_out / g, m_amount_in / g)
+            };
+            assert_eq!((base_lot, quote_lot), (exp_base, exp_quote), "lot ratio");
+            assert_eq!(ref_gcd(base_lot, quote_lot), 1, "lot must be reduced");
+            assert!(base_lot >= 1 && quote_lot >= 1, "lots are positive");
+
+            // (2) k_maker / k_taker are exact floors over the per-lot locked cost.
+            let (maker_lot, taker_lot) = if maker_is_sell {
+                (base_lot, quote_lot)
+            } else {
+                (quote_lot, base_lot)
+            };
+            assert_eq!(k_maker, m_remaining_in / maker_lot, "k_maker floor");
+            assert_eq!(k_taker, taker_remaining_in / taker_lot, "k_taker floor");
+
+            // (3) A min(k_maker, k_taker)-lot fill conserves value and honours the exact price.
+            let k = k_maker.min(k_taker);
+            if k > 0 {
+                let base_traded = k * base_lot;
+                let quote_traded = k * quote_lot;
+                let (maker_consumed, taker_consumed) = if maker_is_sell {
+                    (base_traded, quote_traded)
+                } else {
+                    (quote_traded, base_traded)
+                };
+                assert!(maker_consumed <= m_remaining_in, "maker overspend");
+                assert!(taker_consumed <= taker_remaining_in, "taker overspend");
+                // Exact maker price: SELL wants min_out/amount_in quote per base; BUY offers
+                // amount_in/min_out quote per base. Cross-multiplied, both are integer identities.
+                if maker_is_sell {
+                    assert_eq!(
+                        quote_traded * m_amount_in,
+                        base_traded * m_min_out,
+                        "sell fill must be at exactly the maker's price"
+                    );
+                } else {
+                    assert_eq!(
+                        quote_traded * m_min_out,
+                        base_traded * m_amount_in,
+                        "buy fill must be at exactly the maker's price"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The book scenario's exact fills (base=a1, quote=a2), matching the numbers asserted in
+    /// tests/book.rs: B1 (BUY, 2400 quote wanting >=100 base) sweeping S1/S2.
+    #[test]
+    fn compute_lots_matches_book_scenario() {
+        // vs S1 (SELL 100 base @ 1500 quote, price 15): B1 fills it whole -> 100 base for 1500 quote.
+        let (k_maker, k_taker, base_lot, quote_lot) = compute_lots(true, 100, 1500, 100, 2400);
+        assert_eq!((base_lot, quote_lot), (1, 15));
+        assert_eq!((k_maker, k_taker), (100, 160));
+        let k = k_maker.min(k_taker);
+        assert_eq!((k * base_lot, k * quote_lot), (100, 1500));
+
+        // vs S2 (SELL 100 base @ 1600 quote, price 16) with 900 quote left: 56 base for 896 quote.
+        let (k_maker, k_taker, base_lot, quote_lot) = compute_lots(true, 100, 1600, 100, 900);
+        assert_eq!((base_lot, quote_lot), (1, 16));
+        assert_eq!((k_maker, k_taker), (100, 56));
+        let k = k_maker.min(k_taker);
+        assert_eq!((k * base_lot, k * quote_lot), (56, 896)); // 4 quote dust remains for B1
+    }
+
+    /// A maker whose remaining balance is below one lot yields `k_maker == 0` (the `submit_order`
+    /// loop skips it as dust), and a taker that cannot afford a single lot yields `k_taker == 0`.
+    #[test]
+    fn compute_lots_sub_lot_dust_is_zero() {
+        // Maker SELL price 3/2 -> lot = 2 base : 3 quote. remaining 1 base < 2 base lot => k_maker 0.
+        let (k_maker, _k_taker, base_lot, quote_lot) = compute_lots(true, 2, 3, 1, 100);
+        assert_eq!((base_lot, quote_lot), (2, 3));
+        assert_eq!(k_maker, 0, "sub-lot maker remainder");
+        // Taker with only 2 quote cannot afford one 3-quote lot => k_taker 0.
+        let (_k_maker, k_taker, _b, _q) = compute_lots(true, 2, 3, 100, 2);
+        assert_eq!(k_taker, 0, "sub-lot taker balance");
+    }
+
+    // --- book ordering (entry_better / book_insert_sorted) --------------------------------------
+
+    fn entry(env: &Env, id: u32, amount_in: i128, min_out: i128) -> OrderEntry {
+        let mut idw = [0u8; 32];
+        idw[28..].copy_from_slice(&id.to_be_bytes());
+        OrderEntry {
+            order_id: BytesN::from_array(env, &idw),
+            amount_in,
+            min_out,
+            remaining_in: amount_in,
+            output_owner_tag: BytesN::from_array(env, &[0u8; 32]),
+            cancel_owner_tag: BytesN::from_array(env, &[0u8; 32]),
+            order_leaf: BytesN::from_array(env, &idw),
+            expiry: 0,
+            partial_allowed: true,
+        }
+    }
+
+    fn order_ids(book: &Vec<OrderEntry>) -> std::vec::Vec<u32> {
+        book.iter()
+            .map(|e| u32::from_be_bytes(e.order_id.to_array()[28..].try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn sell_book_sorts_ascending_price_fifo_on_tie() {
+        let env = env();
+        let mut book: Vec<OrderEntry> = Vec::new(&env);
+        // Insert out of order. Prices (min_out/amount_in): id1=20, id2=15, id3=15, id4=16, id5=10.
+        book_insert_sorted(&env, &mut book, entry(&env, 1, 100, 2000), SIDE_SELL);
+        book_insert_sorted(&env, &mut book, entry(&env, 2, 100, 1500), SIDE_SELL);
+        book_insert_sorted(&env, &mut book, entry(&env, 3, 100, 1500), SIDE_SELL); // ties id2
+        book_insert_sorted(&env, &mut book, entry(&env, 4, 100, 1600), SIDE_SELL);
+        book_insert_sorted(&env, &mut book, entry(&env, 5, 100, 1000), SIDE_SELL);
+        // Ascending price; equal-price 2 before 3 (FIFO, insertion order preserved).
+        assert_eq!(order_ids(&book), std::vec![5, 2, 3, 4, 1]);
+    }
+
+    #[test]
+    fn buy_book_sorts_descending_price_fifo_on_tie() {
+        let env = env();
+        let mut book: Vec<OrderEntry> = Vec::new(&env);
+        // Buy price = amount_in/min_out (quote per base). id1=20, id2=24, id3=24, id4=15, id5=30.
+        book_insert_sorted(&env, &mut book, entry(&env, 1, 2000, 100), SIDE_BUY);
+        book_insert_sorted(&env, &mut book, entry(&env, 2, 2400, 100), SIDE_BUY);
+        book_insert_sorted(&env, &mut book, entry(&env, 3, 2400, 100), SIDE_BUY); // ties id2
+        book_insert_sorted(&env, &mut book, entry(&env, 4, 1500, 100), SIDE_BUY);
+        book_insert_sorted(&env, &mut book, entry(&env, 5, 3000, 100), SIDE_BUY);
+        // Descending price (best bid first): 5(30), 2(24), 3(24), 1(20), 4(15); equal 2 before 3 (FIFO).
+        assert_eq!(order_ids(&book), std::vec![5, 2, 3, 1, 4]);
+    }
+
+    #[test]
+    fn entry_better_uses_ratios_not_raw_amounts() {
+        let env = env();
+        // Same price (10) at different scales must tie (neither strictly better) on both sides — the
+        // comparison is by ratio, so raw magnitude must not leak in.
+        let small = entry(&env, 1, 10, 100);
+        let large = entry(&env, 2, 1000, 10000);
+        assert!(!entry_better(&env, &small, &large, SIDE_SELL));
+        assert!(!entry_better(&env, &large, &small, SIDE_SELL));
+        assert!(!entry_better(&env, &small, &large, SIDE_BUY));
+        assert!(!entry_better(&env, &large, &small, SIDE_BUY));
+        // On the SELL side a strictly lower ask price (min_out/amount_in) ranks ahead.
+        let cheap_ask = entry(&env, 3, 100, 900); // ask price 9
+        let dear_ask = entry(&env, 4, 100, 1100); // ask price 11
+        assert!(entry_better(&env, &cheap_ask, &dear_ask, SIDE_SELL));
+        assert!(!entry_better(&env, &dear_ask, &cheap_ask, SIDE_SELL));
+        // On the BUY side a strictly higher bid price (amount_in/min_out) ranks ahead.
+        let high_bid = entry(&env, 5, 2400, 100); // bid price 24
+        let low_bid = entry(&env, 6, 2000, 100); // bid price 20
+        assert!(entry_better(&env, &high_bid, &low_bid, SIDE_BUY));
+        assert!(!entry_better(&env, &low_bid, &high_bid, SIDE_BUY));
+    }
+
+    /// Inserting many random-price orders one at a time must always yield a book that is globally
+    /// price-sorted best-first (a full sort emerges from repeated sorted inserts).
+    #[test]
+    fn book_insert_keeps_side_globally_sorted() {
+        let env = env();
+        let mut rng = Rng(0xabcd_1234_5678_9999);
+        for side in [SIDE_SELL, SIDE_BUY] {
+            let mut book: Vec<OrderEntry> = Vec::new(&env);
+            for id in 0..40u32 {
+                let amount_in = rng.range1(1000);
+                let min_out = rng.range1(1000);
+                book_insert_sorted(&env, &mut book, entry(&env, id, amount_in, min_out), side);
+            }
+            // No adjacent pair may be strictly out of order (earlier strictly worse than later).
+            let mut j = 1u32;
+            while j < book.len() {
+                let prev = book.get(j - 1).unwrap();
+                let cur = book.get(j).unwrap();
+                assert!(
+                    !entry_better(&env, &cur, &prev, side),
+                    "book not sorted at {j} on side {side}"
+                );
+                j += 1;
+            }
+        }
+    }
+}
