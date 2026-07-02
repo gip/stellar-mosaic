@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useParams } from 'react-router-dom'
 import { errorMessage } from '@mosaic/sdk'
-import { api, type Asset, type Desk } from '../api'
+import { api, type Asset, type Desk, type DeskCustody } from '../api'
 import { NATIVE_EVM_SENTINEL } from '../baseDeployment'
 import { useWallet } from '../WalletContext'
 import OrderBook from '../components/OrderBook'
@@ -11,6 +11,7 @@ import CancelOrderButton from '../components/CancelOrderButton'
 import Pane from '../components/ui/Pane'
 import Tabs from '../components/ui/Tabs'
 import StatusDot, { type StatusTone } from '../components/ui/StatusDot'
+import Modal from '../components/ui/Modal'
 import ScrollTable from '../components/ui/ScrollTable'
 import Toasts, { type ToastItem } from '../components/Toasts'
 import { notesForDesk, reconcile, type Note } from '../notes'
@@ -87,8 +88,9 @@ function DeskDetailsTable({
         <tr>
           <th>Book index</th>
           <td>
-            {bookIndex.status} · ledger {bookIndex.lastLedger} · sequence{' '}
-            {bookIndex.lastSequence}/{bookIndex.targetSequence}
+            {bookIndex.status} · ledger {bookIndex.lastLedger}
+            {bookIndex.status === 'syncing' &&
+              ` · sequence ${bookIndex.lastSequence}/${bookIndex.targetSequence}`}
             {bookIndex.error && <div className="err">{bookIndex.error}</div>}
           </td>
         </tr>
@@ -143,6 +145,7 @@ export default function DeskPage() {
   const [desk, setDesk] = useState<Desk | null>(null)
   const [root, setRoot] = useState<string | null>(null)
   const [notes, setNotes] = useState<Note[]>([])
+  const [custody, setCustody] = useState<DeskCustody | null>(null)
   const trustlessDesk = storageMode.mode === 'trustless'
   const [error, setError] = useState<string | null>(null)
   const [noteIndexError, setNoteIndexError] = useState<string | null>(null)
@@ -189,6 +192,7 @@ export default function DeskPage() {
       setDesk(null)
       setRoot(null)
       setNotes([])
+      setCustody(null)
       setError(null)
       setNoteIndexError(null)
       setLastVerifiedDesk(null)
@@ -216,6 +220,23 @@ export default function DeskPage() {
     window.addEventListener('mosaic-notes-changed', handler)
     return () => window.removeEventListener('mosaic-notes-changed', handler)
   }, [storageMode.mode, reloadNotes])
+
+  // Poll desk-wide custody totals (Stellar + Base). Public reads, so this runs logged-out too.
+  useEffect(() => {
+    if (!deskId) return
+    let alive = true
+    const tick = () =>
+      api
+        .getDeskCustody(effectiveMode, deskId)
+        .then((c) => alive && setCustody(c))
+        .catch(() => {})
+    tick()
+    const h = setInterval(tick, 10000)
+    return () => {
+      alive = false
+      clearInterval(h)
+    }
+  }, [effectiveMode, deskId])
 
   // Auto-refresh the on-chain root every 5s as a liveness signal. Not shown in the public view.
   useEffect(() => {
@@ -353,9 +374,12 @@ export default function DeskPage() {
         <div className="desk-head">
           <h1 className="desk-title">{desk.name}</h1>
           <StatusDot tone={bookTone} title={bookIndex.error ?? undefined}>
-            Book {bookIndex.status} · seq {bookIndex.lastSequence}/{bookIndex.targetSequence}
+            Book {bookIndex.status}
+            {bookIndex.status === 'syncing' &&
+              ` · seq ${bookIndex.lastSequence}/${bookIndex.targetSequence}`}
           </StatusDot>
         </div>
+        <ShieldedBalancesBand assets={verifiedDesk.assets} custody={custody} dec={dec} mine={null} />
         <div className="stack">
           <Pane title="Order book">
             {pairs.length === 0 ? (
@@ -415,66 +439,52 @@ export default function DeskPage() {
       <div className="desk-head">
         <h1 className="desk-title">{desk.name}</h1>
         <StatusDot tone={bookTone} title={bookIndex.error ?? undefined}>
-          Book {bookIndex.status} · seq {bookIndex.lastSequence}/{bookIndex.targetSequence}
+          Book {bookIndex.status}
+          {bookIndex.status === 'syncing' &&
+            ` · seq ${bookIndex.lastSequence}/${bookIndex.targetSequence}`}
         </StatusDot>
       </div>
 
-      <div className="desk-grid">
-        {/* Left rail — balances, notes, desk config */}
-        <div className="stack">
-          <Pane title="Shielded balances">
-            {balances(notes, dec).length > 0 ? (
-              <div className="balances">
-                {balances(notes, dec).map(([s, amt]) => (
-                  <span className="pill accent" key={s}>
-                    {s} {amt}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <p className="muted">No shielded balance yet.</p>
-            )}
-          </Pane>
+      <ShieldedBalancesBand assets={verifiedDesk.assets} custody={custody} dec={dec} mine={mineRawByAsset(notes)} />
 
+      <div className="desk-grid">
+        {/* Left rail — notes, desk config */}
+        <div className="stack">
           <Pane title="My notes">
             {notes.length === 0 ? (
               <p className="muted">No notes yet.</p>
             ) : (
               <>
-                {active.length > 0 && (
-                  <details open>
-                    <summary>Active notes ({active.length})</summary>
-                    <ScrollTable>
-                      <NotesTable
-                        notes={active}
-                        dec={dec}
-                        desk={verifiedDesk}
-                        bookIndex={bookIndex}
-                        noteIndexError={noteIndexError}
-                        userPubkey={address ?? ''}
-                        trustless={trustlessDesk}
-                        onDone={reloadNotes}
-                      />
-                    </ScrollTable>
-                  </details>
-                )}
-                {history.length > 0 && (
-                  <details>
-                    <summary className="muted">Spent &amp; cancelled ({history.length})</summary>
-                    <ScrollTable>
-                      <NotesTable
-                        notes={history}
-                        dec={dec}
-                        desk={verifiedDesk}
-                        bookIndex={bookIndex}
-                        noteIndexError={noteIndexError}
-                        userPubkey={address ?? ''}
-                        trustless={trustlessDesk}
-                        onDone={reloadNotes}
-                      />
-                    </ScrollTable>
-                  </details>
-                )}
+                <details open>
+                  <summary>Active ({active.length})</summary>
+                  <ScrollTable>
+                    <NotesTable
+                      notes={active}
+                      dec={dec}
+                      desk={verifiedDesk}
+                      bookIndex={bookIndex}
+                      noteIndexError={noteIndexError}
+                      userPubkey={address ?? ''}
+                      trustless={trustlessDesk}
+                      onDone={reloadNotes}
+                    />
+                  </ScrollTable>
+                </details>
+                <details>
+                  <summary className="muted">Spent ({history.length})</summary>
+                  <ScrollTable>
+                    <NotesTable
+                      notes={history}
+                      dec={dec}
+                      desk={verifiedDesk}
+                      bookIndex={bookIndex}
+                      noteIndexError={noteIndexError}
+                      userPubkey={address ?? ''}
+                      trustless={trustlessDesk}
+                      onDone={reloadNotes}
+                    />
+                  </ScrollTable>
+                </details>
               </>
             )}
           </Pane>
@@ -633,57 +643,165 @@ function NotesTable({
   trustless: boolean
   onDone: () => void
 }) {
+  const [selected, setSelected] = useState<Note | null>(null)
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>Type</th>
-          <th>Pair</th>
-          <th>Asset</th>
-          <th>Amount</th>
-          <th>Owner tag</th>
-          <th>Status</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {notes.map((n) => (
-          <tr key={n.id}>
-            <td>{noteType(n)}</td>
-            <td>{notePair(n, desk)}</td>
-            <td>{n.symbol}</td>
-            <td>{formatAmount(n.amount, dec(n.asset_id))}</td>
-            <td className="mono">{n.owner_tag.slice(0, 14)}…</td>
-            <td className={n.status === 'active' ? 'ok' : 'muted'}>
-              {noteDisplayStatus(n, bookIndex, noteIndexError)}
-            </td>
-            <td>
-              {n.status === 'active' && orderIsResting(n, bookIndex) && userPubkey && (
-                <CancelOrderButton
-                  desk={desk}
-                  note={n}
-                  userPubkey={userPubkey}
-                  trustless={trustless}
-                  onDone={onDone}
-                />
-              )}
-            </td>
+    <>
+      <table className="notes-table">
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Pair</th>
+            <th>Amount</th>
+            <th className="col-status">Status</th>
+            <th>Actions</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {notes.map((n) => {
+            const status = noteDisplayStatus(n, bookIndex, noteIndexError)
+            return (
+              <tr
+                key={n.id}
+                className="note-row"
+                onClick={() => setSelected(n)}
+                title="Click for details"
+              >
+                <td>{noteType(n)}</td>
+                <td>{notePair(n, desk)}</td>
+                <td>
+                  {formatAmount(n.amount, dec(n.asset_id))} {n.symbol}
+                </td>
+                <td className="col-status">
+                  <StatusDot tone={status.tone} title={status.text}>
+                    <span className="sr-only">{status.text}</span>
+                  </StatusDot>
+                </td>
+                <td onClick={(e) => e.stopPropagation()}>
+                  {n.status === 'active' && orderIsResting(n, bookIndex) && userPubkey && (
+                    <CancelOrderButton
+                      desk={desk}
+                      note={n}
+                      userPubkey={userPubkey}
+                      trustless={trustless}
+                      onDone={onDone}
+                    />
+                  )}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      {selected && (
+        <NoteDetailsModal
+          note={selected}
+          desk={desk}
+          dec={dec}
+          status={noteDisplayStatus(selected, bookIndex, noteIndexError)}
+          onClose={() => setSelected(null)}
+        />
+      )}
+    </>
   )
 }
 
-function noteDisplayStatus(n: Note, bookIndex: BookIndexSnapshot, noteIndexError: string | null): string {
-  if (n.status !== 'active' || n.indexed) return n.status
-  if (noteIndexError?.includes('trustless note history unavailable')) return 'active · index history unavailable'
+/** Stellar Expert explorer link for a settlement transaction (testnet, matching the app network). */
+function stellarExpertTxUrl(txHash: string): string {
+  return `https://stellar.expert/explorer/testnet/tx/${txHash.replace(/^0x/i, '')}`
+}
+
+/** Full detail for a single note, opened by clicking its row. Shows every stored field —
+ * including the full owner tag and status string that the table row only hints at. */
+function NoteDetailsModal({
+  note,
+  desk,
+  dec,
+  status,
+  onClose,
+}: {
+  note: Note
+  desk: Desk
+  dec: (id: number) => number
+  status: { text: string; tone: StatusTone }
+  onClose: () => void
+}) {
+  const mono = (v: string) => (
+    <span className="mono" title={v}>
+      {v}
+    </span>
+  )
+  // Ordered from most human-relevant to most technical: what the note is and its worth,
+  // then its lifecycle state, then the cryptographic identifiers, then provenance/ops.
+  const rows: Array<[string, ReactNode]> = [
+    ['Type', noteType(note)],
+    ['Pair', notePair(note, desk)],
+    ['Asset', `${note.symbol} (#${note.asset_id})`],
+    ['Amount', `${formatAmount(note.amount, dec(note.asset_id))} (${note.amount} raw)`],
+    [
+      'Status',
+      <StatusDot tone={status.tone}>{status.text}</StatusDot>,
+    ],
+    ['Role', note.role],
+    ['Indexed', note.indexed ? 'yes' : 'no'],
+  ]
+  if (note.leaf_index !== undefined) rows.push(['Leaf index', String(note.leaf_index)])
+  rows.push(['Owner tag', mono(note.owner_tag)])
+  if (note.cancel) {
+    rows.push(['Order leaf', mono(note.cancel.order_leaf)])
+    rows.push(['Cancel owner tag', mono(note.cancel.cancel_owner_tag)])
+  }
+  rows.push(['Note id', mono(note.id)])
+  if (note.txHash)
+    rows.push([
+      'Tx hash',
+      <a
+        className="mono"
+        href={stellarExpertTxUrl(note.txHash)}
+        target="_blank"
+        rel="noreferrer"
+        title={`View ${note.txHash} on Stellar Expert`}
+      >
+        {note.txHash}
+      </a>,
+    ])
+  rows.push(['Created', new Date(note.createdAt).toLocaleString()])
+  if (note.updatedAt) rows.push(['Updated', new Date(note.updatedAt).toLocaleString()])
+  if (note.recovery_state) rows.push(['Recovery', note.recovery_state])
+  if (note.operation_id) rows.push(['Operation', `${note.operation_id} (${note.operation_state ?? '—'})`])
+  return (
+    <Modal title="Note details" onClose={onClose}>
+      <dl className="detail-grid">
+        {rows.map(([label, value], i) => (
+          <div className="detail-row" key={i}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </Modal>
+  )
+}
+
+/** Status text plus a traffic-light tone: green = spendable/settled, yellow = in-flight
+ * (indexing or book-sync latency), red = a real reconcile error needing attention.
+ * Terminal history states (spent/cancelled) are idle grey. */
+function noteDisplayStatus(
+  n: Note,
+  bookIndex: BookIndexSnapshot,
+  noteIndexError: string | null,
+): { text: string; tone: StatusTone } {
+  if (n.status !== 'active') return { text: n.status, tone: 'idle' }
+  if (n.indexed) return { text: 'active', tone: 'ok' }
+  if (noteIndexError?.includes('trustless note history unavailable'))
+    return { text: 'active · index history unavailable', tone: 'warn' }
   // Any other reconcile failure is a real error, not normal indexing latency — surface it distinctly
   // rather than reusing "pending index", so a wedged event reader doesn't look like healthy waiting.
-  if (noteIndexError) return 'active · index error'
-  if (!n.cancel) return 'active · pending index'
-  if (bookIndex.status !== 'synced') return 'order submitted · syncing book'
-  return orderIsResting(n, bookIndex) ? 'resting · awaiting fill' : 'not yet on book'
+  if (noteIndexError) return { text: 'active · index error', tone: 'err' }
+  if (!n.cancel) return { text: 'active · pending index', tone: 'warn' }
+  if (bookIndex.status !== 'synced') return { text: 'order submitted · syncing book', tone: 'warn' }
+  return orderIsResting(n, bookIndex)
+    ? { text: 'resting · awaiting fill', tone: 'ok' }
+    : { text: 'not yet on book', tone: 'warn' }
 }
 
 function orderIsResting(n: Note, bookIndex: BookIndexSnapshot): boolean {
@@ -707,15 +825,95 @@ function notePair(n: Note, desk: Desk): string {
   return `${symbol(pair.base_asset)}/${symbol(pair.quote_asset)}`
 }
 
-/** Spendable shielded balance per asset, summed from indexed active notes and formatted
- * to human decimals. `decimals` resolves an asset_id to its decimal places. */
-function balances(notes: Note[], decimals: (id: number) => number): [string, string][] {
-  const m = new Map<number, { symbol: string; sum: bigint }>()
+/** My spendable shielded balance per asset (raw units), summed from indexed active notes. */
+function mineRawByAsset(notes: Note[]): Map<number, bigint> {
+  const m = new Map<number, bigint>()
   for (const n of notes) {
     if (n.status !== 'active' || !n.indexed) continue
-    const e = m.get(n.asset_id) ?? { symbol: n.symbol, sum: 0n }
-    e.sum += BigInt(n.amount)
-    m.set(n.asset_id, e)
+    m.set(n.asset_id, (m.get(n.asset_id) ?? 0n) + BigInt(n.amount))
   }
-  return [...m.entries()].map(([id, { symbol, sum }]) => [symbol, formatAmount(sum, decimals(id))])
+  return m
+}
+
+/** Desk-wide committed total per asset (Stellar + Base, same units) for the collapsed summary line.
+ * Every supported currency is listed, including those at zero. */
+function deskTotalSummary(assets: Asset[], custody: DeskCustody, dec: (id: number) => number): string {
+  const byAsset = new Map(custody.assets.map((a) => [a.asset_id, a]))
+  const parts = assets.map((a) => {
+    const c = byAsset.get(a.asset_id)
+    const total = BigInt(c?.stellar ?? '0') + BigInt(c?.base ?? '0')
+    return `${formatAmount(total, dec(a.asset_id))} ${a.symbol}`
+  })
+  return parts.length > 0 ? `Total ${parts.join(', ')}` : 'No assets'
+}
+
+/** Full-width band at the top of the desk. Collapsed by default: shows a one-line desk-wide total
+ * with a chevron to reveal the per-asset breakdown — total committed on Stellar and Base (desk-wide
+ * custody) contrasted with the viewer's own shielded balance. `mine` is null on the public view
+ * (no wallet), which hides the Mine column. `custody` is null until the first read resolves. */
+function ShieldedBalancesBand({
+  assets,
+  custody,
+  dec,
+  mine,
+}: {
+  assets: Asset[]
+  custody: DeskCustody | null
+  dec: (id: number) => number
+  mine: Map<number, bigint> | null
+}) {
+  const [open, setOpen] = useState(false)
+  const byAsset = new Map((custody?.assets ?? []).map((a) => [a.asset_id, a]))
+  const cell = (raw: string | null | undefined, id: number): string => {
+    if (custody === null) return '…'
+    if (raw === null || raw === undefined) return '—'
+    return formatAmount(raw, dec(id))
+  }
+  const summary = custody === null ? 'Loading…' : deskTotalSummary(assets, custody, dec)
+  return (
+    <section className="pane balances-band">
+      <button
+        type="button"
+        className="balances-header"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="pane-title">Shielded balances</span>
+        <span className="balances-summary muted">{summary}</span>
+        <svg className={`chevron${open ? ' open' : ''}`} width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open &&
+        (assets.length === 0 ? (
+          <p className="muted">No assets registered.</p>
+        ) : (
+          <ScrollTable>
+            <table className="balances-table">
+              <thead>
+                <tr>
+                  <th>Asset</th>
+                  <th className="num">Stellar</th>
+                  <th className="num">Base</th>
+                  {mine && <th className="num">Mine</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {assets.map((a) => {
+                  const c = byAsset.get(a.asset_id)
+                  return (
+                    <tr key={a.asset_id}>
+                      <td>{a.symbol}</td>
+                      <td className="num">{cell(c?.stellar, a.asset_id)}</td>
+                      <td className="num">{cell(c?.base, a.asset_id)}</td>
+                      {mine && <td className="num">{formatAmount(mine.get(a.asset_id) ?? 0n, dec(a.asset_id))}</td>}
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </ScrollTable>
+        ))}
+    </section>
+  )
 }

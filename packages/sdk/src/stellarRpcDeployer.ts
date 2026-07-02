@@ -5,18 +5,17 @@
 import { Buffer } from "buffer";
 import {
   Address,
-  Asset,
   BASE_FEE,
   Operation as StellarOperation,
   TransactionBuilder,
   rpc,
   xdr,
 } from "@stellar/stellar-sdk";
+import { resolveStellarTokenContractId } from "./custody.js";
 import type { AssetDef } from "./types.js";
 import type { Deployer, DeploySettlementResult, NetworkConfig, StellarSigner } from "./ports.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const CONTRACT_ID = /^C[A-Z2-7]{55}$/;
 
 export interface StellarRpcDeployerOptions {
   network: NetworkConfig;
@@ -77,7 +76,10 @@ export class StellarRpcDeployer implements Deployer {
   }
 
   private assetInit(asset: AssetDef): xdr.ScVal {
-    const token = asset.kind === "BaseRepresented" ? null : this.resolveToken(asset.token ?? "native");
+    const token =
+      asset.kind === "BaseRepresented"
+        ? null
+        : resolveStellarTokenContractId(asset.token ?? "native", this.network.networkPassphrase);
     return this.map([
       ["asset_id", xdr.ScVal.scvU32(asset.asset_id)],
       ["kind", this.enumUnit(asset.kind)],
@@ -90,14 +92,6 @@ export class StellarRpcDeployer implements Deployer {
       ["base_asset", xdr.ScVal.scvU32(pair.base_asset)],
       ["quote_asset", xdr.ScVal.scvU32(pair.quote_asset)],
     ]);
-  }
-
-  private resolveToken(token: string): string {
-    if (CONTRACT_ID.test(token)) return token;
-    if (token === "native") return Asset.native().contractId(this.network.networkPassphrase);
-    const [code, issuer] = token.split(":");
-    if (code && issuer) return new Asset(code, issuer).contractId(this.network.networkPassphrase);
-    throw new Error(`unsupported token "${token}"; pass "native", CODE:ISSUER, or a SAC contract id (C...)`);
   }
 
   private map(entries: [string, xdr.ScVal][]): xdr.ScVal {

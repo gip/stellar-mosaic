@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { BookSide, Desk, MosaicLogger, Operation, SubmitResult } from "@mosaic/sdk";
+import { readDeskCustody, type BookSide, type Desk, type DeskCustody, type MosaicLogger, type Operation, type SubmitResult } from "@mosaic/sdk";
+import { Networks } from "@stellar/stellar-sdk";
 import { z } from "zod";
 import { AuthService } from "./auth.js";
 import { StellarBookReader } from "./book.js";
@@ -35,12 +36,17 @@ export interface BookHandlers {
   getBook(args: { desk_id: string; pair: number; side: number }): Promise<BookSide>;
 }
 
+export interface CustodyHandlers {
+  getCustody(args: { desk_id: string }): Promise<DeskCustody>;
+}
+
 export interface MosaicMcpOptions {
   auth?: AuthService;
   store?: MosaicStore;
   relays?: RelayHandlers;
   deploy?: DeployHandlers;
   books?: BookHandlers;
+  custody?: CustodyHandlers;
   logger?: MosaicLogger;
   /** Remote prove-service config for the durable Base-shield worker; when set, the worker runs. */
   baseShield?: BaseShieldConfig;
@@ -48,6 +54,18 @@ export interface MosaicMcpOptions {
 
 type ToolResult = { content: { type: "text"; text: string }[] };
 type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>;
+
+// A client (browser/CLI) aborts a slow tool call with JSON-RPC `-32001 Request timed out`, but that
+// error is raised on the client — this server never sees it and, at the default `warn` log level,
+// logs nothing for the still-running call (start is `debug`, completion is `info`). This threshold
+// makes a long-running tool emit `warn` lines while it runs, so "what timed out" is visible in the
+// server log at the moment the client gives up. Tune via MOSAIC_MCP_SLOW_TOOL_MS (0 disables).
+function slowToolThresholdMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.MOSAIC_MCP_SLOW_TOOL_MS;
+  if (raw === undefined) return 15_000;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 15_000;
+}
 
 const ok = (data: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(data) }] });
 const body = (args: Record<string, unknown>) => (args.body ?? {}) as Record<string, unknown>;
@@ -89,7 +107,20 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   const books = opts.books ?? {
     getBook: async ({ desk_id, pair, side }) => new StellarBookReader().getBook(await store.getDesk(desk_id), pair, side),
   };
+  const custody = opts.custody ?? {
+    getCustody: async ({ desk_id }) =>
+      readDeskCustody({
+        desk: await store.getDesk(desk_id),
+        stellar: {
+          rpcUrl: process.env.MOSAIC_RPC ?? "https://soroban-testnet.stellar.org",
+          networkPassphrase: process.env.MOSAIC_NETWORK_PASSPHRASE ?? Networks.TESTNET,
+        },
+        baseRpcUrl: process.env.MOSAIC_BASE_RPC,
+        logger,
+      }),
+  };
   const logger = opts.logger ?? createStderrLogger();
+  const slowMs = slowToolThresholdMs();
   const server = new McpServer({ name: "mosaic-mcp", version: "0.0.0" });
 
   const reg = (
@@ -100,6 +131,16 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     const wrapped: ToolHandler = async (args) => {
       const started = Date.now();
       logger.debug("mcp tool started", { tool: name });
+      // Emit a `warn` line once the call crosses the slow threshold, then keep ticking, so a call
+      // the client eventually abandons with `-32001 Request timed out` is named in this log while
+      // it is still running (unref'd so it never keeps the process alive).
+      const watchdog =
+        slowMs > 0
+          ? setInterval(() => {
+              logger.warn("mcp tool still running", { tool: name, elapsed_ms: Date.now() - started });
+            }, slowMs)
+          : undefined;
+      watchdog?.unref?.();
       try {
         const result = await handler(args);
         logger.info("mcp tool completed", { tool: name, duration_ms: Date.now() - started });
@@ -107,6 +148,8 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
       } catch (error) {
         logger.error("mcp tool failed", { tool: name, duration_ms: Date.now() - started, error });
         throw error;
+      } finally {
+        if (watchdog) clearInterval(watchdog);
       }
     };
     (server.registerTool as unknown as (n: string, c: unknown, h: ToolHandler) => void)(name, config, wrapped);
@@ -189,6 +232,15 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
       inputSchema: { desk_id: z.string(), pair: z.number(), side: z.number() },
     },
     async (args) => ok(await books.getBook({ desk_id: String(args.desk_id), pair: Number(args.pair), side: Number(args.side) })),
+  );
+
+  reg(
+    "get_desk_custody",
+    {
+      description: "Read a desk's total committed amounts per asset, on Stellar and Base.",
+      inputSchema: { id: z.string() },
+    },
+    async ({ id }) => ok(await custody.getCustody({ desk_id: String(id) })),
   );
 
   reg("list_assets", { description: "List catalog assets.", inputSchema: { session: z.string() } }, async (args) => {

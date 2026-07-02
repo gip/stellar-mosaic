@@ -45,6 +45,7 @@ test("exposes the MCP-only frontend tool set", async () => {
     "auth_logout",
     "list_desks",
     "get_desk",
+    "get_desk_custody",
     "create_operation",
     "claim_client_action",
     "record_activity",
@@ -60,6 +61,30 @@ test("exposes the MCP-only frontend tool set", async () => {
   ]) {
     assert.ok(names.has(name), `missing tool ${name}`);
   }
+});
+
+test("get_desk_custody returns per-asset Stellar + Base totals via the injected handler", async () => {
+  const calls = [];
+  const custody = {
+    getCustody: async ({ desk_id }) => {
+      calls.push(desk_id);
+      return {
+        desk_id,
+        assets: [
+          { asset_id: 1, symbol: "USDC", decimals: 6, kind: "Dual", stellar: "12000000000", base: "3000000000" },
+          { asset_id: 2, symbol: "XLM", decimals: 7, kind: "Stellar", stellar: "50000000000", base: null },
+        ],
+      };
+    },
+  };
+  const client = await connect({ custody });
+  const result = textOf(await client.callTool({ name: "get_desk_custody", arguments: { id: "desk-1" } }));
+  assert.deepEqual(calls, ["desk-1"]);
+  assert.equal(result.desk_id, "desk-1");
+  assert.equal(result.assets.length, 2);
+  assert.equal(result.assets[0].stellar, "12000000000");
+  assert.equal(result.assets[0].base, "3000000000");
+  assert.equal(result.assets[1].base, null);
 });
 
 test("wallet auth handshake over the protocol, then enqueue_base_shield gated by desk config", async () => {

@@ -39,6 +39,7 @@ export default function App() {
   async function logOutStellar() {
     await mosaicServer.disconnect().catch(() => {})
     await disconnect()
+    navigate('/')
   }
 
   const errors = useMemo(
@@ -60,12 +61,16 @@ export default function App() {
           <NavLink to="/assets" className={navClass}>
             Assets
           </NavLink>
-          <NavLink to="/activity" className={navClass}>
-            Activity
-          </NavLink>
-          <NavLink to="/settings" className={navClass}>
-            Settings
-          </NavLink>
+          {address && (
+            <>
+              <NavLink to="/activity" className={navClass}>
+                Activity
+              </NavLink>
+              <NavLink to="/settings" className={navClass}>
+                Settings
+              </NavLink>
+            </>
+          )}
         </nav>
         <div className="topbar-spacer" />
         <div className="topbar-actions">
@@ -188,7 +193,7 @@ export default function App() {
         <RecoveryNotice />
         <Outlet />
       </main>
-      <ActivityDrawer />
+      {address && <ActivityDrawer />}
     </>
   )
 }

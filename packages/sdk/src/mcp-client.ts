@@ -19,6 +19,7 @@ import type {
   ProposeAssetBody,
   WalletBackupEnvelope,
 } from "./types.js";
+import type { DeskCustody } from "./custody.js";
 import type { ActivityEvent } from "./activity.js";
 import type { ClientActionLease, McpClient, StellarSigner, SubmitResult } from "./ports.js";
 
@@ -169,6 +170,10 @@ class HttpMcpClient implements McpClient {
 
   getBook(deskId: string, pair: number, side: number): Promise<BookSide> {
     return this.call("get_book", { desk_id: deskId, pair, side });
+  }
+
+  getDeskCustody(id: string): Promise<DeskCustody> {
+    return this.call("get_desk_custody", { id });
   }
 
   listAssets(): Promise<CatalogAsset[]> {

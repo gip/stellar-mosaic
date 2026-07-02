@@ -27,6 +27,7 @@ import type {
   TreeEvent,
   WalletBackupEnvelope,
 } from "./types.js";
+import type { DeskCustody } from "./custody.js";
 import type { ActivityEvent } from "./activity.js";
 export type { ActivityStore } from "./activity.js";
 
@@ -213,6 +214,7 @@ export interface McpClient {
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk>;
   retryBaseDeployment(id: string): Promise<Desk>;
   getBook(deskId: string, pair: number, side: number): Promise<BookSide>;
+  getDeskCustody(id: string): Promise<DeskCustody>;
   listAssets(): Promise<CatalogAsset[]>;
   proposeAsset(body: ProposeAssetBody): Promise<CatalogAsset>;
   trustAsset(id: string): Promise<{ ok: boolean }>;
