@@ -38,6 +38,7 @@ class HttpMcpClient implements McpClient {
   private readonly url: string;
   private readonly sessionStorageKey: string;
   private client?: Client;
+  private connecting?: Promise<Client>;
   private sessionToken?: string;
 
   constructor(url: string) {
@@ -75,12 +76,23 @@ class HttpMcpClient implements McpClient {
   }
 
   private async connect(): Promise<Client> {
-    if (!this.client) {
-      const client = new Client({ name: "@mosaic/sdk", version: "0.0.0" });
-      await client.connect(new StreamableHTTPClientTransport(this.endpoint()));
-      this.client = client;
+    if (this.client) return this.client;
+    // Memoize the in-flight handshake so a burst of concurrent calls (e.g. the flood of tool calls
+    // fired the first time the UI switches into trusted mode) shares one connection instead of each
+    // opening its own transport/session — orphaned sessions leave requests unanswered until they
+    // fail with `-32001 Request timed out`.
+    if (!this.connecting) {
+      this.connecting = (async () => {
+        const client = new Client({ name: "@mosaic/sdk", version: "0.0.0" });
+        await client.connect(new StreamableHTTPClientTransport(this.endpoint()));
+        this.client = client;
+        return client;
+      })().catch((error) => {
+        this.connecting = undefined;
+        throw error;
+      });
     }
-    return this.client;
+    return this.connecting;
   }
 
   private async call<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
