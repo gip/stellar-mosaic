@@ -37,8 +37,6 @@ export default function CreateDeskForm({
   const [error, setError] = useState<string | null>(null)
   const [deploymentConfig, setDeploymentConfig] = useState<BaseDeploymentConfig | null>(null)
   const [estimatedFee, setEstimatedFee] = useState<bigint | null>(null)
-  // Trustless desks may optionally also deploy a Base Sepolia bridge for their Base-backed assets.
-  const [deployBaseBridge, setDeployBaseBridge] = useState(true)
   // Off by default: mint Base deposits as soon as they are proven. On makes the worker wait for
   // Base L1 finality before minting (safer against a Base reorg, but adds several minutes).
   const [waitForFinality, setWaitForFinality] = useState(false)
@@ -70,8 +68,9 @@ export default function CreateDeskForm({
   const assetIdOf = useCallback((catalogId: string) => selected.indexOf(catalogId) + 1, [selected])
   const baseAssets = useMemo(() => eligibleBaseAssets(chosen), [chosen])
   const effectiveDeploymentConfig = allowSponsored ? deploymentConfig : null
-  // Sponsored desks always bridge their Base-backed assets; trustless desks let the user opt out.
-  const wantsBaseBridge = baseAssets.length > 0 && (canSelfFund ? deployBaseBridge : true)
+  // Base-bridge deployment is held off in Trustless mode for now — it will require a Trusted setup.
+  // Only sponsored (Trusted) desks bridge their Base-backed assets.
+  const wantsBaseBridge = baseAssets.length > 0 && !canSelfFund
 
   useEffect(() => {
     // Only the self-funded (trustless) path deploys the bridge from the browser wallet, so it is the
@@ -260,14 +259,11 @@ export default function CreateDeskForm({
         <div className="base-deployment">
           <strong>Base Sepolia bridge</strong>
           {canSelfFund ? (
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0' }}>
-              <input
-                type="checkbox"
-                checked={deployBaseBridge}
-                onChange={(e) => setDeployBaseBridge(e.target.checked)}
-              />
-              Also deploy a Base Sepolia bridge for {baseAssets.map((asset) => asset.symbol).join(', ')}
-            </label>
+            <p className="muted">
+              Deploying a Base Sepolia bridge for {baseAssets.map((asset) => asset.symbol).join(', ')} isn't
+              available for Trustless desks yet — it requires a Trusted setup. Create a Trusted desk to bridge
+              these assets.
+            </p>
           ) : (
             <p className="muted">
               The server deploys and funds a MosaicBridge contract automatically — no wallet needed.
