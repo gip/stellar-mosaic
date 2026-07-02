@@ -42,5 +42,9 @@ export async function loadSettlementWasm(): Promise<Uint8Array> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
+export async function loadMosaicBridge(): Promise<unknown> {
+  return fetchJson<unknown>("MosaicBridge.json");
+}
+
 /** A {@link CircuitProvider} backed by fetched ACIR — the default for `createBrowserClient`. */
 export const circuitProvider: CircuitProvider = (name) => loadCircuit(name);

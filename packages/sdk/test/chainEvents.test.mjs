@@ -165,6 +165,64 @@ const tag = (n) => Buffer.from("0".repeat(63) + n, "hex");
 const symbol = (value) => xdr.ScVal.scvSymbol(value);
 const event = (id, topic, value, txHash = "tx") => ({ id, ledger: 9, txHash, topic: [symbol(topic)], value });
 
+const shieldEvent = (n) =>
+  event("e" + n, "shielded", xdr.ScVal.scvVec([
+    nativeToScVal(1, { type: "u32" }),
+    nativeToScVal(BigInt(n), { type: "i128" }),
+    xdr.ScVal.scvBytes(tag(n)),
+  ]));
+
+test("ChainEventSource serializes concurrent reads so a fetched page is not double-appended", async () => {
+  // Regression: many callers (order flow, note/fill polls, reconcile) hit events() concurrently.
+  // Without per-contract serialization they interleave inside fetchPages and each push the same new
+  // page into the shared accumulator, producing duplicate leaves and a replay root that never
+  // existed on-chain. The getEvents delay forces the interleave the real RPC exposes.
+  let phase = "initial";
+  const source = new ChainEventSource({
+    network,
+    server: {
+      async getEvents(request) {
+        await new Promise((r) => setTimeout(r, 5));
+        if (request.startLedger !== undefined) {
+          return { events: [shieldEvent(1), shieldEvent(2)], cursor: "c1", latestLedger: 10 };
+        }
+        if (request.cursor === "c1" && phase === "new") {
+          return { events: [shieldEvent(3)], cursor: "c2", latestLedger: 11 };
+        }
+        return { events: [], cursor: request.cursor, latestLedger: 11 };
+      },
+    },
+  });
+  await source.events("C", 1); // establish state: acc=[e1,e2], cursor c1
+  phase = "new";
+  const [a, b] = await Promise.all([source.events("C", 1), source.events("C", 1)]);
+  assert.equal(a.length, 3, "expected e1,e2,e3 with no duplicate");
+  assert.equal(b.length, 3);
+});
+
+test("ChainEventSource rebuilds instead of duplicating when a cached snapshot has events but no cursor", async () => {
+  // Regression: a snapshot persisted with events but a falsy cursor would resume from startLedger on
+  // top of the cached acc and duplicate every leaf. The source must rebuild from scratch instead.
+  const cache = {
+    async load() {
+      return { cursor: undefined, treeEvents: [{ kind: "shielded", asset: 1, amount: "1", owner_tag: "0x" + "01".padStart(64, "0") }], fills: [], latestLedger: 4 };
+    },
+    async save() {},
+  };
+  const source = new ChainEventSource({
+    network,
+    cache,
+    server: {
+      async getEvents(request) {
+        assert.equal(request.startLedger, 1);
+        return { events: [shieldEvent(1)], cursor: "c1", latestLedger: 10 };
+      },
+    },
+  });
+  const events = await source.events("C", 1);
+  assert.equal(events.length, 1, "cached event rebuilt once, not duplicated");
+});
+
 test("ChainEventSource records every contract event and parsed fills", async () => {
   const activity = new MemoryStore();
   const shielded = event(

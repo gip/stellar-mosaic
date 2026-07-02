@@ -1,5 +1,6 @@
 const DEFAULT_SOROBAN_RPC_URL = 'https://soroban-testnet.stellar.org'
 const DEFAULT_MCP_URL = 'http://127.0.0.1:8788/mcp'
+const DEFAULT_BASE_ROUTER_ID = 'CB3ISULTPMQXHUH6BVRO7VQIQE3TTDRGSHWBJ72V7GRO6VF63BMGNWOU'
 
 function absoluteHttpUrl(value: unknown, fallback: string, label: string): string {
   const raw = typeof value === 'string' ? value.trim() : ''
@@ -16,3 +17,6 @@ export const SOROBAN_RPC_URL = absoluteHttpUrl(
 )
 
 export const MCP_URL = absoluteHttpUrl(import.meta.env.VITE_MCP_URL, DEFAULT_MCP_URL, 'VITE_MCP_URL')
+export const BASE_ROUTER_ID = typeof import.meta.env.VITE_BASE_ROUTER_ID === 'string' && import.meta.env.VITE_BASE_ROUTER_ID.trim()
+  ? import.meta.env.VITE_BASE_ROUTER_ID.trim()
+  : DEFAULT_BASE_ROUTER_ID

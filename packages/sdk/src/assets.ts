@@ -23,4 +23,5 @@ export interface ProtocolRelease {
   schema_version: number;
   wasm_hash: string;
   vk_hashes: Record<VkName, string>;
+  bridge_image_id?: string;
 }

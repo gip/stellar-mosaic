@@ -1,7 +1,9 @@
 import { Noir } from '@noir-lang/noir_js'
 import { Asset as StellarAsset, BASE_FEE, Contract, Networks, nativeToScVal, rpc, scValToNative, TransactionBuilder } from '@stellar/stellar-sdk'
 import {
+  BASE_SEPOLIA_CONFIG_ID,
   ChainEventSource,
+  DeployDeskError,
   errorMessage,
   LocalPathProvider,
   makeNoirCompressor,
@@ -27,7 +29,7 @@ import {
   type WalletBackupEnvelope,
 } from '@mosaic/sdk'
 import { createBrowserClient } from '@mosaic/sdk/browser'
-import { circuitProvider } from '@mosaic/sdk/assets/browser'
+import { circuitProvider, loadProtocolRelease } from '@mosaic/sdk/assets/browser'
 import { createMcpClient } from '@mosaic/sdk/mcp-client'
 import type { Abi, Hex } from 'viem'
 import { FreighterSigner } from './sdk/freighterSigner'
@@ -46,8 +48,9 @@ import { currentAddress } from './wallet'
 import { defaultCatalogAssets, mergeCatalogAssets } from './defaultCatalog'
 import { parseDeskShare } from './deskShare'
 import { initNoirWasm } from './noirWasm'
-import { MCP_URL, SOROBAN_RPC_URL } from './config'
+import { BASE_ROUTER_ID, MCP_URL, SOROBAN_RPC_URL } from './config'
 import type { StorageMode } from './StorageModeContext'
+import { ethereumProvider } from './base'
 
 export type AssetKind = 'Stellar' | 'Dual' | 'BaseRepresented'
 export type Asset = AssetDef & { token: string | null }
@@ -283,6 +286,30 @@ async function validateReplayRoot(desk: Desk, events: TreeEvent[]): Promise<void
   }
 }
 
+/** `validateReplayRoot` only runs when `ChainEventSource` hits a ledger-range recovery — the
+ * ordinary incremental read path never cross-checks its replayed root against the chain. A local
+ * cache that's silently out of sync (stuck cursor, missed page, etc.) would otherwise sail through
+ * this check and only surface as an on-chain `UnknownRoot` after a full UltraHonk prove. Call this
+ * right before a membership witness is used, so staleness fails fast and cheaply instead. The
+ * mismatch is rare enough in practice that we log the actual values (event count, both roots)
+ * rather than just "it didn't match" — that's the difference between reproducing this and guessing. */
+async function assertRootIsLive(mode: StorageMode, desk: Desk, replayedRoot: string): Promise<void> {
+  const [liveRoot, events] = await Promise.all([readContractRoot(desk), sourceFor(mode).events(desk.id)])
+  if (replayedRoot.toLowerCase() !== liveRoot.toLowerCase()) {
+    console.error('[mosaic] note-proof root mismatch', {
+      desk_id: desk.id,
+      contract_id: desk.contract_id,
+      mode,
+      local_event_count: events.length,
+      replayed_root: replayedRoot,
+      live_contract_root: liveRoot,
+    })
+    throw new Error(
+      `Local note index is out of sync with the desk (replayed root ${replayedRoot} does not match the live contract root ${liveRoot} after replaying ${events.length} local event(s)). Refresh the page and try again.`,
+    )
+  }
+}
+
 async function localCatalog(mode: StorageMode): Promise<CatalogAsset[]> {
   return mergeCatalogAssets(await listLocalCatalogAssets(mode) as CatalogAsset[])
 }
@@ -338,7 +365,7 @@ export const api = {
     name: string
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
-    base_deployment?: { deployer_address: string }
+    base_assets?: { asset_id: number; symbol: string; token: string }[]
   }) => wrap(async () => {
     const desk = (await mcp.createDesk(body)) as Desk
     deskCache('trusted').set(desk.id, desk)
@@ -348,6 +375,7 @@ export const api = {
     name: string
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
+    base_assets?: { asset_id: number; symbol: string; token: string }[]
   }) => wrap(async () => {
     const address = await currentAddress()
     if (!address) throw new ApiError(401, 'Connect Freighter before deploying a trustless desk.')
@@ -358,11 +386,13 @@ export const api = {
       store: new IndexedDbStore('trustless'),
       activity: browserActivityStore('trustless'),
       initNoir: initNoirWasm,
+      ethProvider: body.base_assets?.length ? ethereumProvider() : undefined,
       // No persistent eventCache: this one-shot deploy client must not seed the long-lived reconcile
       // source's cache scope with a cursor (which would later resume reads past freshly-shielded notes).
     })
     const startLedger = (await new rpc.Server(SOROBAN_RPC_URL).getLatestLedger()).sequence
-    const deployed = await client.deploy({
+    const release = body.base_assets?.length ? await loadProtocolRelease() : null
+    const deployArgs = {
       name: body.name,
       assets: body.assets.map((asset) => ({
         asset_id: asset.asset_id,
@@ -372,7 +402,37 @@ export const api = {
         kind: asset.kind,
       })),
       pairs: body.pairs,
-    })
+      ...(body.base_assets?.length
+        ? {
+            base: {
+              assets: body.base_assets,
+              router_id: BASE_ROUTER_ID,
+              image_id: release?.bridge_image_id ?? '',
+              config_id: BASE_SEPOLIA_CONFIG_ID,
+            },
+          }
+        : {}),
+    }
+    let deployed
+    try {
+      deployed = await client.deploy(deployArgs)
+    } catch (cause) {
+      if (cause instanceof DeployDeskError && cause.partialDesk) {
+        const partial = {
+          id: cause.partialDesk.id,
+          name: cause.partialDesk.name ?? body.name,
+          contract_id: cause.partialDesk.contractId,
+          sponsor_pubkey: address,
+          assets: cause.partialDesk.assets,
+          pairs: cause.partialDesk.pairs,
+          event_start_ledger: startLedger,
+          base_deployment: cause.partialDesk.baseDeployment ?? null,
+        } as Desk
+        await putLocalDesk('trustless', partial)
+        deskCache('trustless').set(partial.id, partial)
+      }
+      throw cause
+    }
     const desk = {
       id: deployed.id,
       name: deployed.name ?? body.name,
@@ -381,7 +441,7 @@ export const api = {
       assets: deployed.assets,
       pairs: deployed.pairs,
       event_start_ledger: startLedger,
-      base_deployment: null,
+      base_deployment: deployed.baseDeployment ?? null,
     } as Desk
     await putLocalDesk('trustless', desk)
     deskCache('trustless').set(desk.id, desk)
@@ -391,6 +451,13 @@ export const api = {
   completeBaseDeployment: (id: string, body: { tx_hash: string; bridge_address: string }) =>
     wrap(async () => {
       const desk = (await mcp.completeBaseDeployment(id, body)) as Desk
+      deskCache('trusted').set(desk.id, desk)
+      return desk
+    }),
+  // Trusted mode: ask the server to re-run its own Base bridge deploy for a desk whose bridge failed.
+  retryBaseDeployment: (id: string) =>
+    wrap(async () => {
+      const desk = (await mcp.retryBaseDeployment(id)) as Desk
       deskCache('trusted').set(desk.id, desk)
       return desk
     }),
@@ -426,7 +493,12 @@ export const api = {
       const result = await mcp.relayShield(id, tx_xdr, lease())
       return { ok: true, result: result.txHash }
     }),
-  getNoteProof: (mode: StorageMode, id: string, ownerTag: string) => wrap(() => sourceFor(mode).notePath(id, ownerTag)),
+  getNoteProof: (mode: StorageMode, id: string, ownerTag: string) =>
+    wrap(async () => {
+      const [desk, membership] = await Promise.all([getDesk(mode, id), sourceFor(mode).notePath(id, ownerTag)])
+      await assertRootIsLive(mode, desk, membership.root)
+      return membership
+    }),
   relayOrder: (id: string, proof_b64: string, public_inputs_b64: string) =>
     wrap(async () => {
       const result = await mcp.relayOrder(id, proof_b64, public_inputs_b64, lease())

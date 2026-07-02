@@ -21,6 +21,7 @@ import { errorMessage, getMosaicLogger, serializeError, type MosaicLogger } from
 import type {
   Deployer,
   EthSigner,
+  BaseBridgeDeployer,
   Funder,
   McpClient,
   NetworkConfig,
@@ -29,6 +30,7 @@ import type {
   StellarSigner,
   Submitter,
 } from "./ports.js";
+import { baseTokenAddress } from "./baseSepolia.js";
 import { SIDE_SELL, type Amount, type AssetDef, type DeskConfig, type Field, type Note, type PairDef, type Side } from "./types.js";
 
 const ZERO_FIELD: Field = "0x" + "0".repeat(64);
@@ -55,6 +57,7 @@ export interface MosaicPorts {
   logger?: MosaicLogger;
   funder?: Funder;
   deployer?: Deployer;
+  baseBridgeDeployer?: BaseBridgeDeployer;
   ethSigner?: EthSigner;
   mcp?: McpClient;
   /** Notified after note mutations (e.g. to trigger a UI refresh). */
@@ -88,6 +91,16 @@ export interface UnshieldParams {
 export interface CancelParams {
   deskId: string;
   noteId: string;
+}
+
+export class DeployDeskError extends Error {
+  readonly partialDesk?: DeskConfig;
+
+  constructor(message: string, partialDesk?: DeskConfig, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "DeployDeskError";
+    this.partialDesk = partialDesk;
+  }
 }
 
 export interface NoteLoop {
@@ -145,6 +158,12 @@ export class MosaicClient {
 
   private scvBytes(bytes: Uint8Array): xdr.ScVal {
     return xdr.ScVal.scvBytes(Buffer.from(bytes));
+  }
+
+  private hexBytes(hex: string, bytes: number): Uint8Array {
+    const raw = hex.startsWith("0x") ? hex.slice(2) : hex;
+    if (!new RegExp(`^[0-9a-fA-F]{${bytes * 2}}$`).test(raw)) throw new Error(`expected ${bytes}-byte hex value`);
+    return Uint8Array.from(Buffer.from(raw, "hex"));
   }
 
   private symbolOf(desk: DeskConfig, assetId: number): string {
@@ -317,8 +336,14 @@ export class MosaicClient {
 
   // --- assemble (join/split) --------------------------------------------------------------------
 
-  /** Produce one confirmed note of exactly `target` of `asset_id` (split/merge as needed). */
-  async assemble(deskId: string, asset_id: number, target: Amount): Promise<{ note: Note }> {
+  /** Produce one confirmed note of exactly `target` of `asset_id` (split/merge as needed). When a
+   * `parent` operation drives the assembly, its join steps record under that operation's activity. */
+  async assemble(
+    deskId: string,
+    asset_id: number,
+    target: Amount,
+    parent?: { actionId: string; kind: string },
+  ): Promise<{ note: Note }> {
     const actionId = this.actionId();
     const wallet = await this.walletAddress();
     await this.recordActivity({
@@ -348,7 +373,7 @@ export class MosaicClient {
         });
         return { note };
       }
-      const note = await this.runAssembly(deskId, plan.steps, all, wallet);
+      const note = await this.runAssembly(deskId, plan.steps, all, wallet, parent);
       await this.recordActivity({
         kind: "user_action",
         action: "assemble",
@@ -379,6 +404,7 @@ export class MosaicClient {
     steps: AssemblyStep[],
     pool: Note[],
     walletAddress?: string,
+    parent?: { actionId: string; kind: string },
   ): Promise<Note> {
     const byId = new Map(pool.map((n) => [n.id, n]));
     const resolve = (ref: JoinInputRef, prev: Note | null) =>
@@ -388,7 +414,7 @@ export class MosaicClient {
       const a = resolve(step.a, prev);
       const b = step.op === "join" ? resolve(step.b, prev) : null;
       if (!a || (step.op === "join" && !b)) throw new Error("A note is no longer available; please retry.");
-      const { target } = await this.executeJoin(deskId, a, b, BigInt(step.targetRaw), BigInt(step.changeRaw));
+      const { target } = await this.executeJoin(deskId, a, b, BigInt(step.targetRaw), BigInt(step.changeRaw), parent);
       prev = await this.waitForConfirm(deskId, target.id, walletAddress);
     }
     if (!prev) throw new Error("Empty assembly plan.");
@@ -401,8 +427,12 @@ export class MosaicClient {
     b: Note | null,
     targetRaw: bigint,
     changeRaw: bigint,
+    parent?: { actionId: string; kind: string },
   ): Promise<{ target: Note; change: Note | null }> {
-    const actionId = this.actionId();
+    // When a parent (order/unshield) drives this join, record it under the parent's activity group
+    // (same action_id + kind) so every on-chain step of the operation shows as its own transaction
+    // line. Standalone `assemble` calls keep their own group.
+    const actionId = parent?.actionId ?? this.actionId();
     const wallet = await this.walletAddress();
     const desk = await this.p.desks.get(deskId);
     const sk_out1 = randomField();
@@ -504,6 +534,7 @@ export class MosaicClient {
       owner_tag: target.owner_tag,
       metadata: {
         action_id: actionId,
+        kind: parent?.kind,
         input_note_ids: [a.id, b?.id].filter(Boolean),
         target_amount: targetRaw.toString(),
         change_note_id: change?.id,
@@ -525,13 +556,14 @@ export class MosaicClient {
     await this.recordActivity({
       kind: "user_action",
       action: "join",
+      method: "join",
       status: "succeeded",
       wallet_address: wallet,
       desk_id: desk.id,
       tx_hash: res.txHash,
       note_id: target.id,
       owner_tag: target.owner_tag,
-      metadata: { action_id: actionId, change_note_id: change?.id, status: res.status },
+      metadata: { action_id: actionId, kind: parent?.kind, change_note_id: change?.id, status: res.status },
     });
     return { target, change };
   }
@@ -563,7 +595,7 @@ export class MosaicClient {
       const assetIn = params.side === SIDE_SELL ? pair.base_asset : pair.quote_asset;
       const assetOut = params.side === SIDE_SELL ? pair.quote_asset : pair.base_asset;
 
-      const offer = (await this.assemble(params.deskId, assetIn, params.amountIn)).note;
+      const offer = (await this.assemble(params.deskId, assetIn, params.amountIn, { actionId, kind: "place_order" })).note;
       await this.waitForConfirm(params.deskId, offer.id, wallet);
       const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
 
@@ -703,7 +735,7 @@ export class MosaicClient {
     try {
       const desk = await this.p.desks.get(params.deskId);
       const asset = desk.assets.find((a) => a.asset_id === params.asset_id);
-      const offer = (await this.assemble(params.deskId, params.asset_id, params.amount)).note;
+      const offer = (await this.assemble(params.deskId, params.asset_id, params.amount, { actionId, kind: "unshield" })).note;
       await this.waitForConfirm(params.deskId, offer.id, wallet);
       const membership = await this.waitForNotePath(params.deskId, offer.owner_tag);
 
@@ -880,9 +912,16 @@ export class MosaicClient {
     name?: string;
     assets: AssetDef[];
     pairs: Omit<PairDef, "pair_id">[];
+    base?: {
+      assets: { asset_id: number; symbol: string; token: string }[];
+      router_id: string;
+      image_id: string;
+      config_id: string;
+    };
   }): Promise<DeskConfig> {
     const actionId = this.actionId();
     const wallet = await this.walletAddress();
+    let partialDesk: DeskConfig | undefined;
     await this.recordActivity({
       kind: "user_action",
       action: "create_desk",
@@ -927,7 +966,7 @@ export class MosaicClient {
           },
         });
       }
-      const desk = {
+      const desk: DeskConfig = {
         id: crypto.randomUUID(),
         name: params.name,
         contractId: deployed.contractId,
@@ -935,6 +974,87 @@ export class MosaicClient {
         assets: params.assets,
         pairs: params.pairs.map((p, i) => ({ ...p, pair_id: i })),
       };
+      partialDesk = desk;
+      const baseAssets = params.base?.assets ?? [];
+      if (params.base && baseAssets.length > 0) {
+        if (!this.p.baseBridgeDeployer) throw new DeployDeskError("No BaseBridgeDeployer configured.", partialDesk);
+        const assetIds = baseAssets.map((asset) => asset.asset_id);
+        const tokens = baseAssets.map((asset) => baseTokenAddress(asset.token));
+        desk.baseDeployment = {
+          status: "awaiting_wallet",
+          deployer_address: "",
+          tx_hash: null,
+          bridge_address: null,
+          error: null,
+          assets: baseAssets.map((asset, index) => ({ asset_id: asset.asset_id, symbol: asset.symbol, token: tokens[index] })),
+        };
+        partialDesk = desk;
+        await this.recordActivity({
+          kind: "user_action",
+          action: "deploy_base_bridge",
+          status: "started",
+          wallet_address: wallet,
+          desk_id: desk.id,
+          contract_id: deployed.contractId,
+          metadata: { action_id: actionId, asset_ids: assetIds },
+        });
+        let base;
+        try {
+          base = await this.p.baseBridgeDeployer.deploy({ assetIds, tokens });
+        } catch (error) {
+          desk.baseDeployment = { ...desk.baseDeployment, status: "failed", error: errorMessage(error) };
+          throw new DeployDeskError(errorMessage(error), desk, { cause: error });
+        }
+        desk.baseDeployment = {
+          ...desk.baseDeployment,
+          status: "configuring",
+          deployer_address: base.deployer,
+          tx_hash: base.txHash,
+          bridge_address: base.bridgeAddress,
+          error: null,
+        };
+        partialDesk = desk;
+        await this.recordActivity({
+          kind: "user_action",
+          action: "deploy_base_bridge",
+          status: "succeeded",
+          wallet_address: wallet,
+          desk_id: desk.id,
+          contract_id: deployed.contractId,
+          tx_hash: base.txHash,
+          metadata: { action_id: actionId, bridge_address: base.bridgeAddress, deployer: base.deployer },
+        });
+        let res;
+        try {
+          res = await this.p.submitter.submit({
+            deskId: desk.id,
+            contractId: desk.contractId,
+            method: "configure_base_bridge",
+            metadata: { action_id: actionId, bridge_address: base.bridgeAddress },
+            args: [
+              new Address(params.base.router_id).toScVal(),
+              this.scvBytes(this.hexBytes(params.base.image_id, 32)),
+              this.scvBytes(this.hexBytes(params.base.config_id, 32)),
+              this.scvBytes(this.hexBytes(base.bridgeAddress, 20)),
+            ],
+          });
+        } catch (error) {
+          desk.baseDeployment = { ...desk.baseDeployment, status: "failed", error: errorMessage(error) };
+          throw new DeployDeskError(errorMessage(error), desk, { cause: error });
+        }
+        desk.baseDeployment = { ...desk.baseDeployment, status: "active" };
+        partialDesk = desk;
+        await this.recordActivity({
+          kind: "user_action",
+          action: "configure_base_bridge",
+          status: "succeeded",
+          wallet_address: wallet,
+          desk_id: desk.id,
+          contract_id: deployed.contractId,
+          tx_hash: res.txHash,
+          metadata: { action_id: actionId, bridge_address: base.bridgeAddress },
+        });
+      }
       await this.recordActivity({
         kind: "user_action",
         action: "create_desk",
@@ -961,6 +1081,9 @@ export class MosaicClient {
         message: errorMessage(error),
         metadata: { action_id: actionId, error: serializeError(error) },
       });
+      if (partialDesk && !(error instanceof DeployDeskError)) {
+        throw new DeployDeskError(errorMessage(error), partialDesk, { cause: error });
+      }
       throw error;
     }
   }

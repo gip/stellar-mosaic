@@ -61,6 +61,7 @@ export interface DeskConfig {
   sponsor?: string;
   assets: AssetDef[];
   pairs: PairDef[];
+  baseDeployment?: BaseDeployment | null;
 }
 
 export type NoteRole = "asset" | "order-output" | "order-cancel";
@@ -208,11 +209,16 @@ export interface Desk {
 
 export interface BaseDeploymentConfig {
   available: boolean;
+  /** Trusted mode: the server holds a funded deployer key and deploys the bridge itself. */
+  server_deploys?: boolean;
   chain_id: number;
   network: "base-sepolia";
   reason: string | null;
   abi: unknown | null;
   bytecode: string | null;
+  router_id?: string | null;
+  image_id?: string | null;
+  config_id?: string | null;
 }
 
 export interface BaseShieldConfig {

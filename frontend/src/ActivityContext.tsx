@@ -46,9 +46,13 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   }, [mosaicServer.trusted, wallet.address, wallet.networkPassphrase])
 
   const refreshActivities = useCallback(async () => {
+    if (!wallet.address) {
+      setActivities([])
+      return
+    }
     const next = await activityStore.list()
     setActivities(next.slice(-100).toReversed())
-  }, [activityStore])
+  }, [activityStore, wallet.address])
 
   const refresh = useCallback(async () => {
     if (!wallet.address) return
@@ -80,6 +84,11 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let alive = true
     const tick = async () => {
+      // Logged out: show nothing, even though the browser-local store still holds history.
+      if (!wallet.address) {
+        if (alive) setActivities([])
+        return
+      }
       try {
         const next = await activityStore.list()
         if (alive) setActivities(next.slice(-100).toReversed())
@@ -93,7 +102,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
       alive = false
       window.clearInterval(interval)
     }
-  }, [activityStore])
+  }, [activityStore, wallet.address])
 
   useEffect(() => {
     let active = true
@@ -188,6 +197,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
         } catch (e) {
           const message = errorMessage(e)
           const retryable = e instanceof ApiError && (e.status === 502 || e.status === 503 || e.status === 504)
+          console.error(`[mosaic] client action ${action.payload.kind} (${action.id}) failed: ${message}`, e)
           const failed = await api.failClientAction(action.id, action.lease_token, message, retryable).catch(() => null)
           if (failed?.status === 'succeeded' && wallet.address) {
             await reconcileOperationJournals([failed], wallet.address).catch(() => {})

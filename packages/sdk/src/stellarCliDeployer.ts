@@ -2,7 +2,7 @@
 // it shells to `stellar`, deploys the bundled settlement.wasm, and passes immutable assets/pairs
 // into the constructor.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { Deployer, NetworkConfig } from "./ports.js";
@@ -15,6 +15,14 @@ function asset(rel: string): string {
 }
 
 const CONTRACT_ID = /^C[A-Z2-7]{55}$/;
+// Stellar transaction hashes are 64 lowercase hex chars. The CLI logs the deploy tx hash (and an
+// explorer link) to stderr; grab the last one so the caller can surface it in activity/explorer.
+const TX_HASH = /\b[0-9a-f]{64}\b/g;
+
+function lastTxHash(text: string): string | undefined {
+  const matches = text.match(TX_HASH);
+  return matches?.[matches.length - 1];
+}
 
 function commandErrorText(error: unknown): string {
   const parts: string[] = [];
@@ -39,6 +47,14 @@ export class StellarCliDeployer implements Deployer {
 
   private stellar(args: string[]): string {
     return execFileSync(this.stellarBin, args, { encoding: "utf8" });
+  }
+
+  /** Like {@link stellar} but also returns stderr (where the CLI logs the tx hash / explorer link). */
+  private stellarWithLog(args: string[]): { stdout: string; stderr: string } {
+    const result = spawnSync(this.stellarBin, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(commandErrorText(result));
+    return { stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   }
 
   private netFlags(): string[] {
@@ -93,7 +109,7 @@ export class StellarCliDeployer implements Deployer {
     assets: AssetDef[];
     pairs: Omit<PairDef, "pair_id">[];
     admin: string;
-  }): Promise<{ contractId: string }> {
+  }): Promise<{ contractId: string; txHash?: string }> {
     const assetsJson = JSON.stringify(
       params.assets.map((a) => ({
         asset_id: a.asset_id,
@@ -104,7 +120,7 @@ export class StellarCliDeployer implements Deployer {
     const pairsJson = JSON.stringify(
       params.pairs.map((p) => ({ base_asset: p.base_asset, quote_asset: p.quote_asset })),
     );
-    const out = this.stellar([
+    const { stdout, stderr } = this.stellarWithLog([
       "contract",
       "deploy",
       "--wasm",
@@ -128,8 +144,9 @@ export class StellarCliDeployer implements Deployer {
       "--pairs",
       pairsJson,
     ]);
-    const contractId = out.split(/\s+/).find((t) => CONTRACT_ID.test(t));
-    if (!contractId) throw new Error(`no contract id in deploy output: ${out}`);
-    return { contractId };
+    const contractId = stdout.split(/\s+/).find((t) => CONTRACT_ID.test(t));
+    if (!contractId) throw new Error(`no contract id in deploy output: ${stdout}`);
+    // Best-effort: the tx hash is logged to stderr, not stdout. Absence must not fail the deploy.
+    return { contractId, txHash: lastTxHash(stderr) };
   }
 }

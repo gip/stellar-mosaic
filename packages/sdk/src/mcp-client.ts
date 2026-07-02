@@ -151,7 +151,8 @@ class HttpMcpClient implements McpClient {
     name: string;
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: string }[];
     pairs: { base_asset: number; quote_asset: number }[];
-    base_deployment?: { deployer_address: string };
+    base_assets?: { asset_id: number; symbol: string; token: string }[];
+    base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] };
   }): Promise<Desk> {
     return this.call("create_desk", this.auth({ body }));
   }
@@ -162,6 +163,10 @@ class HttpMcpClient implements McpClient {
 
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk> {
     return this.call("complete_base_deployment", this.auth({ id, body }));
+  }
+
+  retryBaseDeployment(id: string): Promise<Desk> {
+    return this.call("retry_base_deployment", this.auth({ id }));
   }
 
   getBook(deskId: string, pair: number, side: number): Promise<BookSide> {

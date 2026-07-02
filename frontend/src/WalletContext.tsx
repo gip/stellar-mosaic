@@ -53,7 +53,15 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         return
       }
       try {
-        const [nextAddress, nextNetwork] = await Promise.all([currentAddress(), currentNetwork()])
+        // freighter-api's calls have no internal timeout — if the extension is absent, locked, or
+        // unresponsive the underlying postMessage round-trip never settles. Race against a bound so
+        // `ready` always flips (callers like Home gate rendering on it) instead of hanging forever.
+        const [nextAddress, nextNetwork] = await Promise.race([
+          Promise.all([currentAddress(), currentNetwork()]),
+          new Promise<[string | null, { network: string; networkPassphrase: string } | null]>((resolve) =>
+            setTimeout(() => resolve([null, null]), 4000),
+          ),
+        ])
         if (!active || disconnected.current) return
         if (nextAddress && nextNetwork?.networkPassphrase === Networks.TESTNET) {
           setAddress(nextAddress)

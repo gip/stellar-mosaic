@@ -1,4 +1,4 @@
-import { openDB, type DBSchema } from 'idb'
+import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import { signTransaction } from '@stellar/freighter-api'
 import {
   BASE_FEE,
@@ -30,11 +30,24 @@ interface SubmissionDB extends DBSchema {
   }
 }
 
-const db = openDB<SubmissionDB>('mosaic-submissions', 1, {
-  upgrade(database) {
-    database.createObjectStore('submissions', { keyPath: 'hash' })
-  },
-})
+let dbPromise: Promise<IDBPDatabase<SubmissionDB>> | undefined
+function db(): Promise<IDBPDatabase<SubmissionDB>> {
+  dbPromise ??= openDB<SubmissionDB>('mosaic-submissions', 1, {
+    upgrade(database) {
+      database.createObjectStore('submissions', { keyPath: 'hash' })
+    },
+    // Close on a blocked versionchange (e.g. resetBrowserData()'s deleteDatabase) so it can't hang
+    // 'blocked' and deadlock later opens; reopen lazily on next use.
+    blocking() {
+      void dbPromise?.then((d) => d.close())
+      dbPromise = undefined
+    },
+    terminated() {
+      dbPromise = undefined
+    },
+  })
+  return dbPromise
+}
 
 export function submissionMode(): 'direct' | 'sponsored' {
   return localStorage.getItem('mosaic-submission-mode') === 'sponsored' ? 'sponsored' : 'direct'
@@ -45,7 +58,7 @@ export function setSubmissionMode(mode: 'direct' | 'sponsored'): void {
 }
 
 async function update(record: SubmissionRecord, patch: Partial<SubmissionRecord>): Promise<void> {
-  await (await db).put('submissions', { ...record, ...patch, updated_at: Date.now() })
+  await (await db()).put('submissions', { ...record, ...patch, updated_at: Date.now() })
 }
 
 const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -82,7 +95,7 @@ export async function submitContractCall(
     created_at: Date.now(),
     updated_at: Date.now(),
   }
-  await (await db).put('submissions', record)
+  await (await db()).put('submissions', record)
 
   const signed = await signTransaction(assembled.toXDR(), { address: source, networkPassphrase })
   if (signed.error || !signed.signedTxXdr) {
@@ -120,18 +133,20 @@ export async function submitDirectOrSponsored(
   contractId: string,
   method: string,
   args: xdr.ScVal[],
-  sponsored: () => Promise<unknown>,
+  sponsored: () => Promise<{ result?: string }>,
 ): Promise<string | undefined> {
   if (submissionMode() === 'sponsored') {
-    await sponsored()
-    return undefined
+    // The relayer runs the transaction server-side and returns its hash. Surface it (rather than
+    // dropping it) so the operation's activity carries the on-chain tx, matching direct mode.
+    const outcome = await sponsored()
+    return typeof outcome?.result === 'string' ? outcome.result : undefined
   }
   return submitContractCall(contractId, method, args)
 }
 
 /** Refresh locally journaled submissions after a reload or lost RPC response. */
 export async function reconcileDirectSubmissions(): Promise<void> {
-  const database = await db
+  const database = await db()
   for (const record of await database.getAll('submissions')) {
     if (record.status !== 'submitted') continue
     try {

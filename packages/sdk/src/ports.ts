@@ -86,6 +86,11 @@ export interface EthSigner {
   }): Promise<string>;
 }
 
+/** Minimal injected EVM provider surface used by viem-backed browser adapters. */
+export interface EthProvider {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+}
+
 // --- Storage -------------------------------------------------------------------------------------
 
 /** Persistence for private notes. Adapters: IndexedDbStorage (browser), SqliteStorage (Node,
@@ -153,6 +158,37 @@ export interface Deployer {
   }): Promise<DeploySettlementResult>;
 }
 
+export interface BaseBridgeEstimate {
+  gas: bigint;
+  maxFee: bigint;
+  maxFeePerGas: bigint;
+  maxPriorityFeePerGas: bigint;
+}
+
+export interface BaseBridgeDeployResult {
+  txHash: string;
+  bridgeAddress: string;
+  deployer: string;
+}
+
+export interface BaseBridgeVerifyParams {
+  txHash?: string;
+  bridgeAddress: string;
+  deployer: string;
+  assets: { asset_id: number; token: string }[];
+}
+
+export interface BaseBridgeVerifyResult {
+  ok: boolean;
+  reason?: string;
+}
+
+export interface BaseBridgeDeployer {
+  estimate(params: { assetIds: number[]; tokens: string[]; account?: string }): Promise<BaseBridgeEstimate>;
+  deploy(params: { assetIds: number[]; tokens: string[]; account?: string }): Promise<BaseBridgeDeployResult>;
+  verify(params: BaseBridgeVerifyParams): Promise<BaseBridgeVerifyResult>;
+}
+
 // --- MCP (optional server) -----------------------------------------------------------------------
 
 /** Typed client to the authenticated MCP server for the features that require it. The first
@@ -169,10 +205,14 @@ export interface McpClient {
     name: string;
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: string }[];
     pairs: { base_asset: number; quote_asset: number }[];
-    base_deployment?: { deployer_address: string };
+    /** Base token mappings the server registers on a server-deployed bridge (Trusted mode). */
+    base_assets?: { asset_id: number; symbol: string; token: string }[];
+    /** Legacy browser-wallet deploy shape; superseded by server-side deployment. */
+    base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] };
   }): Promise<Desk>;
   baseDeploymentConfig(): Promise<BaseDeploymentConfig>;
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk>;
+  retryBaseDeployment(id: string): Promise<Desk>;
   getBook(deskId: string, pair: number, side: number): Promise<BookSide>;
   listAssets(): Promise<CatalogAsset[]>;
   proposeAsset(body: ProposeAssetBody): Promise<CatalogAsset>;

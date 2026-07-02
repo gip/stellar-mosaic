@@ -292,8 +292,11 @@ export async function deployBridge(
   }
 
   // The proxy CREATE2-deploys the bridge in an internal call (no receipt.contractAddress), so the
-  // address is the deterministic CREATE2 value computed above. The deployed code can lag behind the
-  // receipt on load-balanced RPCs, so poll a few times before giving up.
+  // address is the deterministic CREATE2 value computed above under a fresh random salt: a successful
+  // receipt guarantees code will exist there. The deployed code can still lag the receipt on
+  // load-balanced RPCs (and the smart-account/relayer path adds a beat), so poll to smooth the common
+  // case — but return the confirmed deployment regardless, so a lagging read replica never strands a
+  // real bridge or makes the retry mint a second one.
   let deployedCode: Hex | undefined
   for (let attempt = 1; attempt <= 8; attempt++) {
     deployedCode = await pub.getCode({ address: bridgeAddress })
@@ -302,11 +305,9 @@ export async function deployBridge(
     await new Promise((resolve) => setTimeout(resolve, 1500))
   }
   if (!deployedCode || deployedCode === '0x') {
-    throw new Error(
-      `The Base bridge deployment confirmed (tx ${txHash}) but no contract code is visible at `
-        + `${bridgeAddress} yet — usually RPC propagation lag. Check the tx on `
-        + 'https://sepolia.basescan.org, then hit retry (it reuses this deployment).',
-    )
+    console.warn('[mosaic] bridge code not yet visible after deploy; proceeding on the confirmed receipt', {
+      txHash, bridgeAddress,
+    })
   }
   return { txHash, bridgeAddress }
 }

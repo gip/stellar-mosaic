@@ -26,6 +26,7 @@ export * from "./recipient.js";
 export * from "./submit.js";
 export * from "./sponsoredSubmit.js";
 export * from "./stellarRpcDeployer.js";
+export * from "./baseSepolia.js";
 export * from "./assets.js";
 export * from "./secretKeySigner.js";
 export * from "./sep53.js";

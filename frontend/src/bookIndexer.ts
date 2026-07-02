@@ -101,6 +101,15 @@ function database(): Promise<IDBPDatabase<BookDB>> {
       db.createObjectStore('pairs', { keyPath: 'id' }).createIndex('by-scope', 'scope')
       db.createObjectStore('processed', { keyPath: 'id' }).createIndex('by-scope', 'scope')
     },
+    // Yield to a blocked versionchange (e.g. resetBrowserData()'s deleteDatabase) so it can't hang
+    // 'blocked' and deadlock later opens; reopen lazily on next use.
+    blocking() {
+      void dbPromise?.then((d) => d.close())
+      dbPromise = undefined
+    },
+    terminated() {
+      dbPromise = undefined
+    },
   })
   return dbPromise
 }

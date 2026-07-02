@@ -109,7 +109,7 @@ export default function App() {
             )}
           </div>
           <div className="wallet-chain">
-            <span className="chain-label">Data mode</span>
+            <span className="chain-label">Trust mode</span>
             <div className="wallet-controls segmented">
               <button
                 type="button"
@@ -159,6 +159,15 @@ export default function App() {
         </div>
       </header>
       <main className="app-main">
+        {address && (
+          <div className="banner info demo-recovery-reminder" role="status">
+            <div className="banner-body">
+              {storageMode.mode === 'trusted'
+                ? 'Trusted mode: your private notes are synced to the Mosaic Server backup. This demo keeps no other copy — export your own backup, because losing that server data means losing the funds.'
+                : 'Trustless mode: your private notes live only in this browser and are never backed up. Clearing storage or losing this device means losing the funds.'}
+            </div>
+          </div>
+        )}
         {activeErrors.length > 0 && (
           <div className="banner err" role="alert" style={{ marginBottom: 'var(--sp-4)' }}>
             <div className="banner-body">

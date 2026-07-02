@@ -56,6 +56,7 @@ test("exposes the MCP-only frontend tool set", async () => {
     "base_shield_config",
     "enqueue_base_shield",
     "base_shield",
+    "retry_base_deployment",
   ]) {
     assert.ok(names.has(name), `missing tool ${name}`);
   }

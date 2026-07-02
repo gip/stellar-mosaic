@@ -15,10 +15,11 @@ import { LocalPathProvider } from "./localPathProvider.js";
 import { makeNoirCompressor } from "./noirCompressor.js";
 import { StaticDeskProvider } from "./deskRegistry.js";
 import { FriendbotFunder } from "./friendbot.js";
-import { loadSettlementWasm, loadVk, circuitProvider } from "./assets.browser.js";
+import { loadSettlementWasm, loadVk, loadMosaicBridge, circuitProvider } from "./assets.browser.js";
 import { StellarRpcDeployer } from "./stellarRpcDeployer.js";
+import { BaseSepoliaBridgeDeployer, type MosaicBridgeArtifact } from "./baseSepolia.js";
 import { replayNoteEvents } from "./eventReplay.js";
-import type { Deployer, McpClient, NetworkConfig, NoteStore, StellarSigner } from "./ports.js";
+import type { BaseBridgeDeployer, Deployer, EthProvider, McpClient, NetworkConfig, NoteStore, StellarSigner } from "./ports.js";
 import type { DeskConfig, Field, Note } from "./types.js";
 import { initNoirRuntime, type NoirRuntimeOptions } from "./noirRuntime.js";
 import { getMosaicLogger, type MosaicLogger } from "./logging.js";
@@ -50,6 +51,10 @@ export interface BrowserClientOptions {
   mcp?: McpClient;
   /** Optional self-funded deployer. In browser apps this should sign with the connected wallet. */
   deployer?: Deployer;
+  /** Optional injected EVM provider; when present, enables SDK-owned Base Sepolia bridge deployment. */
+  ethProvider?: EthProvider;
+  /** Optional custom Base bridge deployer. Overrides `ethProvider`. */
+  baseBridgeDeployer?: BaseBridgeDeployer;
 }
 
 function asActivityStore(store: NoteStore): ActivityStore | undefined {
@@ -150,6 +155,14 @@ export function createBrowserClient(opts: BrowserClientOptions): BrowserClient {
       loadSettlementWasm,
       loadVk,
     });
+  const baseBridgeDeployer =
+    opts.baseBridgeDeployer ??
+    (opts.ethProvider
+      ? new BaseSepoliaBridgeDeployer({
+          provider: opts.ethProvider,
+          loadMosaicBridge: async () => (await loadMosaicBridge()) as MosaicBridgeArtifact,
+        })
+      : undefined);
 
   const client = new MosaicClient({
     network: opts.network,
@@ -167,6 +180,7 @@ export function createBrowserClient(opts: BrowserClientOptions): BrowserClient {
     prepareNotes: opts.prepareNotes,
     mcp: opts.mcp,
     deployer,
+    baseBridgeDeployer,
   });
   return { client, desks };
 }

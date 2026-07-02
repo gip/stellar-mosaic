@@ -36,7 +36,7 @@ function writeHiddenDesks(mode: StorageMode, ids: string[]) {
 }
 
 export default function Home() {
-  const { address } = useWallet()
+  const { address, ready } = useWallet()
   const mosaicServer = useMosaicServer()
   const storageMode = useStorageMode()
   const [desks, setDesks] = useState<Desk[] | null>(null)
@@ -87,6 +87,7 @@ export default function Home() {
   }
 
   useEffect(() => {
+    if (!address) return
     let active = true
     queueMicrotask(() => {
       if (!active) return
@@ -94,6 +95,16 @@ export default function Home() {
       setError(null)
       setHiddenDeskIds(readHiddenDesks(storageMode.mode))
     })
+    // Never let the desk list sit on "Loading…" forever: if listDesks() neither resolves nor
+    // rejects (a wedged IndexedDB open, or a hung backend request in trusted mode) surface a
+    // real, actionable error instead of an infinite spinner. The mode is included so the failure
+    // itself tells us which path stalled.
+    const started = Date.now()
+    const timeout = setTimeout(() => {
+      if (!active) return
+      console.error(`[mosaic] listDesks(${storageMode.mode}) did not settle within 10s — desk load is stuck`)
+      setError(`Loading desks timed out (${storageMode.mode} mode). Reload the page; if it persists, check the console.`)
+    }, 10_000)
     api
       .listDesks(storageMode.mode)
       .then((next) => {
@@ -102,10 +113,31 @@ export default function Home() {
         setError(null)
       })
       .catch((e) => active && setError(errorMessage(e)))
+      .finally(() => {
+        clearTimeout(timeout)
+        if (active) console.debug(`[mosaic] listDesks(${storageMode.mode}) settled in ${Date.now() - started}ms`)
+      })
     return () => {
       active = false
+      clearTimeout(timeout)
     }
-  }, [storageMode.mode])
+  }, [address, storageMode.mode])
+
+  // Wait for the wallet check to resolve before deciding there's no session — `address` starts
+  // out null on every mount, so trusting it before `ready` would flash the logged-out intro for
+  // an already-connected wallet (matches the ready-gating StorageModeContext already relies on).
+  if (!ready) return <div className="reading"><p className="muted">Loading…</p></div>
+
+  if (!address) {
+    return (
+      <div className="reading intro">
+        <p>
+          Stellar Mosaic is a privacy-preserving DEX on Stellar: trades settle atomically on-chain
+          while the owner behind each note and the create-to-spend link stay hidden.
+        </p>
+      </div>
+    )
+  }
 
   return (
     <div className="reading">

@@ -9,7 +9,7 @@ export default function ActivityPage() {
     <div className="reading activity-page">
       <h2>Activity</h2>
       <p className="muted">
-        Transaction history, wallet operations, contract events, fills, indexed notes, and errors for the current data mode.
+        Transaction history, wallet operations, contract events, fills, indexed notes, and errors for the current trust mode.
       </p>
       <ActivityGroupList groups={groups} empty="No activity has been recorded for this mode yet." />
     </div>

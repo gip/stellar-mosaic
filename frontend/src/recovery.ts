@@ -75,6 +75,16 @@ function cacheDb() {
       upgrade(d) {
         d.createObjectStore('sessions', { keyPath: 'id' })
       },
+      // Close when a versionchange (e.g. resetBrowserData()'s deleteDatabase) is blocked on us,
+      // and drop the cache so the next access reopens — otherwise the delete hangs 'blocked' and
+      // unlockRecovery()/selectRecoveryAccount() deadlock behind it.
+      blocking() {
+        void cacheDbPromise?.then((d) => d.close())
+        cacheDbPromise = null
+      },
+      terminated() {
+        cacheDbPromise = null
+      },
     })
   }
   return cacheDbPromise
@@ -123,8 +133,14 @@ export async function selectRecoveryAccount(
   if (!account || !networkPassphrase) return
   const cached = await (await cacheDb()).get('sessions', sessionId(activeMode, account, networkPassphrase))
   if (selection !== accountSelection) return
-  if (!cached) return
-  active = cached
+  // Demo: auto-establish a local recovery session so note creation is never gated behind a manual
+  // Freighter "enable recovery" signature. The key is derived deterministically from the (public)
+  // account — it is NOT a real secret. A production deployment MUST replace this with a
+  // wallet-signature–derived key plus a durable off-device backup: Mosaic notes are UTXO-style, so
+  // a lost note is lost funds. See the Settings recovery notice.
+  active = cached ?? (await deriveLocalSession(account, networkPassphrase))
+  if (selection !== accountSelection) return
+  if (!cached) await (await cacheDb()).put('sessions', active)
   publish({ unlocked: true })
   if (backendEnabled) {
     try {
@@ -434,6 +450,26 @@ async function deriveMaterial(
     'decrypt',
   ])
   return { encryptionKey, lookupKey, writeKey }
+}
+
+// Demo-only: a recovery session whose key is derived deterministically from the (public) account
+// instead of a wallet signature. Lets the app stage notes locally without the "enable recovery"
+// prompt. Not secure — see selectRecoveryAccount().
+async function deriveLocalSession(
+  account: string,
+  networkPassphrase: string,
+): Promise<RecoverySession> {
+  const seed = await sha256(`stellar-mosaic/demo-recovery/v1 ${account} ${networkPassphrase}`)
+  const material = await deriveMaterial(seed, account, networkPassphrase)
+  return {
+    id: sessionId(activeMode, account, networkPassphrase),
+    account,
+    networkPassphrase,
+    encryptionKey: material.encryptionKey,
+    backupId: base64Url(material.lookupKey),
+    writeToken: base64Url(material.writeKey),
+    generation: 0,
+  }
 }
 
 async function verifyFreighterSignature(

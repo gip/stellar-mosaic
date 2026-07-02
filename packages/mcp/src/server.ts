@@ -25,8 +25,9 @@ export interface RelayHandlers {
 }
 
 export interface DeployHandlers {
-  createDesk(body: Record<string, unknown>, creator: string): Promise<{ desk: Desk; sponsorSecret?: string | null }>;
+  createDesk(body: Record<string, unknown>, creator: string, network?: string): Promise<{ desk: Desk; sponsorSecret?: string | null }>;
   completeBaseDeployment(id: string, body: Record<string, unknown>, address: string): Promise<Desk>;
+  retryBaseDeployment(id: string, address?: string, network?: string): Promise<Desk>;
   baseDeploymentConfig(): Promise<unknown>;
 }
 
@@ -84,7 +85,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   const store = opts.store ?? new MemoryMosaicStore();
   const auth = opts.auth ?? new AuthService(store);
   const relays = opts.relays ?? new StellarCliRelayer({ store });
-  const deploy = opts.deploy ?? new SponsoredStellarDeployHandlers();
+  const deploy = opts.deploy ?? new SponsoredStellarDeployHandlers({ store });
   const books = opts.books ?? {
     getBook: async ({ desk_id, pair, side }) => new StellarBookReader().getBook(await store.getDesk(desk_id), pair, side),
   };
@@ -157,7 +158,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     { description: "Create and deploy a desk.", inputSchema: { session: z.string(), body: z.record(z.unknown()) } },
     async (args) => {
       const s = await session(auth, args);
-      const created = await deploy.createDesk(body(args), s.address);
+      const created = await deploy.createDesk(body(args), s.address, s.network);
       return ok(await store.insertDesk(created.desk, created.sponsorSecret ?? null));
     },
   );
@@ -170,6 +171,14 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     async (args) => {
       const s = await session(auth, args);
       return ok(await deploy.completeBaseDeployment(String(args.id), body(args), s.address));
+    },
+  );
+  reg(
+    "retry_base_deployment",
+    { description: "Re-run the server-side Base bridge deploy for a desk whose bridge is not yet active.", inputSchema: { session: z.string(), id: z.string() } },
+    async (args) => {
+      const s = await session(auth, args);
+      return ok(await deploy.retryBaseDeployment(String(args.id), s.address, s.network));
     },
   );
 
@@ -235,16 +244,21 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
       description: "Fail a leased client action.",
       inputSchema: { session: z.string(), id: z.string(), lease_token: z.string(), error: z.string(), retryable: z.boolean().optional() },
     },
-    async (args) =>
-      ok(
-        await store.failAction(
-          (await session(auth, args)).address,
-          String(args.id),
-          String(args.lease_token),
-          String(args.error),
-          Boolean(args.retryable),
-        ),
-      ),
+    async (args) => {
+      const s = await session(auth, args);
+      // The generic tool wrapper only logs name/duration on success, so a client-reported failure
+      // (proving/relay error the browser hit) would otherwise never appear in this process's own
+      // logs — only in the stored operation, which nothing here surfaces. Log it explicitly.
+      logger.warn("client action failed", {
+        address: s.address,
+        action_id: String(args.id),
+        error: String(args.error),
+        retryable: Boolean(args.retryable),
+      });
+      return ok(
+        await store.failAction(s.address, String(args.id), String(args.lease_token), String(args.error), Boolean(args.retryable)),
+      );
+    },
   );
   reg("operation_events_since", { description: "Replay operation events.", inputSchema: { session: z.string(), cursor: z.number() } }, async (args) =>
     ok(await store.eventsAfter((await session(auth, args)).address, Number(args.cursor))),

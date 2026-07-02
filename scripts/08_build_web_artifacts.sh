@@ -6,8 +6,8 @@
 #   - lift/unshield/cancel/join + order_terms/note_tag/join_terms ACIR
 #     -> frontend/public/circuits/
 #   - Noir runtime WASM -> frontend/public/noir-wasm/
-#   - canonical MosaicBridge ABI/bytecode -> backend/artifacts/MosaicBridge.json
-#     (in-browser execute + prove)
+#   - canonical MosaicBridge ABI/bytecode -> backend/artifacts/, frontend/public/,
+#     packages/sdk/assets/ (in-browser execute + prove + trustless Base bridge deployment)
 #
 # VKs (backend/vks/{lift,unshield,cancel,join}_vk) are committed and already match these circuits
 # (bb v0.87.0). Regenerate a circuit's VK after editing it, e.g. for join:
@@ -34,6 +34,7 @@ echo ">>> build MosaicBridge deployment artifact"
 cp "$ROOT/evm/out/MosaicBridge.sol/MosaicBridge.json" \
    "$ROOT/backend/artifacts/MosaicBridge.json"
 cp "$ROOT/backend/artifacts/MosaicBridge.json" "$SDK_ASSETS/MosaicBridge.json"
+cp "$ROOT/backend/artifacts/MosaicBridge.json" "$ROOT/frontend/public/MosaicBridge.json"
 
 echo ">>> ship verifying keys to the SDK bundle"
 mkdir -p "$ROOT/frontend/public/vks"
@@ -45,8 +46,9 @@ LIFT_HASH=$(shasum -a 256 "$ROOT/backend/vks/lift_vk" | awk '{print $1}')
 UNSHIELD_HASH=$(shasum -a 256 "$ROOT/backend/vks/unshield_vk" | awk '{print $1}')
 CANCEL_HASH=$(shasum -a 256 "$ROOT/backend/vks/cancel_vk" | awk '{print $1}')
 JOIN_HASH=$(shasum -a 256 "$ROOT/backend/vks/join_vk" | awk '{print $1}')
-node -e 'const fs=require("fs"); const [wasm,lift,unshield,cancel,join,...outs]=process.argv.slice(1); const json=JSON.stringify({schema_version:1,wasm_hash:wasm,vk_hashes:{lift,unshield,cancel,join}},null,2)+"\n"; for(const out of outs) fs.writeFileSync(out, json)' \
-  "$WASM_HASH" "$LIFT_HASH" "$UNSHIELD_HASH" "$CANCEL_HASH" "$JOIN_HASH" \
+BRIDGE_IMAGE_ID=$(tr -d '[:space:]' < "$ROOT/bridge-prover/image-id.hex")
+node -e 'const fs=require("fs"); const [wasm,lift,unshield,cancel,join,bridgeImageId,...outs]=process.argv.slice(1); const json=JSON.stringify({schema_version:1,wasm_hash:wasm,vk_hashes:{lift,unshield,cancel,join},bridge_image_id:bridgeImageId},null,2)+"\n"; for(const out of outs) fs.writeFileSync(out, json)' \
+  "$WASM_HASH" "$LIFT_HASH" "$UNSHIELD_HASH" "$CANCEL_HASH" "$JOIN_HASH" "$BRIDGE_IMAGE_ID" \
   "$ROOT/frontend/public/protocol-release.json" "$SDK_ASSETS/protocol-release.json"
 
 echo ">>> compile circuits + ship ACIR to the frontend + SDK bundle"

@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { errorMessage } from '@mosaic/sdk'
 import { Link } from 'react-router-dom'
-import { api, type BaseDeploymentConfig, type CatalogAsset, type Desk } from '../api'
+import { api, type BaseDeploymentConfig, type CatalogAsset } from '../api'
 import { useEthereumWallet } from '../EthereumWalletContext'
 import { displayEth, estimateBridgeDeployment } from '../base'
 import type { Address } from 'viem'
-import BaseDeploymentPanel from './BaseDeploymentPanel'
 import { assetKindOf, baseTokenAddress, eligibleBaseAssets, hasEnoughEth } from '../baseDeployment'
 import type { StorageMode } from '../StorageModeContext'
 
@@ -36,16 +35,13 @@ export default function CreateDeskForm({
   const [pairs, setPairs] = useState<PairRow[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [deployBase, setDeployBase] = useState(false)
   const [deploymentConfig, setDeploymentConfig] = useState<BaseDeploymentConfig | null>(null)
   const [estimatedFee, setEstimatedFee] = useState<bigint | null>(null)
-  const [createdDesk, setCreatedDesk] = useState<Desk | null>(null)
-  const [stellarDeployment, setStellarDeployment] = useState<'sponsored' | 'self-funded'>('self-funded')
+  // Trustless desks may optionally also deploy a Base Sepolia bridge for their Base-backed assets.
+  const [deployBaseBridge, setDeployBaseBridge] = useState(true)
   const ethereum = useEthereumWallet()
   const canSelfFund = mode === 'trustless'
-  const effectiveStellarDeployment = canSelfFund ? stellarDeployment : 'sponsored'
-  const canDeployBase = allowSponsored && effectiveStellarDeployment === 'sponsored'
-  const effectiveDeployBase = canDeployBase && deployBase
+  const effectiveStellarDeployment: 'sponsored' | 'self-funded' = canSelfFund ? 'self-funded' : 'sponsored'
 
   useEffect(() => {
     let active = true
@@ -71,9 +67,13 @@ export default function CreateDeskForm({
   const assetIdOf = useCallback((catalogId: string) => selected.indexOf(catalogId) + 1, [selected])
   const baseAssets = useMemo(() => eligibleBaseAssets(chosen), [chosen])
   const effectiveDeploymentConfig = allowSponsored ? deploymentConfig : null
+  // Sponsored desks always bridge their Base-backed assets; trustless desks let the user opt out.
+  const wantsBaseBridge = baseAssets.length > 0 && (canSelfFund ? deployBaseBridge : true)
 
   useEffect(() => {
-    if (!effectiveDeployBase || !ethereum.address || !ethereum.connectedToBase || !effectiveDeploymentConfig?.available || !effectiveDeploymentConfig.abi || !effectiveDeploymentConfig.bytecode || baseAssets.length === 0) {
+    // Only the self-funded (trustless) path deploys the bridge from the browser wallet, so it is the
+    // only path that estimates the wallet's gas. Trusted desks are deployed by the MCP server.
+    if (!canSelfFund || baseAssets.length === 0 || !ethereum.address || !ethereum.connectedToBase || !effectiveDeploymentConfig?.available || !effectiveDeploymentConfig.abi || !effectiveDeploymentConfig.bytecode) {
       return
     }
     estimateBridgeDeployment({
@@ -82,7 +82,7 @@ export default function CreateDeskForm({
       assetIds: baseAssets.map((asset) => assetIdOf(asset.id)),
       tokens: baseAssets.map((asset) => baseTokenAddress(asset) as Address),
     }).then((value) => setEstimatedFee(value.maxFee)).catch(() => setEstimatedFee(null))
-  }, [effectiveDeployBase, ethereum.address, ethereum.connectedToBase, effectiveDeploymentConfig, baseAssets, assetIdOf])
+  }, [canSelfFund, ethereum.address, ethereum.connectedToBase, effectiveDeploymentConfig, baseAssets, assetIdOf])
 
   function toggleAsset(id: string) {
     const removing = selected.includes(id)
@@ -95,6 +95,12 @@ export default function CreateDeskForm({
       // Seed an initial pair so the desk is tradable by default (at least one pair is required).
       setPairs([{ base: next[0], quote: next[1] }])
     }
+  }
+
+  function resetForm() {
+    setName('')
+    setSelected([])
+    setPairs([])
   }
 
   async function submit(e: React.FormEvent) {
@@ -116,36 +122,33 @@ export default function CreateDeskForm({
       if (assets.length === 0) throw new Error('Select at least one asset.')
       if (assets.length >= 2 && deskPairs.length === 0)
         throw new Error('Add at least one trading pair (base / quote).')
-      if (effectiveDeployBase && (!ethereum.address || !ethereum.connectedToBase)) {
-        throw new Error('Connect MetaMask on Base Sepolia first.')
+      const deployBase = wantsBaseBridge
+      const baseMappings = baseAssets.map((asset) => ({
+        asset_id: assetIdOf(asset.id),
+        symbol: asset.symbol,
+        token: baseTokenAddress(asset),
+      }))
+
+      if (effectiveStellarDeployment === 'self-funded') {
+        // Trustless: the browser wallet pays, so it deploys the Stellar contract *and* the Base
+        // bridge (via the SDK) and records its own activity.
+        if (deployBase && (!ethereum.address || !ethereum.connectedToBase)) {
+          throw new Error('Connect MetaMask on Base Sepolia first.')
+        }
+        if (deployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
+          throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
+        }
+        await api.createDeskSelfFunded({ name, assets, pairs: deskPairs, base_assets: deployBase ? baseMappings : undefined })
+        resetForm()
+        onDone()
+        return
       }
-      if (effectiveDeployBase && baseAssets.length === 0) {
-        throw new Error('Select at least one asset with a Base Sepolia ERC-20 mapping.')
-      }
-      if (effectiveDeployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
-        throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
-      }
-      if (!canSelfFund && stellarDeployment === 'self-funded') {
-        throw new Error('Trustless browser deploy is only available in Trustless mode.')
-      }
-      if (effectiveStellarDeployment === 'self-funded' && effectiveDeployBase) {
-        throw new Error('Base deployment setup currently requires the Mosaic Server sponsored deployment path.')
-      }
-      const deskBody = {
-        name,
-        assets,
-        pairs: deskPairs,
-        ...(effectiveDeployBase && ethereum.address
-          ? { base_deployment: { deployer_address: ethereum.address } }
-          : {}),
-      }
-      const desk = effectiveStellarDeployment === 'self-funded'
-        ? await api.createDeskSelfFunded({ name, assets, pairs: deskPairs })
-        : await api.createDesk(deskBody)
-      setCreatedDesk(desk)
-      setName('')
-      setSelected([])
-      setPairs([])
+
+      // Trusted/sponsored: the MCP server deploys everything — the Stellar contract and the Base
+      // bridge (paid by the operator sponsor key) — and records the deploy activity itself, so there
+      // is nothing to sign in the browser. The returned desk already reflects the bridge status.
+      await api.createDesk({ name, assets, pairs: deskPairs, base_assets: deployBase ? baseMappings : undefined })
+      resetForm()
       onDone()
     } catch (e) {
       setError(errorMessage(e))
@@ -154,25 +157,8 @@ export default function CreateDeskForm({
     }
   }
 
-  if (createdDesk?.base_deployment) {
-    return (
-      <div className="card">
-        <strong>Stellar desk created</strong>
-        <div className="mono muted">{createdDesk.contract_id}</div>
-        <BaseDeploymentPanel
-          desk={createdDesk}
-          autoStart
-          onUpdated={(updated) => {
-            setCreatedDesk(updated)
-            onDone()
-          }}
-        />
-        <p><button type="button" onClick={() => setCreatedDesk(null)}>Create another desk</button></p>
-      </div>
-    )
-  }
-
-  const effectiveEstimatedFee = effectiveDeployBase && ethereum.connectedToBase ? estimatedFee : null
+  // Only the self-funded (trustless) path pays for the bridge from the browser wallet.
+  const effectiveEstimatedFee = canSelfFund && wantsBaseBridge && ethereum.connectedToBase ? estimatedFee : null
 
   return (
     <form onSubmit={submit} style={{ maxWidth: 560 }}>
@@ -267,40 +253,41 @@ export default function CreateDeskForm({
         </>
       )}
 
-      {canSelfFund && (
-        <>
-          <label>Stellar deployment</label>
-          <div className="segmented" style={{ marginBottom: 12 }}>
-            <button
-              type="button"
-              aria-pressed={effectiveStellarDeployment === 'self-funded'}
-              onClick={() => setStellarDeployment('self-funded')}
-            >
-              Trustless browser deploy
-            </button>
-          </div>
-        </>
-      )}
-
-      {ethereum.address && canDeployBase && (
+      {baseAssets.length > 0 && (
         <div className="base-deployment">
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input
-              type="checkbox"
-              checked={effectiveDeployBase}
-              disabled={!ethereum.connectedToBase || !effectiveDeploymentConfig?.available || baseAssets.length === 0}
-              onChange={(event) => setDeployBase(event.target.checked)}
-            />
-            Deploy a MosaicBridge contract on Base Sepolia
-          </label>
-          <p className="warn">
-            Optional and unchecked by default. Your MetaMask account pays Base Sepolia ETH for deployment gas.
-          </p>
-          {!effectiveDeploymentConfig?.available && <p className="muted">{effectiveDeploymentConfig?.reason ?? 'Base deployment configuration is unavailable.'}</p>}
-          {baseAssets.length === 0 && <p className="muted">Select an asset with a Base Sepolia ERC-20 mapping to enable deployment.</p>}
-          {baseAssets.length > 0 && <p className="muted">Will register: {baseAssets.map((asset) => `${asset.symbol} (#${assetIdOf(asset.id)})`).join(', ')}</p>}
-          {deployBase && ethereum.balance !== null && <div>Base balance: {displayEth(ethereum.balance)} ETH</div>}
-          {effectiveEstimatedFee !== null && <div>Estimated maximum fee: {displayEth(effectiveEstimatedFee)} ETH</div>}
+          <strong>Base Sepolia bridge</strong>
+          {canSelfFund ? (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0' }}>
+              <input
+                type="checkbox"
+                checked={deployBaseBridge}
+                onChange={(e) => setDeployBaseBridge(e.target.checked)}
+              />
+              Also deploy a Base Sepolia bridge for {baseAssets.map((asset) => asset.symbol).join(', ')}
+            </label>
+          ) : (
+            <p className="muted">
+              The server deploys and funds a MosaicBridge contract automatically — no wallet needed.
+            </p>
+          )}
+          {wantsBaseBridge && (
+            <>
+              {canSelfFund && (
+                <>
+                  <p className="warn">Your MetaMask account pays Base Sepolia ETH for deployment gas.</p>
+                  {!ethereum.address && <p className="muted">Connect MetaMask on Base Sepolia to continue.</p>}
+                  {ethereum.balance !== null && <div>Base balance: {displayEth(ethereum.balance)} ETH</div>}
+                  {effectiveEstimatedFee !== null && <div>Estimated maximum fee: {displayEth(effectiveEstimatedFee)} ETH</div>}
+                </>
+              )}
+              {!canSelfFund && effectiveDeploymentConfig && !effectiveDeploymentConfig.server_deploys && (
+                <p className="warn">
+                  This server is not configured to deploy Base bridges — desk creation will fail. Ask the operator to set MOSAIC_BASE_DEPLOYER_KEY.
+                </p>
+              )}
+              <p className="muted">Will register: {baseAssets.map((asset) => `${asset.symbol} (#${assetIdOf(asset.id)})`).join(', ')}</p>
+            </>
+          )}
         </div>
       )}
 

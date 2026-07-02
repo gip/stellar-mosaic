@@ -50,6 +50,13 @@ function db(mode: StorageMode) {
   let dbp = dbPromises.get(mode)
   if (!dbp) {
     dbp = openDB<MosaicDB>(indexedDbName(mode), 5, {
+      // Fires when this open cannot proceed because another connection (possibly a zombie from a
+      // pre-reload page) is holding the DB at an older version or a deleteDatabase() is still
+      // pending. This is exactly the state that leaves the desk list stuck on "Loading…", so log
+      // it loudly — a silent openDB() that never resolves is otherwise invisible.
+      blocked(currentVersion, blockedVersion) {
+        console.error(`[mosaic] openDB(${indexedDbName(mode)}) blocked — another connection is open`, { currentVersion, blockedVersion })
+      },
       upgrade(d, oldVersion) {
         if (oldVersion < 1) {
           const s = d.createObjectStore('notes', { keyPath: 'id' })
@@ -78,6 +85,17 @@ function db(mode: StorageMode) {
           s.createIndex('by-note', 'note_id')
           s.createIndex('by-created', 'created_at')
         }
+      },
+      // Yield this connection when something else needs a versionchange on it — most importantly
+      // resetBrowserData()'s deleteDatabase(). Without closing, that delete hangs 'blocked' forever
+      // and every later openDB() for this name deadlocks behind the pending delete. Drop the cached
+      // handle too so the next access reopens fresh.
+      blocking() {
+        void dbp?.then((d) => d.close())
+        dbPromises.delete(mode)
+      },
+      terminated() {
+        dbPromises.delete(mode)
       },
     })
     dbPromises.set(mode, dbp)

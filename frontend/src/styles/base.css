@@ -77,9 +77,25 @@ h3 {
   margin: 0 auto;
   padding: var(--sp-5);
 }
+.demo-recovery-reminder {
+  margin-bottom: var(--sp-4);
+}
 /* The trading workspace fills the width; reading pages (Home/Assets) center a narrower column. */
 .reading {
   max-width: var(--reading-max);
+  margin: 0 auto;
+}
+/* Logged-out Home: a single centered sentence instead of the desk list. */
+.reading.intro {
+  display: flex;
+  min-height: 40vh;
+  align-items: center;
+  text-align: center;
+}
+.reading.intro p {
+  font-size: var(--fs-lg);
+  color: var(--fg-muted);
+  line-height: 1.5;
   margin: 0 auto;
 }
 
