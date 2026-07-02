@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { errorMessage } from '@mosaic/sdk'
-import { connect as fxConnect, currentAddress, network as currentNetwork } from './wallet'
+import { connect as fxConnect, currentAddress, network as currentNetwork, walletInstalled } from './wallet'
 import { reconcileDirectSubmissions } from './directTransaction'
 import { Networks } from '@stellar/stellar-sdk'
 
@@ -89,6 +89,14 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setConnecting(true)
     setError(null)
     try {
+      // Freighter has no Safari build; it only injects on Chromium (Chrome/Brave/Edge)
+      // and Firefox. Detect the missing extension up front so the user gets an actionable
+      // message instead of an opaque freighter-api error.
+      if (!(await walletInstalled())) {
+        throw new Error(
+          'Freighter wallet not detected. Install the Freighter browser extension (Chrome, Brave, Edge, or Firefox) to sign in — Freighter is not available on Safari.',
+        )
+      }
       const nextAddress = await fxConnect()
       const nextNetwork = await currentNetwork()
       if (nextNetwork?.networkPassphrase !== Networks.TESTNET) {
