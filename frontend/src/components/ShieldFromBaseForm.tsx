@@ -126,7 +126,10 @@ export default function ShieldFromBaseForm({
   // The backend job is mid-flight until it reaches a terminal state.
   const jobRunning = !!job && job.status !== 'active' && job.status !== 'failed'
 
-  // Poll the backend job until it reaches a terminal state.
+  // Poll the backend job for this form's own progress display. Recording the Stellar mint/failure
+  // into Activity is done by the always-mounted reconciler in ActivityContext, not here — a Base
+  // shield takes ~10–15 min, and this form unmounts as soon as the user leaves the Fund tab, so the
+  // terminal legs must be logged independently of it.
   useEffect(() => {
     if (!jobId) return
     let stopped = false
@@ -136,36 +139,7 @@ export default function ShieldFromBaseForm({
         const j = jobs.find((x) => x.id === jobId)
         if (j) {
           setJob(j)
-          if (j.status === 'active') {
-            stopped = true
-            // Record the Stellar mint tx under the same group (`action_id`) as the Base deposit.
-            await recordBaseShieldActivity({
-              kind: 'transaction',
-              action: 'shield_from_base',
-              method: 'shield_from_base',
-              status: 'succeeded',
-              wallet_address: userPubkey ?? undefined,
-              desk_id: desk.id,
-              tx_hash: j.stellar_tx_hash ?? undefined,
-              idempotency_key: `base-shield-mint:${j.id}`,
-              created_at: Date.now(),
-              metadata: { action_id: j.id, source: 'base', stellar_tx_hash: j.stellar_tx_hash ?? undefined },
-            })
-          } else if (j.status === 'failed') {
-            stopped = true
-            await recordBaseShieldActivity({
-              kind: 'error',
-              action: 'shield_from_base',
-              method: 'shield_from_base',
-              status: 'failed',
-              wallet_address: userPubkey ?? undefined,
-              desk_id: desk.id,
-              message: j.error ?? undefined,
-              idempotency_key: `base-shield-fail:${j.id}`,
-              created_at: Date.now(),
-              metadata: { action_id: j.id, source: 'base' },
-            })
-          }
+          if (j.status === 'active' || j.status === 'failed') stopped = true
         }
       } catch {
         /* transient; keep polling */
@@ -177,7 +151,7 @@ export default function ShieldFromBaseForm({
       else void tick()
     }, 4000)
     return () => clearInterval(iv)
-  }, [jobId, desk.id, userPubkey])
+  }, [jobId, desk.id])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()

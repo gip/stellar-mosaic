@@ -303,8 +303,21 @@ function txStatus(activity: ActivityEvent) {
   return displayStatus(activity.status)
 }
 
+// The status of the temporally-latest activity in the group (by created_at, tie-broken by cursor), so
+// a multi-leg group reflects its most recent leg. This is what turns a Base shield green: the group
+// holds a `running` deposit leg plus a later `succeeded` mint leg — the mint, recorded last, wins.
+// (First-defined order would leave it pinned to the deposit's `running` forever.)
 function latestStatus(activities: ActivityEvent[]) {
-  return activities.map((activity) => activity.status).find((status) => status !== undefined)
+  let best: ActivityEvent | undefined
+  for (const activity of activities) {
+    if (activity.status === undefined) continue
+    if (!best || activityOrder(activity) >= activityOrder(best)) best = activity
+  }
+  return best?.status
+}
+
+function activityOrder(activity: ActivityEvent): number {
+  return (activity.created_at ?? 0) * 1e6 + (activity.cursor ?? 0)
 }
 
 function statusRank(status?: string) {

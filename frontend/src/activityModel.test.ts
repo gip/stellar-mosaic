@@ -404,6 +404,8 @@ test('base shield deposit and mint collapse into one group linking both txs', ()
   assert.equal(groups.length, 1)
   assert.equal(groups[0].action, 'Shield')
   assert.equal(groups[0].summary, '1 ETH from Base Sepolia')
+  // The group turns green once the later mint leg succeeds, even though the deposit leg stays `running`.
+  assert.equal(groups[0].status, 'succeeded')
   assert.equal(groups[0].lines.length, 2)
   const byTx = new Map(groups[0].lines.map((line) => [line.tx, line]))
   assert.equal(txNetworkLabel(baseTx, byTx.get(baseTx)!.activity!), 'Base Sepolia')
