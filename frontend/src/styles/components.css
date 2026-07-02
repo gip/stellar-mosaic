@@ -917,6 +917,13 @@ tbody tr:hover {
   color: var(--fg-muted);
   overflow-wrap: break-word;
 }
+.activity-summary-error {
+  display: block;
+  margin-top: 2px;
+  color: var(--err);
+  font-size: var(--fs-sm);
+  overflow-wrap: break-word;
+}
 .activity-row > * {
   min-width: 0;
 }

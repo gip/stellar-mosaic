@@ -18,6 +18,7 @@ export interface ActivityGroup {
   action: ActivityAction
   summary: string
   status?: string
+  error?: string
   createdAt?: number
   lines: TransactionLine[]
 }
@@ -85,6 +86,7 @@ export function activityGroups(activities: ActivityEvent[], operations: Operatio
     const operation = operationId ? operationById.get(operationId) : undefined
     const groupActivities = activityByGroup.get(group.id) ?? []
     group.status = displayStatus(operation?.status ?? latestStatus(groupActivities))
+    group.error = operation?.error ?? undefined
     group.summary ||= operation ? summaryForOperation(operation, groupActivities) : summaryForActivities(group.action, groupActivities)
     group.createdAt = Math.max(
       operation?.updated_at ?? operation?.created_at ?? 0,

@@ -235,16 +235,21 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
       description: "Fail a leased client action.",
       inputSchema: { session: z.string(), id: z.string(), lease_token: z.string(), error: z.string(), retryable: z.boolean().optional() },
     },
-    async (args) =>
-      ok(
-        await store.failAction(
-          (await session(auth, args)).address,
-          String(args.id),
-          String(args.lease_token),
-          String(args.error),
-          Boolean(args.retryable),
-        ),
-      ),
+    async (args) => {
+      const s = await session(auth, args);
+      // The generic tool wrapper only logs name/duration on success, so a client-reported failure
+      // (proving/relay error the browser hit) would otherwise never appear in this process's own
+      // logs — only in the stored operation, which nothing here surfaces. Log it explicitly.
+      logger.warn("client action failed", {
+        address: s.address,
+        action_id: String(args.id),
+        error: String(args.error),
+        retryable: Boolean(args.retryable),
+      });
+      return ok(
+        await store.failAction(s.address, String(args.id), String(args.lease_token), String(args.error), Boolean(args.retryable)),
+      );
+    },
   );
   reg("operation_events_since", { description: "Replay operation events.", inputSchema: { session: z.string(), cursor: z.number() } }, async (args) =>
     ok(await store.eventsAfter((await session(auth, args)).address, Number(args.cursor))),

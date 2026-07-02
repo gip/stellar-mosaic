@@ -188,6 +188,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
         } catch (e) {
           const message = errorMessage(e)
           const retryable = e instanceof ApiError && (e.status === 502 || e.status === 503 || e.status === 504)
+          console.error(`[mosaic] client action ${action.payload.kind} (${action.id}) failed: ${message}`, e)
           const failed = await api.failClientAction(action.id, action.lease_token, message, retryable).catch(() => null)
           if (failed?.status === 'succeeded' && wallet.address) {
             await reconcileOperationJournals([failed], wallet.address).catch(() => {})

@@ -283,6 +283,30 @@ async function validateReplayRoot(desk: Desk, events: TreeEvent[]): Promise<void
   }
 }
 
+/** `validateReplayRoot` only runs when `ChainEventSource` hits a ledger-range recovery — the
+ * ordinary incremental read path never cross-checks its replayed root against the chain. A local
+ * cache that's silently out of sync (stuck cursor, missed page, etc.) would otherwise sail through
+ * this check and only surface as an on-chain `UnknownRoot` after a full UltraHonk prove. Call this
+ * right before a membership witness is used, so staleness fails fast and cheaply instead. The
+ * mismatch is rare enough in practice that we log the actual values (event count, both roots)
+ * rather than just "it didn't match" — that's the difference between reproducing this and guessing. */
+async function assertRootIsLive(mode: StorageMode, desk: Desk, replayedRoot: string): Promise<void> {
+  const [liveRoot, events] = await Promise.all([readContractRoot(desk), sourceFor(mode).events(desk.id)])
+  if (replayedRoot.toLowerCase() !== liveRoot.toLowerCase()) {
+    console.error('[mosaic] note-proof root mismatch', {
+      desk_id: desk.id,
+      contract_id: desk.contract_id,
+      mode,
+      local_event_count: events.length,
+      replayed_root: replayedRoot,
+      live_contract_root: liveRoot,
+    })
+    throw new Error(
+      `Local note index is out of sync with the desk (replayed root ${replayedRoot} does not match the live contract root ${liveRoot} after replaying ${events.length} local event(s)). Refresh the page and try again.`,
+    )
+  }
+}
+
 async function localCatalog(mode: StorageMode): Promise<CatalogAsset[]> {
   return mergeCatalogAssets(await listLocalCatalogAssets(mode) as CatalogAsset[])
 }
@@ -426,7 +450,12 @@ export const api = {
       const result = await mcp.relayShield(id, tx_xdr, lease())
       return { ok: true, result: result.txHash }
     }),
-  getNoteProof: (mode: StorageMode, id: string, ownerTag: string) => wrap(() => sourceFor(mode).notePath(id, ownerTag)),
+  getNoteProof: (mode: StorageMode, id: string, ownerTag: string) =>
+    wrap(async () => {
+      const [desk, membership] = await Promise.all([getDesk(mode, id), sourceFor(mode).notePath(id, ownerTag)])
+      await assertRootIsLive(mode, desk, membership.root)
+      return membership
+    }),
   relayOrder: (id: string, proof_b64: string, public_inputs_b64: string) =>
     wrap(async () => {
       const result = await mcp.relayOrder(id, proof_b64, public_inputs_b64, lease())

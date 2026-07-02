@@ -27,6 +27,7 @@ export default function ActivityGroupList({
                 {group.createdAt && <time dateTime={new Date(group.createdAt).toISOString()} title={absoluteTime(group.createdAt)}>{timeAgo(group.createdAt)}</time>}
               </div>
               <span className="activity-summary-text" title={group.summary}>{renderLinkedSummary(group.summary)}</span>
+              {group.error && <span className="activity-summary-error" title={group.error}>{group.error}</span>}
             </div>
             <div className="activity-tx-list">
               {group.lines.flatMap((line, lineIndex) => {
@@ -38,7 +39,7 @@ export default function ActivityGroupList({
                 )
               })}
             </div>
-            <StatusDot tone={statusTone(group.status)} title={formatStatus(group.status)}>
+            <StatusDot tone={statusTone(group.status)} title={group.error ? `${formatStatus(group.status)}: ${group.error}` : formatStatus(group.status)}>
               <span className="activity-status-label">{formatStatus(group.status)}</span>
             </StatusDot>
           </div>

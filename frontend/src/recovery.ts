@@ -75,6 +75,16 @@ function cacheDb() {
       upgrade(d) {
         d.createObjectStore('sessions', { keyPath: 'id' })
       },
+      // Close when a versionchange (e.g. resetBrowserData()'s deleteDatabase) is blocked on us,
+      // and drop the cache so the next access reopens — otherwise the delete hangs 'blocked' and
+      // unlockRecovery()/selectRecoveryAccount() deadlock behind it.
+      blocking() {
+        void cacheDbPromise?.then((d) => d.close())
+        cacheDbPromise = null
+      },
+      terminated() {
+        cacheDbPromise = null
+      },
     })
   }
   return cacheDbPromise

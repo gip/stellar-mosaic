@@ -95,6 +95,16 @@ export default function Home() {
       setError(null)
       setHiddenDeskIds(readHiddenDesks(storageMode.mode))
     })
+    // Never let the desk list sit on "Loading…" forever: if listDesks() neither resolves nor
+    // rejects (a wedged IndexedDB open, or a hung backend request in trusted mode) surface a
+    // real, actionable error instead of an infinite spinner. The mode is included so the failure
+    // itself tells us which path stalled.
+    const started = Date.now()
+    const timeout = setTimeout(() => {
+      if (!active) return
+      console.error(`[mosaic] listDesks(${storageMode.mode}) did not settle within 10s — desk load is stuck`)
+      setError(`Loading desks timed out (${storageMode.mode} mode). Reload the page; if it persists, check the console.`)
+    }, 10_000)
     api
       .listDesks(storageMode.mode)
       .then((next) => {
@@ -103,8 +113,13 @@ export default function Home() {
         setError(null)
       })
       .catch((e) => active && setError(errorMessage(e)))
+      .finally(() => {
+        clearTimeout(timeout)
+        if (active) console.debug(`[mosaic] listDesks(${storageMode.mode}) settled in ${Date.now() - started}ms`)
+      })
     return () => {
       active = false
+      clearTimeout(timeout)
     }
   }, [address, storageMode.mode])
 
