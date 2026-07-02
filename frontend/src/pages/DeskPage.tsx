@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useParams } from 'react-router-dom'
 import { errorMessage } from '@mosaic/sdk'
-import { api, type Asset, type Desk, type DeskCustody } from '../api'
+import { api, type Asset, type Desk, type DeskCustody, type Fill } from '../api'
 import { NATIVE_EVM_SENTINEL } from '../baseDeployment'
 import { useWallet } from '../WalletContext'
 import OrderBook from '../components/OrderBook'
 import OrderForm from '../components/OrderForm'
+import RecentTrades from '../components/RecentTrades'
 import ShieldUnshieldPanel from '../components/ShieldUnshieldPanel'
 import CancelOrderButton from '../components/CancelOrderButton'
 import Pane from '../components/ui/Pane'
@@ -20,6 +21,7 @@ import { isRecoveryUnlocked, syncRecoveryNow } from '../recovery'
 import { ordersFor, type BookIndexSnapshot } from '../bookIndexer'
 import { useBookIndex } from '../useBookIndex'
 import { setSubmissionMode, submissionMode } from '../directTransaction'
+import { stellarExpertTxUrl } from '../explorer'
 import { useStorageMode, type StorageMode } from '../StorageModeContext'
 
 /** Canonical 32-byte hex tag for comparison: drop any `0x`, lowercase, left-pad to 64. */
@@ -145,6 +147,7 @@ export default function DeskPage() {
   const [desk, setDesk] = useState<Desk | null>(null)
   const [root, setRoot] = useState<string | null>(null)
   const [notes, setNotes] = useState<Note[]>([])
+  const [fills, setFills] = useState<Fill[]>([])
   const [custody, setCustody] = useState<DeskCustody | null>(null)
   const trustlessDesk = storageMode.mode === 'trustless'
   const [error, setError] = useState<string | null>(null)
@@ -192,6 +195,7 @@ export default function DeskPage() {
       setDesk(null)
       setRoot(null)
       setNotes([])
+      setFills([])
       setCustody(null)
       setError(null)
       setNoteIndexError(null)
@@ -294,40 +298,15 @@ export default function DeskPage() {
     notesRef.current = notes
   }, [notes])
 
-  // Poll `filled` events and toast the ones destined for our own order-output notes. The first poll
-  // silently records every existing fill id (so historical fills don't toast); only fills that show
-  // up afterwards — i.e. trades that cross during this session — raise a confirmation.
-  const seenFills = useRef<Set<string>>(new Set())
-  const fillsSeeded = useRef(false)
+  // Poll the desk's public `filled` events for the desk-wide trade tape. Reads straight from the
+  // chain by contract_id (no wallet/auth), so this runs logged-out too and feeds the public view.
   useEffect(() => {
-    if (!deskId || !desk || loggedOut) return
-    seenFills.current = new Set()
-    fillsSeeded.current = false
-    const symOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
-    const decOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
+    if (!deskId) return
     let alive = true
     const tick = () =>
       api
-        .getFills(storageMode.mode, deskId)
-        .then((r) => {
-          if (!alive) return
-          const fills = r.fills ?? []
-          if (!fillsSeeded.current) {
-            fills.forEach((f) => seenFills.current.add(f.id))
-            fillsSeeded.current = true
-            return
-          }
-          const mine = new Set(notesRef.current.map((n) => normTag(n.owner_tag)))
-          const fresh = fills.filter((f) => !seenFills.current.has(f.id))
-          fresh.forEach((f) => seenFills.current.add(f.id))
-          const added = fresh
-            .filter((f) => mine.has(normTag(f.owner_tag)))
-            .map((f) => ({
-              id: f.id,
-              text: `Order filled — traded ${formatAmount(BigInt(f.amount_in), decOf(f.asset_in))} ${symOf(f.asset_in)} → ${formatAmount(BigInt(f.amount_out), decOf(f.asset_out))} ${symOf(f.asset_out)}`,
-            }))
-          if (added.length) setToasts((prev) => [...prev, ...added])
-        })
+        .getFills(effectiveMode, deskId)
+        .then((r) => alive && setFills(r.fills ?? []))
         .catch(() => {})
     tick()
     const h = setInterval(tick, 7000)
@@ -335,7 +314,37 @@ export default function DeskPage() {
       alive = false
       clearInterval(h)
     }
-  }, [storageMode.mode, deskId, desk, loggedOut])
+  }, [effectiveMode, deskId])
+
+  // Toast the fills destined for our own order-output notes. Derives from the shared `fills` state:
+  // the first observation silently records every existing fill id (so historical fills don't toast);
+  // only fills that show up afterwards — i.e. trades that cross during this session — raise one.
+  const seenFills = useRef<Set<string>>(new Set())
+  const fillsSeeded = useRef(false)
+  useEffect(() => {
+    seenFills.current = new Set()
+    fillsSeeded.current = false
+  }, [deskId])
+  useEffect(() => {
+    if (!desk || loggedOut) return
+    const symOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.symbol ?? `#${id}`
+    const decOf = (id: number) => desk.assets.find((a) => a.asset_id === id)?.decimals ?? 7
+    if (!fillsSeeded.current) {
+      fills.forEach((f) => seenFills.current.add(f.id))
+      fillsSeeded.current = true
+      return
+    }
+    const mine = new Set(notesRef.current.map((n) => normTag(n.owner_tag)))
+    const fresh = fills.filter((f) => !seenFills.current.has(f.id))
+    fresh.forEach((f) => seenFills.current.add(f.id))
+    const added = fresh
+      .filter((f) => mine.has(normTag(f.owner_tag)))
+      .map((f) => ({
+        id: f.id,
+        text: `Order filled — traded ${formatAmount(BigInt(f.amount_in), decOf(f.asset_in))} ${symOf(f.asset_in)} → ${formatAmount(BigInt(f.amount_out), decOf(f.asset_out))} ${symOf(f.asset_out)}`,
+      }))
+    if (added.length) setToasts((prev) => [...prev, ...added])
+  }, [fills, desk, loggedOut])
 
   if (error) return <p className="err">{error}</p>
   if (!desk) return <p className="muted">Loading…</p>
@@ -418,6 +427,10 @@ export default function DeskPage() {
                 )}
               </>
             )}
+          </Pane>
+
+          <Pane title="Recent trades">
+            <RecentTrades desk={verifiedDesk} fills={fills} sym={sym} dec={dec} />
           </Pane>
 
           <Pane title="Desk details">
@@ -526,45 +539,51 @@ export default function DeskPage() {
           </Pane>
         </div>
 
-        {/* Center — order book */}
-        <Pane title="Order book">
-          {pairs.length === 0 ? (
-            <p className="muted">
-              {bookIndex.status === 'synced'
-                ? 'No pairs registered.'
-                : 'Waiting for verified book synchronization.'}
-            </p>
-          ) : (
-            <>
-              {pairs.length > 1 && (
-                <Tabs
-                  ariaLabel="Trading pair"
-                  value={String(selectedPair?.pair_id)}
-                  onChange={(id) => setActivePairId(Number(id))}
-                  tabs={pairs.map((p) => ({
-                    id: String(p.pair_id),
-                    label: `${sym(p.base_asset)}/${sym(p.quote_asset)}`,
-                  }))}
-                />
-              )}
-              {selectedPair && (
-                <OrderBook
-                  desk={verifiedDesk}
-                  pair={selectedPair}
-                  sym={sym}
-                  dec={dec}
-                  asks={ordersFor(bookIndex, selectedPair.pair_id, 1)}
-                  bids={ordersFor(bookIndex, selectedPair.pair_id, 0)}
-                  bookIndex={bookIndex}
-                  notes={notes}
-                  userPubkey={address ?? ''}
-                  trustless={trustlessDesk}
-                  onCancel={reloadNotes}
-                />
-              )}
-            </>
-          )}
-        </Pane>
+        {/* Center — order book + trade tape */}
+        <div className="stack">
+          <Pane title="Order book">
+            {pairs.length === 0 ? (
+              <p className="muted">
+                {bookIndex.status === 'synced'
+                  ? 'No pairs registered.'
+                  : 'Waiting for verified book synchronization.'}
+              </p>
+            ) : (
+              <>
+                {pairs.length > 1 && (
+                  <Tabs
+                    ariaLabel="Trading pair"
+                    value={String(selectedPair?.pair_id)}
+                    onChange={(id) => setActivePairId(Number(id))}
+                    tabs={pairs.map((p) => ({
+                      id: String(p.pair_id),
+                      label: `${sym(p.base_asset)}/${sym(p.quote_asset)}`,
+                    }))}
+                  />
+                )}
+                {selectedPair && (
+                  <OrderBook
+                    desk={verifiedDesk}
+                    pair={selectedPair}
+                    sym={sym}
+                    dec={dec}
+                    asks={ordersFor(bookIndex, selectedPair.pair_id, 1)}
+                    bids={ordersFor(bookIndex, selectedPair.pair_id, 0)}
+                    bookIndex={bookIndex}
+                    notes={notes}
+                    userPubkey={address ?? ''}
+                    trustless={trustlessDesk}
+                    onCancel={reloadNotes}
+                  />
+                )}
+              </>
+            )}
+          </Pane>
+
+          <Pane title="Recent trades">
+            <RecentTrades desk={verifiedDesk} fills={fills} sym={sym} dec={dec} />
+          </Pane>
+        </div>
 
         {/* Right rail — trade + fund */}
         <div className="stack">
@@ -703,11 +722,6 @@ function NotesTable({
       )}
     </>
   )
-}
-
-/** Stellar Expert explorer link for a settlement transaction (testnet, matching the app network). */
-function stellarExpertTxUrl(txHash: string): string {
-  return `https://stellar.expert/explorer/testnet/tx/${txHash.replace(/^0x/i, '')}`
 }
 
 /** Full detail for a single note, opened by clicking its row. Shows every stored field —
