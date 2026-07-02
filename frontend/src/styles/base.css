@@ -77,6 +77,9 @@ h3 {
   margin: 0 auto;
   padding: var(--sp-5);
 }
+.demo-recovery-reminder {
+  margin-bottom: var(--sp-4);
+}
 /* The trading workspace fills the width; reading pages (Home/Assets) center a narrower column. */
 .reading {
   max-width: var(--reading-max);
