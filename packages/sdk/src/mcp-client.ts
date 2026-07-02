@@ -5,7 +5,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type {
-  Amount,
   AuthSession,
   BaseDeploymentConfig,
   BaseShieldConfig,
@@ -14,7 +13,6 @@ import type {
   CatalogAsset,
   ClientAction,
   Desk,
-  Field,
   Operation,
   OperationEvent,
   OperationRequest,
@@ -326,17 +324,6 @@ class HttpMcpClient implements McpClient {
 
   listBaseShields(deskId: string): Promise<BaseShieldJob[]> {
     return this.call("list_base_shields", { desk_id: deskId });
-  }
-
-  async baseShield(params: {
-    contractId: string;
-    asset_id: number;
-    amount: Amount;
-    owner_tag: Field;
-    baseTxHash: string;
-  }): Promise<{ owner_tag: Field; txHash: string }> {
-    if (!this.sessionToken) throw new Error("Call authenticate() before baseShield().");
-    return this.call("base_shield", { session: this.sessionToken, ...params });
   }
 }
 

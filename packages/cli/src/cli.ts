@@ -176,16 +176,17 @@ program
   .argument("<deskId>")
   .argument("<assetId>")
   .argument("<amount>")
-  .argument("<baseTxHash>", "the Base deposit transaction hash")
+  .argument("<depositId>", "the MosaicBridge deposit id (bound to the derived note's owner tag)")
   .requiredOption("--mcp <url>", "Mosaic MCP server URL")
-  .description("Shield a Base deposit into a private note via the MCP (auth + prove + mint)")
-  .action(async (deskId, assetId, amount, baseTxHash, opts) => {
+  .description("Shield a Base deposit into a private note via the MCP (enqueue + prove + finality + mint)")
+  .action(async (deskId, assetId, amount, depositId, opts) => {
     const cfg = load();
     const mcp = createMcpClient({ url: opts.mcp });
     await mcp.authenticate(new SecretKeySigner(requireKey(cfg)));
     const { client } = build(cfg, { mcp });
-    const res = await client.shieldFromBase({ deskId, asset_id: Number(assetId), amount, baseTxHash });
-    console.log(`Base shield submitted: ${res.txHash} (owner_tag ${res.owner_tag})`);
+    console.log("Enqueued; proving + finality run on the server (~10-15 min)…");
+    const res = await client.shieldFromBase({ deskId, asset_id: Number(assetId), amount, deposit_id: Number(depositId) });
+    console.log(`Base shield ${res.status}: note ${res.note_id} (owner_tag ${res.owner_tag}, job ${res.job_id})`);
   });
 
 // --- notes ----------------------------------------------------------------------------------------

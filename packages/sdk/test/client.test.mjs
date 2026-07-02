@@ -85,7 +85,7 @@ test("assemble throws when balance is insufficient", async () => {
 test("shieldFromBase errors clearly without an MCP", async () => {
   const c = makeClient();
   await assert.rejects(
-    () => c.shieldFromBase({ deskId: "d", asset_id: 1, amount: "1", baseTxHash: "0x0" }),
+    () => c.shieldFromBase({ deskId: "d", asset_id: 1, amount: "1", deposit_id: 0 }),
     /requires an MCP/,
   );
 });

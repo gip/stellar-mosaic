@@ -4,7 +4,6 @@
 // separate code path.
 
 import type {
-  Amount,
   AssetDef,
   AuthSession,
   BaseDeploymentConfig,
@@ -255,15 +254,6 @@ export interface McpClient {
   baseShieldConfig(deskId: string): Promise<BaseShieldConfig>;
   enqueueBaseShield(deskId: string, body: { expected_bridge: string; deposit_id: number }): Promise<BaseShieldJob>;
   listBaseShields(deskId: string): Promise<BaseShieldJob[]>;
-  /** Run a Base→Stellar shield: prove the Base deposit (RISC Zero/Steel, server-side), await
-   * finality, attest the block, and call `shield_from_base`. Returns the minted note's owner tag. */
-  baseShield(params: {
-    contractId: string;
-    asset_id: number;
-    amount: Amount;
-    owner_tag: Field;
-    baseTxHash: string;
-  }): Promise<{ owner_tag: Field; txHash: string }>;
 }
 
 export interface ClientActionLease {

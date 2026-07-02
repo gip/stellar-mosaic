@@ -55,14 +55,14 @@ test("exposes the MCP-only frontend tool set", async () => {
     "put_wallet_backup",
     "base_shield_config",
     "enqueue_base_shield",
-    "base_shield",
+    "list_base_shields",
     "retry_base_deployment",
   ]) {
     assert.ok(names.has(name), `missing tool ${name}`);
   }
 });
 
-test("wallet auth handshake over the protocol, then base_shield gated by config", async () => {
+test("wallet auth handshake over the protocol, then enqueue_base_shield gated by desk config", async () => {
   const kp = Keypair.random();
   const client = await connect();
 
@@ -79,18 +79,16 @@ test("wallet auth handshake over the protocol, then base_shield gated by config"
   );
   assert.ok(verified.token);
 
+  // Enqueuing against an unknown desk must fail (no desk / no configured bridge to prove against).
   const bs = await client.callTool({
-    name: "base_shield",
+    name: "enqueue_base_shield",
     arguments: {
       session: verified.token,
-      contractId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-      asset_id: 1,
-      amount: "1",
-      owner_tag: "0x00",
-      baseTxHash: "0x00",
+      desk_id: "no-such-desk",
+      body: { expected_bridge: "0xabababababababababababababababababababab", deposit_id: 1 },
     },
   });
-  assert.ok(bs.isError, "base_shield must error when the prover/relayer is not configured");
+  assert.ok(bs.isError, "enqueue_base_shield must error for an unknown/unconfigured desk");
 });
 
 test("activity tools persist scoped activity over the protocol", async () => {
@@ -181,14 +179,12 @@ test("base_shield_config reports desk bridge and worker readiness", async () => 
     await (await connect({
       store,
       baseShield: {
-        proverDir: "/tmp/prover",
-        castBin: "cast",
+        proveServiceUrl: "https://prover.invalid",
+        proveToken: "tok",
         baseRpc: "https://example.invalid",
-        bridgeAddress: "0xabababababababababababababababababababab",
         stellar: {
           rpcUrl: "https://soroban-testnet.stellar.org",
           networkPassphrase: "Test SDF Network ; September 2015",
-          sponsorSecret: "SA_SPONSOR_SECRET",
         },
       },
     })).callTool({
@@ -226,14 +222,12 @@ test("base_shield_config reports unconfigured desks separately", async () => {
     await (await connect({
       store,
       baseShield: {
-        proverDir: "/tmp/prover",
-        castBin: "cast",
+        proveServiceUrl: "https://prover.invalid",
+        proveToken: "tok",
         baseRpc: "https://example.invalid",
-        bridgeAddress: "0xabababababababababababababababababababab",
         stellar: {
           rpcUrl: "https://soroban-testnet.stellar.org",
           networkPassphrase: "Test SDF Network ; September 2015",
-          sponsorSecret: "SA_SPONSOR_SECRET",
         },
       },
     })).callTool({

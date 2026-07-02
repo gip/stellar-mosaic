@@ -3,7 +3,7 @@ import type { BookSide, Desk, MosaicLogger, Operation, SubmitResult } from "@mos
 import { z } from "zod";
 import { AuthService } from "./auth.js";
 import { StellarBookReader } from "./book.js";
-import { runBaseShield, type BaseShieldConfig as RunnerBaseShieldConfig } from "./baseShield.js";
+import type { BaseShieldConfig } from "./baseShield.js";
 import { SponsoredStellarDeployHandlers } from "./deploy.js";
 import { createStderrLogger } from "./logging.js";
 import { StellarCliRelayer } from "./relayer.js";
@@ -42,8 +42,8 @@ export interface MosaicMcpOptions {
   deploy?: DeployHandlers;
   books?: BookHandlers;
   logger?: MosaicLogger;
-  /** Legacy direct Base-shield runner; the durable queued flow is exposed separately. */
-  baseShield?: RunnerBaseShieldConfig;
+  /** Remote prove-service config for the durable Base-shield worker; when set, the worker runs. */
+  baseShield?: BaseShieldConfig;
 }
 
 type ToolResult = { content: { type: "text"; text: string }[] };
@@ -334,27 +334,6 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   );
   reg("list_base_shields", { description: "List Base shield jobs.", inputSchema: { desk_id: z.string() } }, async ({ desk_id }) =>
     ok(await store.listBaseShields(String(desk_id))),
-  );
-
-  reg(
-    "base_shield",
-    {
-      description: "Legacy Base -> Stellar shield runner. Requires an authenticated session.",
-      inputSchema: { session: z.string(), contractId: z.string(), asset_id: z.number(), amount: z.string(), owner_tag: z.string(), baseTxHash: z.string() },
-    },
-    async (args) => {
-      await session(auth, args);
-      if (!opts.baseShield) throw new Error("Base shielding is not configured on this MCP server.");
-      return ok(
-        await runBaseShield(opts.baseShield, {
-          contractId: String(args.contractId),
-          asset_id: Number(args.asset_id),
-          amount: String(args.amount),
-          owner_tag: String(args.owner_tag),
-          baseTxHash: String(args.baseTxHash),
-        }),
-      );
-    },
   );
 
   return server;

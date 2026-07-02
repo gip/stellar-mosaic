@@ -58,7 +58,8 @@ accepts this per the equivalence assumption; a Stellar→Base withdraw leg is de
 | WS4 `shield_from_base` + registry + replay | `contracts/settlement/src/lib.rs` | ✅ 10 tests |
 | WS5 indexer cross-chain note recovery | `tools/indexer`, `backend/` | ✅ works unchanged (shared `shielded` event) |
 | WS6 proving + receipt → seal | `bridge-prover/host` | ✅ local Groth16 (`--prove`) |
-| WS6-backend orchestration worker | `backend/src/base_shield.rs` | ✅ implemented (live run pending infra) |
+| WS6-prover async prove service | `backend/` (`prove_manager.rs`, `prove.rs`) | ✅ submit/poll HTTP wrapper around `bridge-prover` |
+| WS6-worker Base-shield lifecycle | `packages/mcp` (`baseShieldWorker.ts`) | ✅ durable submit → poll → finality → mint |
 | WS7 frontend (Base wallet + shield + status) | `frontend/` | ✅ "Shield from Base" tab |
 | WS8 end-to-end Base-Sepolia ↔ Stellar-testnet demo | `scripts/10_demo_base_shield_testnet.sh` | ✅ validated live (2026-06-21) |
 
@@ -90,20 +91,43 @@ Desk creation deploys this bridge in one of two ways, by mode:
 Both paths deploy through the canonical CREATE2 proxy (`buildBridgeDeployment` in the SDK), so the
 init-code and resulting address derivation are byte-identical across browser and server.
 
-## Backend automation (WS6-backend)
+## Server automation (WS6): a prove service + an MCP worker
 
-`backend/src/base_shield.rs` is a durable, crash-resumable worker that automates the validated
-script server-side (proving can't run in a browser). Enqueue a job with
-`GET /desks/:id/base-shield-config` reports whether the desk's on-chain bridge configuration and the
-backend worker are ready. The frontend reads the bridge from this endpoint rather than accepting a
-manual address. `POST /desks/:id/base-shields {expected_bridge, deposit_id}` re-reads the contract,
-rejects configuration drift, and advances a `base_shields` row through
-`proving → awaiting_finality → minting → active|failed`, persisting the proof in SQL so a restart
-resumes. It invokes `MOSAIC_PROVER_DIR/run-host -- --prove` (proving at a recent in-window block),
-polls Base `finalized` via `cast` (prove-then-finalize), then attests + `shield_from_base` via the
-desk sponsor. The launcher fingerprints the embedded guest and host build inputs, so unchanged jobs
-reuse the release binary without asking Cargo to relink the prover stack. Disabled unless
-`MOSAIC_BASE_RPC` is set. Proving is local Groth16; swapping that step for the Boundless marketplace
+Proving can't run in a browser (Steel/Groth16), and a single proof takes ~10 minutes — too long to
+hold an HTTP connection open. So the server side is split into two cooperating pieces plus the
+unchanged `bridge-prover`:
+
+**The prove service (`backend/`).** A tiny, stateless-by-design async job server that wraps
+`bridge-prover/run-host`. Two token-gated endpoints (bearer `MOSAIC_PROVER_TOKEN`):
+
+- `POST /prove/base-deposit {job_id, bridge, deposit_id}` — idempotent by `job_id`: returns `done`
+  if artifacts already sit on disk (`<prover_dir>/out/<job_id>/{seal,journal}.bin`), `running` if a
+  task is in flight, else spawns the prover in the background and returns immediately.
+- `GET /prove/base-deposit/:job_id` — `running | done | error | not_started`; `done` carries
+  `{seal_hex, journal_hex, block_number, block_hash}`.
+
+Proving is serialized (a permit semaphore of 1) and proves at a recent in-window head, which the
+seal commits and never expires. Disk artifacts are the durable "done" cache, so a completed proof
+survives a service restart; an interrupted one reports `not_started` and is safely re-proven.
+Requires `MOSAIC_BASE_RPC`, `MOSAIC_PROVER_DIR`, `MOSAIC_CAST_BIN`, `MOSAIC_PROVER_TOKEN`.
+
+**The MCP worker (`packages/mcp/src/baseShieldWorker.ts`).** A durable, crash-resumable loop that
+owns the whole lifecycle and drives the prove service by **submit + poll** (never a held
+connection). It advances one `base_shields` job per tick through
+`proving → awaiting_finality → minting → active|failed`:
+
+- `proving` — `submitProve` (idempotent), then `pollProve`; on `done` it persists
+  seal/journal + committed block and moves to `awaiting_finality`.
+- `awaiting_finality` — a direct `eth_getBlockByNumber("finalized")` JSON-RPC check against
+  `MOSAIC_BASE_RPC` (no `eth_getProof`, no foundry on the MCP host) — the prove-then-finalize design.
+- `minting` — `attest_base_block` + `shield_from_base` via the desk sponsor (the `stellar` CLI).
+
+The job row (with persisted seal/journal) survives an MCP restart, so a mid-flight restart just
+resubmits or re-polls; nothing re-holds a connection or loses work. Enqueue is drift-guarded: a
+bridge that isn't the desk's configured `base_deployment.bridge_address` is rejected. The worker runs
+only when the MCP server is pointed at a prove service via `MOSAIC_PROVE_SERVICE_URL`,
+`MOSAIC_PROVE_TOKEN`, and `MOSAIC_BASE_RPC` (plus `MOSAIC_RPC` / `MOSAIC_NETWORK_PASSPHRASE` for the
+mint). Proving is local Groth16 on the prove box; swapping that step for the Boundless marketplace
 (same router-compatible seal) is a drop-in future change.
 
 ## The journal — the WS2 ↔ WS4 contract

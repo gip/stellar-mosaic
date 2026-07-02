@@ -1,74 +1,30 @@
 use std::path::PathBuf;
 
-/// Runtime configuration, read from the environment with sensible testnet defaults.
+/// Runtime configuration for the prove service, read from the environment with sensible defaults.
+///
+/// This service does one thing: prove Base deposits with the `bridge-prover` (STARK -> Groth16) and
+/// serve the artifacts over an async submit/poll HTTP API. It holds no desk state and never talks to
+/// Stellar — the MCP server owns finality waiting and the on-chain `shield_from_base` submission.
 #[derive(Clone, Debug)]
 pub struct Config {
     /// Bind address for the HTTP server.
     pub bind: String,
-    /// Stellar network passphrase name understood by the CLI (e.g. `testnet`).
-    pub network: String,
-    /// Path to the `stellar` CLI binary.
-    pub stellar_bin: String,
-    /// SQLite database file.
-    pub db_path: PathBuf,
-    /// SQLx database URL. PostgreSQL is required for multi-instance production; SQLite is used
-    /// for local development. `MOSAIC_DB` remains a compatibility fallback.
-    pub database_url: String,
-    /// Directory holding the build output `settlement.wasm` (git-ignored).
-    pub artifacts_dir: PathBuf,
-    /// Directory holding the committed lift/unshield/cancel VK files used at deploy.
-    pub vks_dir: PathBuf,
-    /// Fallback source identity (a `stellar keys` name) for read-only simulations on desks that
-    /// have no stored sponsor key (e.g. imported desks). Reads never submit, so this only needs to
-    /// resolve to a valid account address.
-    pub read_identity: String,
-    /// Base (Sepolia) RPC URL. When set, the Base-shield worker (WS6) runs; when unset it is
-    /// disabled and `base_shields` jobs are never advanced.
+    /// Base (Sepolia) RPC URL. Required to prove; when unset, prove requests are rejected.
     pub base_rpc: Option<String>,
-    /// `cast` (foundry) binary, used to read the Base chain head + finalized block.
+    /// `cast` (foundry) binary, used to read the Base chain head the proof commits to.
     pub cast_bin: String,
-    /// Directory of the `bridge-prover` workspace (must contain the `run-host` launcher).
+    /// Directory of the `bridge-prover` workspace (must contain the `run-host` launcher). Proof
+    /// artifacts are written under `<prover_dir>/out/<job_id>/`.
     pub prover_dir: PathBuf,
-    /// Bearer token required by internal prove-only endpoints. If unset, prove endpoints reject.
+    /// Bearer token required on the prove endpoints. If unset, every prove request is rejected.
     pub prover_token: Option<String>,
-    /// Pinned Stellar verifier and RISC Zero/Steel identifiers used when attaching a Base bridge.
-    pub base_router: String,
-    pub base_image_id: String,
-    pub base_config_id: String,
 }
 
 impl Config {
     pub fn from_env() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let db_path = PathBuf::from(env(
-            "MOSAIC_DB",
-            cwd.join("data")
-                .join("mosaic.db")
-                .to_string_lossy()
-                .as_ref(),
-        ));
-        let database_url = std::env::var("MOSAIC_DATABASE_URL").unwrap_or_else(|_| {
-            if db_path == std::path::Path::new(":memory:") {
-                "sqlite::memory:".into()
-            } else {
-                format!("sqlite://{}?mode=rwc", db_path.to_string_lossy())
-            }
-        });
         Config {
             bind: env("MOSAIC_BIND", "127.0.0.1:8787"),
-            network: env("MOSAIC_NETWORK", "testnet"),
-            stellar_bin: env("MOSAIC_STELLAR_BIN", "stellar"),
-            db_path,
-            database_url,
-            artifacts_dir: PathBuf::from(env(
-                "MOSAIC_ARTIFACTS",
-                cwd.join("artifacts").to_string_lossy().as_ref(),
-            )),
-            vks_dir: PathBuf::from(env(
-                "MOSAIC_VKS",
-                cwd.join("vks").to_string_lossy().as_ref(),
-            )),
-            read_identity: env("MOSAIC_READ_IDENTITY", "m0"),
             base_rpc: std::env::var("MOSAIC_BASE_RPC")
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -80,40 +36,13 @@ impl Config {
             prover_token: std::env::var("MOSAIC_PROVER_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty()),
-            base_router: env(
-                "MOSAIC_BASE_ROUTER",
-                "CB3ISULTPMQXHUH6BVRO7VQIQE3TTDRGSHWBJ72V7GRO6VF63BMGNWOU",
-            ),
-            base_image_id: env(
-                "MOSAIC_BASE_IMAGE_ID",
-                "69c430391c303a1db21811ee9cc29a9e6997ce2d0dbcd62cdd0539ca5732ca03",
-            ),
-            base_config_id: env(
-                "MOSAIC_BASE_CONFIG_ID",
-                "3519660d6ecbd34367740f5ca18449cba8b389594f69f177bbf21c46e505c61e",
-            ),
         }
     }
-}
 
-impl Config {
-    pub fn wasm_path(&self) -> PathBuf {
-        self.artifacts_dir.join("settlement.wasm")
-    }
-    pub fn lift_vk(&self) -> PathBuf {
-        self.vks_dir.join("lift_vk")
-    }
-    pub fn unshield_vk(&self) -> PathBuf {
-        self.vks_dir.join("unshield_vk")
-    }
-    pub fn cancel_vk(&self) -> PathBuf {
-        self.vks_dir.join("cancel_vk")
-    }
-    pub fn join_vk(&self) -> PathBuf {
-        self.vks_dir.join("join_vk")
-    }
-    pub fn bridge_artifact(&self) -> PathBuf {
-        self.artifacts_dir.join("MosaicBridge.json")
+    /// The per-job proof output directory (`<prover_dir>/out/<job_id>/`). Its presence of both
+    /// `seal.bin` and `journal.bin` is the durable "this proof is done" signal across restarts.
+    pub fn out_dir(&self, job_id: &str) -> PathBuf {
+        self.prover_dir.join("out").join(job_id)
     }
 }
 

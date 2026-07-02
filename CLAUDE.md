@@ -43,9 +43,13 @@ does, the committed image ID and the on-chain config must be regenerated togethe
   root is). Reuses the contract's exact Poseidon2 via a local Soroban host, so its roots are
   byte-identical by construction. The `witness` bin replays an event log and prints `Prover.toml`
   path witnesses (used by `tests/fixtures/regen.sh` and by wallets before proving).
-- `backend/` (crate `mosaic-backend`, axum) — durable per-wallet FIFO operation queues, desk
-  registry, event indexer, fully-sponsored relayer, and opaque AES-GCM wallet backups. Holds only
-  public workflow state; private notes and proving stay in the browser.
+- `backend/` (crate `mosaic-backend`, axum) — the Base-deposit **prove service**: a token-gated
+  async submit/poll HTTP wrapper (`prove_manager.rs`, `prove.rs`) around `bridge-prover` (STARK →
+  Groth16). It holds no desk state and never talks to Stellar. Desk registry, queues, relayer, and
+  wallet backups now live in the **MCP server** (`packages/mcp`), which also runs the durable
+  Base-shield lifecycle worker (`baseShieldWorker.ts`) that drives this service by submit+poll and
+  owns finality + `shield_from_base`. `backend/vks/` + `backend/artifacts/` remain the canonical VK
+  and wasm/ABI outputs consumed by scripts, the SDK, and the frontend.
 - `frontend/` — Vite/React/TypeScript web client. Wallet login (Freighter), shield, order book,
   in-browser Noir proving (`@noir-lang/noir_js` + `@aztec/bb.js`).
 - `evm/` — Foundry project. `MosaicBridge.sol`: the Base-side one-way peg that emits a `Shielded`
@@ -74,13 +78,15 @@ static-config / asset-class checks (constructor rejects bad asset/pair config; `
 `BaseRepresented` asset; `shield_from_base` rejects a `Stellar`-only asset — see `tests/base_shield.rs`).
 Proof fixtures live in `contracts/settlement/tests/fixtures/` (regenerate via its `regen.sh`).
 
-**Backend** (needs `stellar` CLI on PATH, `artifacts/settlement.wasm`, and `vks/{lift,unshield,cancel}_vk`):
+**Backend** — the Base-deposit prove service (needs the `bridge-prover` `run-host` toolchain +
+foundry `cast` on PATH):
 ```bash
 cd backend
 cargo run   # listens on 127.0.0.1:8787
 ```
-Config via env: `MOSAIC_BIND`, `MOSAIC_NETWORK` (default `testnet`), `MOSAIC_DATABASE_URL`
-(`postgres://...` or `sqlite://...`), `MOSAIC_ARTIFACTS`, `MOSAIC_READ_IDENTITY` (default `m0`).
+Config via env: `MOSAIC_BIND`, `MOSAIC_BASE_RPC`, `MOSAIC_PROVER_DIR` (the `bridge-prover` dir),
+`MOSAIC_CAST_BIN`, `MOSAIC_PROVER_TOKEN` (shared bearer with the MCP worker). Without `MOSAIC_BASE_RPC`
+or `MOSAIC_PROVER_TOKEN`, prove requests are rejected.
 
 **Frontend:** (the repo is a **pnpm workspace** — `pnpm install` once at the root; never `npm install`)
 ```bash
