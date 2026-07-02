@@ -5,9 +5,9 @@ import ActivityGroupList from './ActivityGroupList'
 import { activityGroups, terminalStatus } from './activityModel'
 
 export default function ActivityDrawer() {
-  const { operations, activities } = useActivity()
+  const { operations, activities, catalog } = useActivity()
   const [open, setOpen] = useState(false)
-  const groups = activityGroups(activities, operations)
+  const groups = activityGroups(activities, operations, catalog)
   const recentGroups = groups.slice(0, 8)
   const activeCount = groups.filter((group) => !terminalStatus(group.status)).length
   return (

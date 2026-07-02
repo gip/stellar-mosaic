@@ -68,16 +68,19 @@ export interface MosaicStore {
   listBaseShields(deskId: string): Promise<BaseShieldJob[]>;
   /** Oldest base-shield job still in a non-terminal state (proving|awaiting_finality|minting). */
   nextBaseShield(): Promise<BaseShieldJob | null>;
-  /** Persist the proof + committed block and advance the job to `awaiting_finality`. */
+  /** Persist the proof + committed block and advance the job. When `requireFinality` is true the job
+   * moves to `awaiting_finality` (the worker then waits for Base L1 finality); otherwise it goes
+   * straight to `minting`. */
   baseShieldProved(
     id: string,
     blockNumber: number,
     blockHash: string,
     sealHex: string,
     journalHex: string,
+    requireFinality: boolean,
   ): Promise<void>;
   /** Move a job to a new status (e.g. `minting`, `active`). */
-  baseShieldStatus(id: string, status: string): Promise<void>;
+  baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void>;
   /** Move a job to the terminal `failed` state with a message. */
   baseShieldFailed(id: string, error: string): Promise<void>;
 }
@@ -490,20 +493,22 @@ export class MemoryMosaicStore implements MosaicStore {
     blockHash: string,
     sealHex: string,
     journalHex: string,
+    requireFinality: boolean,
   ): Promise<void> {
     const job = this.baseShieldById(id);
     if (!job) throw new Error(`base-shield job ${id} not found`);
-    job.status = "awaiting_finality";
+    job.status = requireFinality ? "awaiting_finality" : "minting";
     job.block_number = blockNumber;
     job.block_hash = blockHash;
     job.seal_hex = sealHex;
     job.journal_hex = journalHex;
   }
 
-  async baseShieldStatus(id: string, status: string): Promise<void> {
+  async baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void> {
     const job = this.baseShieldById(id);
     if (!job) throw new Error(`base-shield job ${id} not found`);
     job.status = status;
+    if (stellarTxHash) job.stellar_tx_hash = stellarTxHash;
   }
 
   async baseShieldFailed(id: string, error: string): Promise<void> {
@@ -962,12 +967,13 @@ export class SqliteMosaicStore implements MosaicStore {
     blockHash: string,
     sealHex: string,
     journalHex: string,
+    requireFinality: boolean,
   ): Promise<void> {
     const row = this.baseShieldRowById(id);
     if (!row) throw new Error(`base-shield job ${id} not found`);
     this.writeBaseShield(row.key, {
       ...row.job,
-      status: "awaiting_finality",
+      status: requireFinality ? "awaiting_finality" : "minting",
       block_number: blockNumber,
       block_hash: blockHash,
       seal_hex: sealHex,
@@ -975,10 +981,10 @@ export class SqliteMosaicStore implements MosaicStore {
     });
   }
 
-  async baseShieldStatus(id: string, status: string): Promise<void> {
+  async baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void> {
     const row = this.baseShieldRowById(id);
     if (!row) throw new Error(`base-shield job ${id} not found`);
-    this.writeBaseShield(row.key, { ...row.job, status });
+    this.writeBaseShield(row.key, { ...row.job, status, ...(stellarTxHash ? { stellar_tx_hash: stellarTxHash } : {}) });
   }
 
   async baseShieldFailed(id: string, error: string): Promise<void> {

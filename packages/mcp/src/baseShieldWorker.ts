@@ -78,10 +78,16 @@ async function advanceProving(store: MosaicStore, config: BaseShieldConfig, job:
   await submitProve(config, { jobId: job.id, bridge: job.bridge, depositId: job.deposit_id });
   const result = await pollProve(config, job.id);
   switch (result.status) {
-    case "done":
-      await store.baseShieldProved(job.id, result.block_number, result.block_hash, result.seal_hex, result.journal_hex);
-      log.info(`base-shield ${job.id}: proved at block ${result.block_number}; awaiting finality`);
+    case "done": {
+      // Per-desk gate: only wait for Base L1 finality when the desk opted in (default off).
+      const desk = await store.getDesk(job.desk_id);
+      const requireFinality = desk.base_deployment?.require_finality === true;
+      await store.baseShieldProved(job.id, result.block_number, result.block_hash, result.seal_hex, result.journal_hex, requireFinality);
+      log.info(
+        `base-shield ${job.id}: proved at block ${result.block_number}; ${requireFinality ? "awaiting finality" : "minting (finality wait off)"}`,
+      );
       break;
+    }
     case "error":
       await store.baseShieldFailed(job.id, `prove: ${result.error}`);
       log.warn(`base-shield ${job.id}: prove failed: ${result.error}`);
@@ -122,7 +128,7 @@ async function advanceMinting(store: MosaicStore, config: BaseShieldConfig, job:
       sealHex: job.seal_hex,
       journalHex: job.journal_hex,
     });
-    await store.baseShieldStatus(job.id, "active");
+    await store.baseShieldStatus(job.id, "active", txHash);
     log.info(`base-shield ${job.id}: minted (${txHash})`);
   } catch (e) {
     await store.baseShieldFailed(job.id, `mint: ${e instanceof Error ? e.message : String(e)}`);

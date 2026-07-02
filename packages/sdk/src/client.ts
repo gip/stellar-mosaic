@@ -917,6 +917,8 @@ export class MosaicClient {
       router_id: string;
       image_id: string;
       config_id: string;
+      /** Wait for Base L1 finality before minting shielded notes. Default false. */
+      require_finality?: boolean;
     };
   }): Promise<DeskConfig> {
     const actionId = this.actionId();
@@ -987,6 +989,7 @@ export class MosaicClient {
           bridge_address: null,
           error: null,
           assets: baseAssets.map((asset, index) => ({ asset_id: asset.asset_id, symbol: asset.symbol, token: tokens[index] })),
+          require_finality: params.base.require_finality === true,
         };
         partialDesk = desk;
         await this.recordActivity({

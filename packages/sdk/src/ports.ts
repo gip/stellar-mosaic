@@ -209,6 +209,8 @@ export interface McpClient {
     base_assets?: { asset_id: number; symbol: string; token: string }[];
     /** Legacy browser-wallet deploy shape; superseded by server-side deployment. */
     base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] };
+    /** Wait for Base L1 finality before minting shielded notes. Default false. */
+    require_finality?: boolean;
   }): Promise<Desk>;
   baseDeploymentConfig(): Promise<BaseDeploymentConfig>;
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk>;

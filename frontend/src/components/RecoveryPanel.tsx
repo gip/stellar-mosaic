@@ -1,15 +1,34 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { errorMessage } from '@mosaic/sdk'
 import { Link } from 'react-router-dom'
 import { useWallet } from '../WalletContext'
 import { useRecovery } from '../RecoveryContext'
+
+// Returns true only once `value` has stayed true continuously for `delayMs`; falls back to false the
+// moment `value` clears. State is only set from inside timers (never synchronously in the effect
+// body) to satisfy react-hooks/set-state-in-effect.
+function useSettled(value: boolean, delayMs: number): boolean {
+  const [settled, setSettled] = useState(false)
+  useEffect(() => {
+    const handle = window.setTimeout(() => setSettled(value), value ? delayMs : 0)
+    return () => window.clearTimeout(handle)
+  }, [value, delayMs])
+  return settled
+}
 
 export function RecoveryNotice() {
   const { address } = useWallet()
   const recovery = useRecovery()
   const [error, setError] = useState<string | null>(null)
 
-  if (!address || (recovery.unlocked && !recovery.syncing && !recovery.error && !error)) return null
+  const visibleError = error ?? recovery.error
+  // The demo auto-establishes a local recovery session, so `unlocked` briefly dips false (and
+  // `syncing` briefly toggles) during account re-selection, mode switches, and note operations.
+  // Debounce the non-error notice so that momentary re-establishment doesn't flash the banner; real
+  // errors still surface immediately.
+  const pendingNotice = useSettled(!!address && !visibleError && (!recovery.unlocked || recovery.syncing), 700)
+
+  if (!address || (!visibleError && !pendingNotice)) return null
 
   async function run(fn: () => Promise<void>) {
     setError(null)
@@ -20,7 +39,6 @@ export function RecoveryNotice() {
     }
   }
 
-  const visibleError = error ?? recovery.error
   const tone = visibleError ? 'err' : recovery.unlocked ? 'info' : 'warn'
   const message = visibleError
     ? visibleError

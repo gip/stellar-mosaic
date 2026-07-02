@@ -369,6 +369,7 @@ export const api = {
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
     base_assets?: { asset_id: number; symbol: string; token: string }[]
+    require_finality?: boolean
   }) => wrap(async () => {
     const desk = (await mcp.createDesk(body)) as Desk
     deskCache('trusted').set(desk.id, desk)
@@ -379,6 +380,7 @@ export const api = {
     assets: { catalog_id: string; asset_id: number; symbol: string; token: string; decimals: number; kind: AssetKind }[]
     pairs: { base_asset: number; quote_asset: number }[]
     base_assets?: { asset_id: number; symbol: string; token: string }[]
+    require_finality?: boolean
   }) => wrap(async () => {
     const address = await currentAddress()
     if (!address) throw new ApiError(401, 'Connect Freighter before deploying a trustless desk.')
@@ -412,6 +414,7 @@ export const api = {
               router_id: BASE_ROUTER_ID,
               image_id: release?.bridge_image_id ?? '',
               config_id: BASE_SEPOLIA_CONFIG_ID,
+              require_finality: body.require_finality === true,
             },
           }
         : {}),

@@ -24,7 +24,14 @@ export interface ActivityGroup {
   lines: TransactionLine[]
 }
 
-export function activityGroups(activities: ActivityEvent[], operations: Operation[]): ActivityGroup[] {
+/** Resolves an asset id to its human-readable symbol/decimals for a given desk, so summaries can say
+ * "10 USDC" instead of "asset #2". Backed by the loaded desk catalog; optional so callers/tests that
+ * lack it still get the id-based fallback. */
+export interface AssetCatalog {
+  asset(deskId: string | undefined, assetId: number): { symbol: string; decimals: number } | undefined
+}
+
+export function activityGroups(activities: ActivityEvent[], operations: Operation[], catalog?: AssetCatalog): ActivityGroup[] {
   const operationById = new Map(operations.map((operation) => [operation.id, operation]))
   const txGroups = new Map<string, { key: string; action: ActivityAction }>()
   const groups: ActivityGroup[] = []
@@ -77,7 +84,7 @@ export function activityGroups(activities: ActivityEvent[], operations: Operatio
     const key = `operation:${operation.id}`
     const group = addGroup(key, actionForOperationKind(operation.kind))
     group.status = operation.status
-    group.summary = summaryForOperation(operation, activityByGroup.get(key) ?? [])
+    group.summary = summaryForOperation(operation, activityByGroup.get(key) ?? [], catalog)
     group.createdAt = operation.updated_at ?? operation.created_at
   }
 
@@ -89,7 +96,8 @@ export function activityGroups(activities: ActivityEvent[], operations: Operatio
     const groupActivities = activityByGroup.get(group.id) ?? []
     group.status = displayStatus(operation?.status ?? latestStatus(groupActivities))
     group.error = operation?.error ?? undefined
-    group.summary ||= operation ? summaryForOperation(operation, groupActivities) : summaryForActivities(group.action, groupActivities)
+    const deskId = operation?.desk_id ?? firstDeskId(groupActivities)
+    group.summary ||= operation ? summaryForOperation(operation, groupActivities, catalog) : summaryForActivities(group.action, groupActivities, catalog, deskId)
     group.createdAt = Math.max(
       operation?.updated_at ?? operation?.created_at ?? 0,
       ...groupActivities.map((activity) => activity.created_at ?? 0),
@@ -303,14 +311,19 @@ function statusRank(status?: string) {
   return ({ prepared: 1, submitted: 2, running: 3, succeeded: 4, failed: 4, cancelled: 4 } as Record<string, number>)[status ?? ''] ?? 0
 }
 
-function summaryForOperation(operation: Operation, activities: ActivityEvent[]) {
+function summaryForOperation(operation: Operation, activities: ActivityEvent[], catalog?: AssetCatalog) {
   const request = operation.request
-  const fromActivity = summaryForActivities(actionForOperationKind(operation.kind), activities)
+  const fromActivity = summaryForActivities(actionForOperationKind(operation.kind), activities, catalog, operation.desk_id)
   switch (request.kind) {
     case 'shield':
-      return `Asset #${request.asset_id}, ${request.amount}`
-    case 'unshield':
-      return `Asset #${request.asset_id}, ${request.amount} to ${request.recipient}`
+      return appendShieldSource(
+        assetAmountLabel(activities, catalog, operation.desk_id, { assetId: request.asset_id, amount: request.amount }) ?? 'Shield funds',
+        activities,
+      )
+    case 'unshield': {
+      const asset = assetAmountLabel(activities, catalog, operation.desk_id, { assetId: request.asset_id, amount: request.amount })
+      return [asset ?? `asset #${request.asset_id}, ${request.amount}`, `to ${request.recipient}`].join(' ')
+    }
     case 'place_order':
       return orderSummary({ activities }) ?? `Pair #${request.pair_id}, ${request.side}, in ${request.amount_in}, min out ${request.min_out}${request.partial_allowed ? ', partial' : ''}`
     case 'cancel_order': {
@@ -324,7 +337,7 @@ function summaryForOperation(operation: Operation, activities: ActivityEvent[]) 
   }
 }
 
-function summaryForActivities(action: ActivityAction, activities: ActivityEvent[]) {
+function summaryForActivities(action: ActivityAction, activities: ActivityEvent[], catalog?: AssetCatalog, deskId?: string) {
   const metadata = { activities }
   switch (action) {
     case 'Deploy': {
@@ -336,10 +349,10 @@ function summaryForActivities(action: ActivityAction, activities: ActivityEvent[
         .join(', ') || 'Desk deployment'
     }
     case 'Shield':
-      return amountAssetSummary(metadata) ?? 'Shield funds'
+      return appendShieldSource(assetAmountLabel(activities, catalog, deskId) ?? 'Shield funds', activities)
     case 'Unshield': {
       const recipient = metadataString(metadata, ['recipient'])
-      return [amountAssetSummary(metadata), recipient ? `to ${recipient}` : undefined].filter(Boolean).join(', ') || 'Unshield funds'
+      return [assetAmountLabel(activities, catalog, deskId), recipient ? `to ${recipient}` : undefined].filter(Boolean).join(', ') || 'Unshield funds'
     }
     case 'Place Order': {
       const formatted = orderSummary(metadata)
@@ -365,14 +378,56 @@ function summaryForActivities(action: ActivityAction, activities: ActivityEvent[
   }
 }
 
-function amountAssetSummary(value: unknown) {
-  const amount = metadataString(value, ['amount'])
-  const symbol = metadataString(value, ['symbol'])
-  const assetId = metadataNumber(value, ['asset_id'])
-  const decimals = metadataNumber(value, ['decimals'])
+// A "<amount> <symbol>" label for a shield/unshield. Symbol and decimals come from the linked
+// activity metadata first (trustless mode records them), then the desk catalog (trusted mode, where
+// the backend events carry neither), so we render the asset name rather than "asset #2". `fallback`
+// supplies the operation request's asset id + raw amount when no activity metadata exists yet.
+function assetAmountLabel(
+  activities: ActivityEvent[],
+  catalog: AssetCatalog | undefined,
+  deskId: string | undefined,
+  fallback?: { assetId: number; amount: string },
+): string | undefined {
+  const metadata = { activities }
+  const amount = metadataString(metadata, ['amount']) ?? fallback?.amount
   if (!amount) return undefined
+  const assetId = metadataNumber(metadata, ['asset_id']) ?? fallback?.assetId
+  const resolved = assetId === undefined ? undefined : catalog?.asset(deskId, assetId)
+  const symbol = metadataString(metadata, ['symbol']) ?? resolved?.symbol
+  const decimals = metadataNumber(metadata, ['decimals']) ?? resolved?.decimals
   const displayAmount = decimals === undefined ? amount : formatAmount(BigInt(amount), decimals)
   return `${displayAmount} ${symbol ?? (assetId === undefined ? 'units' : `asset #${assetId}`)}`
+}
+
+// Append the funding source to a shield summary: "10 USDC from Base Sepolia" / "… from Stellar
+// Testnet". A shield is Base-sourced when any linked activity is a `shield_from_base` step or carries
+// a Base (0x…) transaction; otherwise it settled directly on Stellar.
+function appendShieldSource(label: string, activities: ActivityEvent[]): string {
+  const source = shieldSourceLabel(activities)
+  return source ? `${label} from ${source}` : label
+}
+
+function shieldSourceLabel(activities: ActivityEvent[]): string | undefined {
+  const fromBase = activities.some((activity) =>
+    activity.method === 'shield_from_base' ||
+    activity.action === 'shield_from_base' ||
+    metadataString(activity.metadata, ['source']) === 'base' ||
+    transactionHashes(activity).some(isBaseTx),
+  )
+  if (fromBase) return 'Base Sepolia'
+  const network = activities.map((activity) => activity.network).find(Boolean)
+  return stellarNetworkLabel(network)
+}
+
+function stellarNetworkLabel(network?: string): string {
+  const n = String(network ?? '').toLowerCase()
+  if (n.includes('public') || n.includes('mainnet')) return 'Stellar Mainnet'
+  if (n.includes('futurenet')) return 'Stellar Futurenet'
+  return 'Stellar Testnet'
+}
+
+function firstDeskId(activities: ActivityEvent[]): string | undefined {
+  return activities.map((activity) => activity.desk_id).find((id): id is string => !!id)
 }
 
 function refundSummary(activities: ActivityEvent[]) {

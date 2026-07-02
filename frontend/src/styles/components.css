@@ -411,6 +411,7 @@ tbody tr:hover {
 }
 .segmented {
   display: inline-flex;
+  gap: 0;
   border: 1px solid var(--line-strong);
   border-radius: var(--r-1);
   overflow: hidden;

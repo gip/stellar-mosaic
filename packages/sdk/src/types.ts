@@ -194,6 +194,9 @@ export interface BaseDeployment {
   bridge_address: string | null;
   error: string | null;
   assets: BaseAssetMapping[];
+  /** When true, the base-shield worker waits for Base L1 finality before minting. Default false
+   * (absent is treated as false): mint as soon as the deposit is proven, accepting Base reorg risk. */
+  require_finality?: boolean;
 }
 
 export interface Desk {
@@ -315,5 +318,8 @@ export interface BaseShieldJob {
   block_hash?: string | null;
   seal_hex?: string | null;
   journal_hex?: string | null;
+  /** Stellar tx hash of the `shield_from_base` mint, set once the worker mints the note. Lets the UI
+   * link the Stellar leg of a Base shield alongside the Base Sepolia deposit tx. */
+  stellar_tx_hash?: string | null;
   error?: string | null;
 }

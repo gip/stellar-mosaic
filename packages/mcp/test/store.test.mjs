@@ -142,7 +142,7 @@ async function assertBaseShieldLifecycle(store) {
   const next = await store.nextBaseShield();
   assert.equal(next.id, job.id, "proving job is picked up");
 
-  await store.baseShieldProved(job.id, 42, "cd".repeat(32), "aa", "bb");
+  await store.baseShieldProved(job.id, 42, "cd".repeat(32), "aa", "bb", true);
   const proved = (await store.listBaseShields("desk-base")).find((j) => j.id === job.id);
   assert.equal(proved.status, "awaiting_finality");
   assert.equal(proved.block_number, 42);
@@ -153,8 +153,10 @@ async function assertBaseShieldLifecycle(store) {
   await store.baseShieldStatus(job.id, "minting");
   assert.equal((await store.nextBaseShield()).status, "minting");
 
-  await store.baseShieldStatus(job.id, "active");
+  await store.baseShieldStatus(job.id, "active", "ef".repeat(32));
   assert.equal(await store.nextBaseShield(), null, "terminal jobs are not picked up");
+  const minted = (await store.listBaseShields("desk-base")).find((j) => j.id === job.id);
+  assert.equal(minted.stellar_tx_hash, "ef".repeat(32), "mint tx hash is persisted for the UI");
 
   // A second job can fail and reports its message.
   const job2 = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 8);

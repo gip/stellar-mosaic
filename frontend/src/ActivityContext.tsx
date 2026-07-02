@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ActivityHistory, errorMessage, type ActivityEvent } from '@mosaic/sdk'
-import { ApiError, api, type Operation, type OperationRequest } from './api'
+import { ApiError, api, type Desk, type Operation, type OperationRequest } from './api'
+import type { AssetCatalog } from './components/activityModel'
 import { executeClientAction, reconcileOperationJournals, rollbackClientAction } from './operationExecutor'
 import { useRecovery } from './RecoveryContext'
 import { useWallet } from './WalletContext'
@@ -16,6 +17,7 @@ interface ActivityState {
   activities: ActivityEvent[]
   connected: boolean
   error: string | null
+  catalog: AssetCatalog
   enqueue: (request: OperationRequest) => Promise<Operation>
   cancel: (id: string) => Promise<void>
   refresh: () => Promise<void>
@@ -34,9 +36,22 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const [activities, setActivities] = useState<ActivityEvent[]>([])
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [desks, setDesks] = useState<Desk[]>([])
   const running = useRef(false)
   const activitySyncRunning = useRef(false)
   const eventCursor = useRef(0)
+
+  // Resolve asset ids to symbols/decimals from the loaded desks, so Activity summaries read
+  // "10 USDC" rather than "asset #2" — trusted-mode backend events carry no asset metadata.
+  const catalog = useMemo<AssetCatalog>(() => {
+    const byDesk = new Map<string, Map<number, { symbol: string; decimals: number }>>()
+    for (const desk of desks) {
+      const assets = new Map<number, { symbol: string; decimals: number }>()
+      for (const asset of desk.assets) assets.set(asset.asset_id, { symbol: asset.symbol, decimals: asset.decimals })
+      byDesk.set(desk.id, assets)
+    }
+    return { asset: (deskId, assetId) => (deskId ? byDesk.get(deskId)?.get(assetId) : undefined) }
+  }, [desks])
 
   const authenticate = useCallback(async () => {
     if (!wallet.address || !wallet.networkPassphrase) throw new Error('Connect your Stellar wallet first.')
@@ -80,6 +95,26 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     const operation = await api.cancelOperation(id)
     setOperations((previous) => previous.map((x) => x.id === id ? operation : x))
   }, [])
+
+  // Keep the asset catalog loaded for the active mode. Best-effort: summaries fall back to asset ids
+  // if desks fail to load. Refreshed on wallet/mode change (desk asset sets are immutable post-deploy).
+  useEffect(() => {
+    let alive = true
+    const load = async () => {
+      if (!wallet.address) {
+        if (alive) setDesks([])
+        return
+      }
+      try {
+        const next = await api.listDesks(storageMode.mode)
+        if (alive) setDesks(next)
+      } catch {
+        /* Activity labels degrade to asset ids; not fatal. */
+      }
+    }
+    void load()
+    return () => { alive = false }
+  }, [storageMode.mode, wallet.address])
 
   useEffect(() => {
     let alive = true
@@ -217,7 +252,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     return () => { alive = false; window.clearInterval(handle) }
   }, [connected, recovery.unlocked, recovery.error, refresh, wallet.address])
 
-  return <Ctx.Provider value={{ operations, activities, connected, error, enqueue, cancel, refresh }}>{children}</Ctx.Provider>
+  return <Ctx.Provider value={{ operations, activities, connected, error, catalog, enqueue, cancel, refresh }}>{children}</Ctx.Provider>
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
