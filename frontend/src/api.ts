@@ -15,6 +15,7 @@ import {
   type AuthSession,
   type BaseDeploymentConfig as SdkBaseDeploymentConfig,
   type BaseShieldConfig,
+  type BaseShieldDeposit,
   type BaseShieldJob,
   type CatalogAsset as SdkCatalogAsset,
   type ChainNote,
@@ -501,7 +502,7 @@ export const api = {
   getNotes: (mode: StorageMode, id: string) => wrap(async () => ({ notes: await sourceFor(mode).notes(id) })),
   getFills: (mode: StorageMode, id: string) => wrap(async () => ({ fills: await sourceFor(mode).fills(id) })),
   getBaseShieldConfig: (id: string) => wrap(() => mcp.baseShieldConfig(id)),
-  enqueueBaseShield: (id: string, body: { expected_bridge: string; deposit_id: number }) =>
+  enqueueBaseShield: (id: string, body: { expected_bridge: string; deposit_id: number; deposit?: BaseShieldDeposit }) =>
     wrap(() => mcp.enqueueBaseShield(id, body)),
   listBaseShields: (id: string) => wrap(() => mcp.listBaseShields(id)),
   submitShield: (id: string, tx_xdr: string) =>

@@ -134,10 +134,17 @@ async function assertBaseShieldLifecycle(store) {
   // Unknown desk is rejected too.
   await assert.rejects(() => store.enqueueBaseShield("nope", BASE_BRIDGE, 1), /not found|no configured/);
 
-  const job = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 7);
+  const deposit = { asset_id: 2, symbol: "USDC", decimals: 6, amount: "100000", base_tx_hash: "0x" + "ab".repeat(32) };
+  const job = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 7, deposit);
   assert.equal(job.status, "proving");
-  // Idempotent enqueue returns the same job.
-  assert.equal((await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 7)).id, job.id);
+  // Display metadata from the depositing client is persisted so the mint leg can render a complete
+  // Activity entry even without the local deposit event.
+  assert.deepEqual(job.deposit, deposit);
+  // Idempotent enqueue returns the same job (metadata intact).
+  const again = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 7);
+  assert.equal(again.id, job.id);
+  assert.deepEqual(again.deposit, deposit);
+  assert.deepEqual((await store.listBaseShields("desk-base")).find((j) => j.id === job.id).deposit, deposit);
 
   const next = await store.nextBaseShield();
   assert.equal(next.id, job.id, "proving job is picked up");

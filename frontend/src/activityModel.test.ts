@@ -411,3 +411,37 @@ test('base shield deposit and mint collapse into one group linking both txs', ()
   assert.equal(txNetworkLabel(baseTx, byTx.get(baseTx)!.activity!), 'Base Sepolia')
   assert.equal(txNetworkLabel(stellarTx, byTx.get(stellarTx)!.activity!), 'Stellar Testnet')
 })
+
+test('base shield mint leg alone renders a complete entry from job deposit metadata', () => {
+  // The reconciler logs only the terminal mint leg when this session never saw the deposit event
+  // (shield started elsewhere). Carrying the deposit metadata (amount + Base tx) off the persisted
+  // job, it still renders "1 ETH from Base Sepolia" with both legs — no bare "Shield funds" ghost.
+  const baseTx = `0x${'b'.repeat(64)}`
+  const stellarTx = 'e'.repeat(64)
+  const activities: ActivityEvent[] = [
+    {
+      kind: 'transaction',
+      method: 'shield_from_base',
+      status: 'succeeded',
+      desk_id: 'desk-3',
+      tx_hash: stellarTx,
+      metadata: {
+        action_id: 'job-base-2',
+        source: 'base',
+        asset_id: 3,
+        symbol: 'ETH',
+        decimals: 18,
+        amount: '1000000000000000000',
+        stellar_tx_hash: stellarTx,
+        base_tx_hash: baseTx,
+      },
+      created_at: 9,
+    },
+  ]
+
+  const groups = activityGroups(activities, [])
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].summary, '1 ETH from Base Sepolia')
+  assert.equal(groups[0].status, 'succeeded')
+  assert.deepEqual(new Set(groups[0].lines.map((line) => line.tx)), new Set([stellarTx, baseTx]))
+})

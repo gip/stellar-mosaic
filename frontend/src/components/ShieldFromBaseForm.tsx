@@ -211,6 +211,15 @@ export default function ShieldFromBaseForm({
       const created = await api.enqueueBaseShield(desk.id, {
         expected_bridge: addr,
         deposit_id: depositId,
+        // Persist the display metadata on the job so the mint leg renders a complete Activity entry
+        // (amount + Base deposit tx) even in a session that never saw this local deposit event.
+        deposit: {
+          asset_id: selectedAssetId,
+          symbol: asset.symbol,
+          decimals: asset.decimals,
+          amount: rawAmount,
+          base_tx_hash: baseTxHash,
+        },
       })
       setJobId(created.id)
       setJob(created)

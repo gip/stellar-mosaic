@@ -438,7 +438,7 @@ tbody tr:hover {
   border-radius: 0;
   background: transparent;
 }
-.segmented button:hover:not(:disabled) {
+.segmented button:hover:not(:disabled):not([aria-pressed="true"]) {
   background: var(--bg-hover);
   color: var(--fg);
 }
@@ -448,6 +448,8 @@ tbody tr:hover {
 .segmented button[aria-pressed="true"] {
   background: var(--accent);
   color: var(--fg-onaccent);
+  /* Already selected: clicking is a no-op, so show no hover affordance. */
+  cursor: default;
 }
 
 /* ---------------- Pills / badges ---------------- */

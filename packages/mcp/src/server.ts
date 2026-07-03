@@ -1,5 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { readDeskCustody, type BookSide, type Desk, type DeskCustody, type MosaicLogger, type Operation, type SubmitResult } from "@mosaic/sdk";
+import { readDeskCustody, type BaseShieldDeposit, type BookSide, type Desk, type DeskCustody, type MosaicLogger, type Operation, type SubmitResult } from "@mosaic/sdk";
 import { Networks } from "@stellar/stellar-sdk";
 import { z } from "zod";
 import { AuthService } from "./auth.js";
@@ -69,6 +69,24 @@ function slowToolThresholdMs(env: NodeJS.ProcessEnv = process.env): number {
 
 const ok = (data: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(data) }] });
 const body = (args: Record<string, unknown>) => (args.body ?? {}) as Record<string, unknown>;
+
+// Display metadata a browser attaches to a Base shield at enqueue time (amount + Base deposit tx), so
+// the mint leg can render a full Activity entry without the local deposit event. Untrusted input:
+// coerce each field and keep only the shapes we use; anything missing simply degrades gracefully.
+function baseShieldDeposit(value: unknown): BaseShieldDeposit | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const d = value as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+  const str = (v: unknown) => (typeof v === "string" && v.length > 0 ? v : undefined);
+  const deposit: BaseShieldDeposit = {
+    asset_id: num(d.asset_id),
+    symbol: str(d.symbol),
+    decimals: num(d.decimals),
+    amount: str(d.amount),
+    base_tx_hash: str(d.base_tx_hash),
+  };
+  return Object.values(deposit).some((v) => v !== undefined) ? deposit : undefined;
+}
 
 async function session(auth: AuthService, args: Record<string, unknown>) {
   return auth.requireSession(String(args.session ?? ""));
@@ -381,7 +399,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     async (args) => {
       await session(auth, args);
       const b = body(args);
-      return ok(await store.enqueueBaseShield(String(args.desk_id), String(b.expected_bridge), Number(b.deposit_id)));
+      return ok(await store.enqueueBaseShield(String(args.desk_id), String(b.expected_bridge), Number(b.deposit_id), baseShieldDeposit(b.deposit)));
     },
   );
   reg("list_base_shields", { description: "List Base shield jobs.", inputSchema: { desk_id: z.string() } }, async ({ desk_id }) =>

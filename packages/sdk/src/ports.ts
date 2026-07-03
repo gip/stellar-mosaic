@@ -8,6 +8,7 @@ import type {
   AuthSession,
   BaseDeploymentConfig,
   BaseShieldConfig,
+  BaseShieldDeposit,
   BaseShieldJob,
   BookSide,
   CatalogAsset,
@@ -256,7 +257,7 @@ export interface McpClient {
     body: WalletBackupEnvelope & { expected_generation: number; write_token: string },
   ): Promise<{ generation: number }>;
   baseShieldConfig(deskId: string): Promise<BaseShieldConfig>;
-  enqueueBaseShield(deskId: string, body: { expected_bridge: string; deposit_id: number }): Promise<BaseShieldJob>;
+  enqueueBaseShield(deskId: string, body: { expected_bridge: string; deposit_id: number; deposit?: BaseShieldDeposit }): Promise<BaseShieldJob>;
   listBaseShields(deskId: string): Promise<BaseShieldJob[]>;
 }
 

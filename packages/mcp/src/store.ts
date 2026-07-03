@@ -6,6 +6,7 @@ import type {
   ActivityEvent,
   AuthSession,
   BaseShieldJob,
+  BaseShieldDeposit,
   CatalogAsset,
   ClientAction,
   Desk,
@@ -64,7 +65,7 @@ export interface MosaicStore {
     expectedGeneration: number,
     envelope: WalletBackupEnvelope,
   ): Promise<{ generation: number }>;
-  enqueueBaseShield(deskId: string, bridge: string, depositId: number): Promise<BaseShieldJob>;
+  enqueueBaseShield(deskId: string, bridge: string, depositId: number, deposit?: BaseShieldDeposit): Promise<BaseShieldJob>;
   listBaseShields(deskId: string): Promise<BaseShieldJob[]>;
   /** Oldest base-shield job still in a non-terminal state (proving|awaiting_finality|minting). */
   nextBaseShield(): Promise<BaseShieldJob | null>;
@@ -452,7 +453,7 @@ export class MemoryMosaicStore implements MosaicStore {
     return { generation };
   }
 
-  async enqueueBaseShield(deskId: string, bridge: string, depositId: number): Promise<BaseShieldJob> {
+  async enqueueBaseShield(deskId: string, bridge: string, depositId: number, deposit?: BaseShieldDeposit): Promise<BaseShieldJob> {
     await assertBridgeMatches(this, deskId, bridge);
     const key = `${deskId}\0${bridge}\0${depositId}`;
     const existing = this.baseShields.get(key);
@@ -465,6 +466,7 @@ export class MemoryMosaicStore implements MosaicStore {
       status: "proving",
       block_number: null,
       block_hash: null,
+      deposit,
       error: null,
     };
     this.baseShields.set(key, job);
@@ -908,7 +910,7 @@ export class SqliteMosaicStore implements MosaicStore {
     return { generation };
   }
 
-  async enqueueBaseShield(deskId: string, bridge: string, depositId: number): Promise<BaseShieldJob> {
+  async enqueueBaseShield(deskId: string, bridge: string, depositId: number, deposit?: BaseShieldDeposit): Promise<BaseShieldJob> {
     await assertBridgeMatches(this, deskId, bridge);
     const key = `${deskId}\0${bridge}\0${depositId}`;
     const existing = parseJson<BaseShieldJob>(
@@ -923,6 +925,7 @@ export class SqliteMosaicStore implements MosaicStore {
       status: "proving",
       block_number: null,
       block_hash: null,
+      deposit,
       error: null,
     };
     this.db.prepare("INSERT INTO base_shields(key, desk_id, json) VALUES(?, ?, ?)").run(key, deskId, JSON.stringify(job));
