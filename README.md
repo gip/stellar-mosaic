@@ -1,8 +1,8 @@
 # Stellar Mosaic
 
-In the context of a hackathon, the goal is to explore the Stellar blockchain, specifically smart contracts and the new ZK features.
+In the context of a hackathon, the goal is to explore how to build trading features with custom privacy for people and agents on the Stellar blockchain, using its smart contracts and novel ZK features.
 
-Because AI is heavily involved in this project, the implementation goals must be clear and well-defined in writing — a written spec has been the primary input. Opus 4.8 was used for orchestration and documentation, cheaper models for coding.
+An AI loop was used to review the written specs and plan the implementation. Opus 4.8 was used for orchestration and documentation, cheaper models for coding.
 
 ## What we are building
 
@@ -18,11 +18,11 @@ Mosaic is multichain: while most of a desk's features are on Stellar, assets can
 
 ## Mosaic SDK
 
-Finally, care has been taken to structure the code so that Mosaic's capabilities are easy to integrate into apps and agents. Most of the business logic, including the contracts, lives in the [mosaic SDK](packages/sdk/) package. This package has successfully been used to implement:
+Care has been taken to structure the code so that Mosaic's capabilities are easy to integrate into apps and agents. Most of the business logic, including the contracts, lives in the [mosaic SDK](packages/sdk/) package. This package has successfully been used to implement:
 - The frontend-only Trustless mode that lets you deploy new contracts to create an onchain trading desk and interact with it
 - The [MCP](packages/mcp/) that powers the Trusted setup
 - The [CLI](packages/cli/) that may be used by agents
-- The [agents](agents/) demo that runs two agents, Alice and Bob. Alice's prompt is *"Today spot price for XLM/USDC is 0.18. Sell 10 XLM and get me USDC at the best price."*. Bob's prompt is *"Today spot price for XLM/USDC is 0.18. Sell about 2 USDC and get me the best price in XLM."*. The agents, driven by LLMs, set up communication using XMTP (a great Ethereum protocol) and negotiate. When they agree, they create a trading contract onchain and the trade is executed. See the real [conversation between agents](docs/agents.md) that led to the trade. Note that the agent demo was fully implemented and run by AI — what a world we live in :)
+- The [agents](agents/) demo that runs two agents, Alice and Bob. Alice's prompt is *"Today spot price for XLM/USDC is 0.18. Sell 10 XLM and get me USDC at the best price."*. Bob's prompt is *"Today spot price for XLM/USDC is 0.18. Sell about 2 USDC and get me the best price in XLM."*. The agents, driven by LLMs, set up communication using [XMTP](https://xmtp.org/) (a great Ethereum protocol for secure address-to-address communication) and negotiate. When they agree, they create a trading contract onchain and the trade is executed. See the real [conversation between agents](docs/agents.md) that led to the trade. Note that the agent demo was fully implemented and run by AI — what a world we live in :)
 
 ## What has been delivered
 
