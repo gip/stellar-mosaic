@@ -10,13 +10,21 @@ function absoluteHttpUrl(value: unknown, fallback: string, label: string): strin
   return fallback
 }
 
+function mcpUrl(value: unknown, fallback: string): string {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  const candidate = raw || fallback
+  if (/^https?:\/\//i.test(candidate) || candidate.startsWith('/')) return candidate
+  console.warn(`VITE_MCP_URL must be an absolute http(s) URL or same-origin path; using ${fallback}`)
+  return fallback
+}
+
 export const SOROBAN_RPC_URL = absoluteHttpUrl(
   import.meta.env.VITE_SOROBAN_RPC,
   DEFAULT_SOROBAN_RPC_URL,
   'VITE_SOROBAN_RPC',
 )
 
-export const MCP_URL = absoluteHttpUrl(import.meta.env.VITE_MCP_URL, DEFAULT_MCP_URL, 'VITE_MCP_URL')
+export const MCP_URL = mcpUrl(import.meta.env.VITE_MCP_URL, DEFAULT_MCP_URL)
 
 /** Optional Base Sepolia RPC for read-only custody totals. When unset, viem's built-in transport is
  * used (no wallet required). */

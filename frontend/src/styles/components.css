@@ -1120,6 +1120,16 @@ tbody tr:hover {
   header.topbar .wallet-controls {
     flex-wrap: wrap;
   }
+  /* The trust-mode segmented pair no longer fits side by side: stack it
+     full-width instead of letting flex-wrap leave a ragged gap in the box. */
+  header.topbar .wallet-controls.segmented {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  header.topbar .wallet-controls.segmented button + button {
+    border-left: none;
+    border-top: 1px solid var(--line-strong);
+  }
 }
 
 /* ---------------- Modal ---------------- */

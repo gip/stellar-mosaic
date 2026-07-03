@@ -1,12 +1,12 @@
 # Stellar Mosaic
 
-In the context of a hackathon, the goal is to explore the Stellar blockchain, specifically smart contracts and the new ZK features.
+In the context of a hackathon, the goal is to explore how to build trading features with custom privacy for people and agents on the Stellar blockchain, using its smart contracts and novel ZK features.
 
-Because AI is heavily involved in this project, the implementation goals must be clear and well-defined in writing — a written spec has been the primary input. Opus 4.8 was used for orchestration and documentation, cheaper models for coding.
+An AI loop was used to review the written specs and plan the implementation. Opus 4.8 was used for orchestration and documentation, cheaper models for coding.
 
 ## What we are building
 
-Stellar Mosaic is a privacy-preserving OTC desk on Stellar. It is owner-anonymous and amount-transparent: who is behind a trade stays confidential, while the assets and amounts settling on-chain are public.
+Stellar Mosaic is a privacy-preserving [OTC desk](https://en.wikipedia.org/wiki/Over-the-counter_(finance)) on Stellar for apps, humans, and agents. It is owner-anonymous and amount-transparent: who is behind a trade stays confidential, while the assets and amounts settling onchain are public.
 
 Mosaic is non-custodial by design: users keep control of their assets at all times. Assuming the contracts are bug-free and users do not lose their notes, no loss of funds can occur.
 
@@ -14,9 +14,15 @@ Mosaic implements a UTXO-style model for assets and orders. Proving is done loca
 
 Mosaic is multichain: while most of a desk's features are on Stellar, assets can also be traded via a bridge from another chain. Base is the first supported chain, and the proof of funds is generated using a version of [Steel](https://github.com/boundless-xyz/steel). The Groth16 proof is verified onchain on Stellar.
 
-Finally, care has been taken to structure the code so that Mosaic's capabilities are easy to integrate into apps and agents. Most of the business logic, including the contracts, lives in the `mosaic SDK` package. Agents can even agree to create their own contracts for swapping or trading assets!
-
 > 📊 For an interactive overview of how these pieces fit together, see the [trust-model & architecture overview](https://stellar-mosaic.vercel.app/overview).
+
+## Mosaic SDK
+
+Care has been taken to structure the code so that Mosaic's capabilities are easy to integrate into apps and agents. Most of the business logic, including the contracts, lives in the [mosaic SDK](packages/sdk/) package. This package has successfully been used to implement:
+- The frontend-only Trustless mode that lets you deploy new contracts to create an onchain trading desk and interact with it
+- The [MCP](packages/mcp/) that powers the Trusted setup
+- The [CLI](packages/cli/) that may be used by agents
+- The [agents](agents/) demo that runs two agents, Alice and Bob. Alice's prompt is *"Today spot price for XLM/USDC is 0.18. Sell 10 XLM and get me USDC at the best price."*. Bob's prompt is *"Today spot price for XLM/USDC is 0.18. Sell about 2 USDC and get me the best price in XLM."*. The agents, driven by LLMs, set up communication using [XMTP](https://xmtp.org/) (a great Ethereum protocol for secure address-to-address communication) and negotiate. When they agree, they create a trading contract onchain and the trade is executed. See the real [conversation between agents](docs/agents.md) that led to the trade. Note that the agent demo was fully implemented and run by AI — what a world we live in :)
 
 ## What has been delivered
 
@@ -106,10 +112,10 @@ This section outlines the implementation plan, organized as workstreams (WS). It
 | WS2.0 | Design document | Base → Stellar shield bridge design and trust model — [base-bridge.md](docs/base-bridge.md) | 🟢 |
 | WS2.1 | Base bridge contract | `MosaicBridge.sol`: lock USDC on Base and emit a `Shielded` event matching the Stellar note | 🟢 |
 | WS2.2 | ZK deposit proof | RISC Zero / Steel guest + host proving the Base deposit via an OP-stack state proof (`eth_getProof`) | 🟢 |
-| WS2.3 | On-chain verify + mint | Groth16 router verify + `shield_from_base` on Stellar, with the block-hash registry and deposit-id replay guard — [benchmarks.md](docs/benchmarks.md) | 🟢 |
+| WS2.3 | Onchain verify + mint | Groth16 router verify + `shield_from_base` on Stellar, with the block-hash registry and deposit-id replay guard — [benchmarks.md](docs/benchmarks.md) | 🟢 |
 | WS2.4 | Orchestration, recovery & UI | Durable backend Base-shield worker, indexer making bridged notes discoverable/spendable, "Shield from Base" frontend tab | 🟢 |
 | WS2.5 | E2E functional test | Shield funds on Base and swap to Stellar, end to end — validated live on testnet | 🟢 |
-| WS2.6 | Deploy contract to Base | Ability to deploy the contract to the Base during desk creation | 🟢 |
+| WS2.6 | Deploy contract to Base | Ability to deploy the contract to Base during desk creation | 🟢 |
 | WS2.7 | Hosted proving service | Build and deploy a standalone proving server (Base deposit → Groth16 seal) reachable over HTTP, decoupled from the backend | ⬜ |
 
 ### WS3 — UI/UX
@@ -123,7 +129,7 @@ This section outlines the implementation plan, organized as workstreams (WS). It
 
 | ID | Title | Description | Status |
 |------|-------|-------------|:------:|
-| WS4.0 | Design document | Off-chain matching-in-Noir + tree-backed orders/nullifiers design — [noir-matching.md](docs/noir-matching.md) | 🟡 |
+| WS4.0 | Design document | Offchain matching-in-Noir + tree-backed orders/nullifiers design — [noir-matching.md](docs/noir-matching.md) | 🟡 |
 | WS4.1 | Orders & nullifiers in a merkle tree | Replace the per-key nullifier set with an indexed-merkle-tree accumulator (non-membership proven in-circuit) and move the order book into a commitment tree — [noir-matching.md](docs/noir-matching.md) | ⬜ |
 | WS4.2 | Offchain order book with onchain verification | Move from a simple onchain order book to an offchain book where trade matching runs in Noir and is verified onchain — [noir-matching.md](docs/noir-matching.md) | ⬜ |
 
