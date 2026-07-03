@@ -16,6 +16,9 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+/** A Stellar transaction hash as the `stellar` CLI logs it to stderr (64 lowercase hex chars). */
+const STELLAR_TX_HASH = /\b[0-9a-f]{64}\b/g;
+
 export interface BaseShieldConfig {
   /** Base URL of the remote prove service (e.g. `http://prover-host:8787`). */
   proveServiceUrl: string;
@@ -130,14 +133,16 @@ export async function mintOnStellar(
   const net = ["--rpc-url", cfg.stellar.rpcUrl, "--network-passphrase", cfg.stellar.networkPassphrase];
   // Async so the ~seconds-long stellar CLI round-trips never block the single-threaded MCP server.
   const invoke = async (fnArgs: string[]) =>
-    (
-      await execFileAsync(
-        "stellar",
-        ["contract", "invoke", "--id", args.contractId, "--source-account", args.sponsorSecret, ...net, "--send", "yes", "--", ...fnArgs],
-        { encoding: "utf8" },
-      )
-    ).stdout;
+    execFileAsync(
+      "stellar",
+      ["contract", "invoke", "--id", args.contractId, "--source-account", args.sponsorSecret, ...net, "--send", "yes", "--", ...fnArgs],
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+    );
   await invoke(["attest_base_block", "--block_number", String(args.blockNumber), "--block_hash", args.blockHash]);
-  const out = await invoke(["shield_from_base", "--seal-file-path", sealPath, "--journal-file-path", journalPath]);
-  return { txHash: out.trim().split(/\s+/).pop() ?? "" };
+  // The CLI writes the SUBMITTED TRANSACTION HASH to stderr; stdout carries only the function's
+  // return value, which is empty for `shield_from_base` (it returns `()`). So read the hash off
+  // stderr, matching how deploy.ts captures the tx of a `--send yes` invoke. Without this the mint
+  // tx hash is lost and the Activity entry can never link the Stellar leg.
+  const { stderr } = await invoke(["shield_from_base", "--seal-file-path", sealPath, "--journal-file-path", journalPath]);
+  return { txHash: (stderr ?? "").match(STELLAR_TX_HASH)?.pop() ?? "" };
 }
