@@ -11,8 +11,8 @@ export default function OverviewPage() {
         are public.
       </p>
       <p className="muted">
-        You stay in control of your assets at all times and, assuming the contracts are bug-free
-        and you keep your notes, no loss of funds can happen by design.
+        You stay in control of your assets at all times; assuming the contracts are bug-free and
+        you keep your notes, no loss of funds can happen by design.
       </p>
       <p className="muted">Several Trust models are supported</p>
       <ArchDiagram />

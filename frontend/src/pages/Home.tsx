@@ -137,8 +137,8 @@ export default function Home() {
           settling on-chain are public.
         </p>
         <p>
-          You stay in control of your assets at all times and, assuming the contracts are bug-free
-          and you keep your notes, no loss of funds can happen by design.
+          You stay in control of your assets at all times; assuming the contracts are bug-free and
+          you keep your notes, no loss of funds can happen by design.
         </p>
         <div className="intro-logo" role="img" aria-label="Mosaic logo" />
         <div className="row" style={{ gap: 'var(--sp-3)' }}>
