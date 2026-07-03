@@ -36,7 +36,7 @@ function writeHiddenDesks(mode: StorageMode, ids: string[]) {
 }
 
 export default function Home() {
-  const { address, ready } = useWallet()
+  const { address, ready, connect, connecting } = useWallet()
   const mosaicServer = useMosaicServer()
   const storageMode = useStorageMode()
   const [desks, setDesks] = useState<Desk[] | null>(null)
@@ -132,9 +132,35 @@ export default function Home() {
     return (
       <div className="reading intro">
         <p>
-          Stellar Mosaic is a privacy-preserving DEX on Stellar: trades settle atomically on-chain
-          while the owner behind each note and the create-to-spend link stay hidden.
+          Stellar Mosaic is a privacy-preserving OTC desk on Stellar. It is owner-anonymous and
+          amount-transparent: who is behind a trade stays confidential, while the assets and amounts
+          settling on-chain are public.
         </p>
+        <p>
+          You stay in control of your assets at all times and, assuming the contracts are bug-free
+          and you keep your notes, no loss of funds can happen by design.
+        </p>
+        <div className="intro-logo" role="img" aria-label="Mosaic logo" />
+        <div className="row" style={{ gap: 'var(--sp-3)' }}>
+          <Link to="/overview" className="btn btn-primary">
+            Read the overview
+          </Link>
+          <button type="button" onClick={() => void connect()} disabled={connecting}>
+            {connecting ? 'Connecting…' : 'Connect Stellar'}
+          </button>
+          <a
+            className="btn"
+            href="https://github.com/gip/stellar-mosaic"
+            target="_blank"
+            rel="noreferrer"
+            style={{ gap: 'var(--sp-2)' }}
+          >
+            <svg viewBox="0 0 19 19" width="16" height="16" aria-hidden="true">
+              <use href="/icons.svg#github-icon" />
+            </svg>
+            GitHub
+          </a>
+        </div>
       </div>
     )
   }

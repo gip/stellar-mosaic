@@ -85,11 +85,14 @@ h3 {
   max-width: var(--reading-max);
   margin: 0 auto;
 }
-/* Logged-out Home: a single centered sentence instead of the desk list. */
+/* Logged-out Home: a centered hero (intro copy + logo + call to action) instead of the desk list. */
 .reading.intro {
   display: flex;
-  min-height: 40vh;
+  flex-direction: column;
+  justify-content: center;
   align-items: center;
+  gap: var(--sp-5);
+  min-height: calc(100vh - var(--header-h) - var(--sp-5) * 2);
   text-align: center;
 }
 .reading.intro p {

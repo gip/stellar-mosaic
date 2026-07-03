@@ -9,6 +9,7 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 import './index.css'
 import App from './App'
 import Home from './pages/Home'
+import OverviewPage from './pages/OverviewPage'
 import DeskPage from './pages/DeskPage'
 import AssetsPage from './pages/AssetsPage'
 import ActivityPage from './pages/ActivityPage'
@@ -48,6 +49,7 @@ const router = createBrowserRouter([
     element: <AppRoute />,
     children: [
       { index: true, element: <Home /> },
+      { path: 'overview', element: <OverviewPage /> },
       { path: 'assets', element: <AssetsPage /> },
       { path: 'activity', element: <ActivityPage /> },
       { path: 'settings', element: <SettingsPage /> },

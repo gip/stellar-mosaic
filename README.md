@@ -6,7 +6,9 @@ As AI will be heavily involved in this project, it is important to make sure the
 
 ## What are we building
 
-Mosaic wants to give users better opportunities to trade onchain. Today users can pick from a DEX, a CEX, or OTC desks (like Binance, Coinbase, etc.) if they want some privacy. Trustless OTC trading that ensures privacy while making sure funds may not be lost even when shielded is an exciting opportunity and what we'd like to build on Mosaic. 
+Mosaic wants to give users better opportunities to trade onchain. Today users can pick from a DEX, a CEX, or OTC desks (like Binance, Coinbase, etc.) if they want some privacy. Trustless OTC trading that ensures privacy while making sure funds may not be lost even when shielded is an exciting opportunity and what we'd like to build on Mosaic.
+
+Mosaic is non-custodial by design: users keep control of their assets at all times. Assuming the contracts are bug-free and users do not lose their notes, no loss of funds can happen by design.
 
 The goal in WS1 is to design and implement a simplistic desk on Stellar where users may shield assets and trade. WS2 is about going multichain and supporting shielded assets on Base and swapping to Stellar. WS3 is about a great UI/UX experience. WS4 is trying to move from a simplistic onchain order book to a more advanced offchain order book where trade matching happens in Noir and is verified onchain. WS5 is a moonshot to explore offchain order book matching in a decentralized manner, as that would achieve a fully trustless solution — but it is probably impossible to achieve in the short term, or at all.
 
