@@ -2,13 +2,77 @@
 
 In the context of a hackathon, the goal is to explore the Stellar blockchain, specifically smart contracts and the new ZK features.
 
-As AI will be heavily involved in this project, it is important to make sure the implementation goals are clear and well-defined in writing — that will be an input. Opus 4.8 was used for orchestration and documentation, cheaper models for coding.
+Because AI is heavily involved in this project, the implementation goals must be clear and well-defined in writing — a written spec has been the primary input. Opus 4.8 was used for orchestration and documentation, cheaper models for coding.
 
-## What are we building
+## What we are building
 
-Mosaic wants to give users better opportunities to trade onchain. Today users can pick from a DEX, a CEX, or OTC desks (like Binance, Coinbase, etc.) if they want some privacy. Trustless OTC trading that ensures privacy while making sure funds may not be lost even when shielded is an exciting opportunity and what we'd like to build on Mosaic. 
+Stellar Mosaic is a privacy-preserving OTC desk on Stellar. It is owner-anonymous and amount-transparent: who is behind a trade stays confidential, while the assets and amounts settling on-chain are public.
 
-The goal in WS1 is to design and implement a simplistic desk on Stellar where users may shield assets and trade. WS2 is about going multichain and supporting shielded assets on Base and swapping to Stellar. WS3 is about a great UI/UX experience. WS4 is trying to move from a simplistic onchain order book to a more advanced offchain order book where trade matching happens in Noir and is verified onchain. WS5 is a moonshot to explore offchain order book matching in a decentralized manner, as that would achieve a fully trustless solution — but it is probably impossible to achieve in the short term, or at all.
+Mosaic is non-custodial by design: users keep control of their assets at all times. Assuming the contracts are bug-free and users do not lose their notes, no loss of funds can occur.
+
+Mosaic implements a UTXO-style model for assets and orders. Proving is done locally in the browser or in the backend depending on the trust model. UltraHonk proofs are verified onchain to establish each trade's validity.
+
+Mosaic is multichain: while most of a desk's features are on Stellar, assets can also be traded via a bridge from another chain. Base is the first supported chain, and the proof of funds is generated using a version of [Steel](https://github.com/boundless-xyz/steel). The Groth16 proof is verified onchain on Stellar.
+
+Finally, care has been taken to structure the code so that Mosaic's capabilities are easy to integrate into apps and agents. Most of the business logic, including the contracts, lives in the `mosaic SDK` package. Agents can even agree to create their own contracts for swapping or trading assets!
+
+> 📊 For an interactive overview of how these pieces fit together, see the [trust-model & architecture overview](https://stellar-mosaic.vercel.app/overview).
+
+## What has been delivered
+
+| Feature | Description |
+|---------|-------------|
+| Mosaic SDK | A TypeScript SDK (`@mosaic/sdk`) that packages the contract bindings and desk business logic, so apps and agents can shield, order, and settle against a Mosaic desk without re-implementing the protocol. |
+| Trustless Mode | Fully self-custodial flow in which the user generates their own UltraHonk order proofs in the browser. No third party ever learns the owner behind a note or handles the user's keys. |
+| Trusted Mode using MCP | An MCP server that hosts the desk registry, order queues, relayer, and encrypted wallet backups, and drives proving and settlement on the user's behalf — trading some privacy for a smoother, agent-friendly experience. |
+| Cross-chain asset shielding | A Base → Stellar bridge: funds are locked on Base, the deposit is proven with RISC Zero / Steel, the Groth16 seal is verified onchain, and a shielded note is minted on Stellar. |
+| Local proving | In-browser UltraHonk proof generation (`@noir-lang/noir_js` + `@aztec/bb.js`), so order proofs never leave the user's device. |
+| Benchmarks | Measured proving and settlement costs against Stellar's 400M-instruction per-tx budget — one UltraHonk verify ≈ 80M, an atomic two-sided `settle` ≈ 230M — with the full provenance behind the verifier choice ([benchmarks.md](docs/benchmarks.md)). |
+
+## What's needed
+
+| Feature | Description |
+|---------|-------------|
+| Permissioned contracts | Access control on desks: today any address can interact with a deployed contract. Needed for KYC'd / permissioned desks (see WS5.2). |
+| Boundless integration | Move proof generation onto the Boundless proving market rather than a self-hosted prover, for decentralized, on-demand proving of Base deposits. |
+| Order book in a Merkle tree | Replace the simple onchain order book with a commitment-tree book where matching and proving happen offchain in Noir and only verification is onchain (WS4). |
+| More robust MCP backend | Reimplement the MCP server's stateful services (desk registry, queues, relayer, Base-shield worker) in Rust for a more production-grade backend. |
+
+## Trying it out
+
+At the time of writing you can try the hosted demo at [https://stellar-mosaic.vercel.app/](https://stellar-mosaic.vercel.app/). You will need a wallet (e.g. Freighter) funded with XLM on the Stellar testnet.
+
+A few caveats:
+
+- **Trustless mode** should always work, since proving runs entirely in your browser.
+- **Trusted mode (MCP)** depends on the backend being up, so it may occasionally be down.
+- **Shield from Base** depends on the prover being available and unpaid — and because proving currently takes 30 minutes or more (until Boundless is integrated), it can take a while.
+
+To run things locally, the fastest check is the settlement contract's integration suite, which exercises the full shield → settle → unshield loop against the real verifier with no testnet required:
+
+```bash
+cd contracts/settlement
+cargo test --test integration
+```
+
+For a full end-to-end run on testnet (Stellar and Base legs), use the stateful driver. Invoked with no arguments it prints a status report of what is set up, ready, or blocked:
+
+```bash
+./scripts/e2e.sh          # status: inspect tools, env, and state
+./scripts/e2e.sh all      # run the Stellar leg, then the Base leg
+```
+
+The e2e driver needs the Noir/`bb`, Soroban, and (for the Base leg) Foundry toolchains, a funded testnet identity, and an `eth_getProof`-capable Base RPC. See [docs/e2e-testing.md](docs/e2e-testing.md) for the full setup.
+
+## Implementation
+
+This section outlines the implementation plan, organized as workstreams (WS). It is background on how the project is structured and sequenced — feel free to skip to the [Workstreams](#workstreams) table for status at a glance.
+
+- **WS1** designs and implements a simple desk on Stellar where users can shield assets and trade.
+- **WS2** goes multichain: supporting shielded assets on Base and swapping them to Stellar.
+- **WS3** delivers a great UI/UX experience.
+- **WS4** moves from a simple onchain order book to a more advanced offchain book, where trade matching happens in Noir and is verified onchain.
+- **WS5** is a moonshot: exploring offchain order-book matching in a decentralized manner, which would achieve a fully trustless solution — though that is likely impossible in the short term, if at all.
 
 ## Workstreams
 

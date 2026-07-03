@@ -3,7 +3,8 @@
  * look without markup churn; new primitives live alongside. */
 
 /* ---------------- Buttons ---------------- */
-button {
+button,
+.btn {
   font: inherit;
   font-size: var(--fs-base);
   background: var(--bg-elevated);
@@ -14,7 +15,14 @@ button {
   cursor: pointer;
   transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
 }
-button:hover:not(:disabled) {
+/* `.btn` lets an anchor (e.g. a router Link) adopt the button box. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+button:hover:not(:disabled),
+.btn:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -119,6 +127,14 @@ header.topbar {
   -webkit-mask: url(/mosaic-logo.png) center / contain no-repeat;
   mask: url(/mosaic-logo.png) center / contain no-repeat;
   transition: background-color var(--t-fast);
+}
+/* Oversized masked logo for the logged-out Home hero (same mask/tint as .brand-logo). */
+.intro-logo {
+  width: 120px;
+  height: 120px;
+  background-color: var(--logo-fill);
+  -webkit-mask: url(/mosaic-logo.png) center / contain no-repeat;
+  mask: url(/mosaic-logo.png) center / contain no-repeat;
 }
 .topnav {
   display: flex;
@@ -1187,4 +1203,119 @@ tbody tr:hover {
 .notes-table .col-status {
   width: 1%;
   white-space: nowrap;
+}
+
+/* ---- Overview: interactive trust-model diagram (ArchDiagram.tsx) ----
+ * Ported from the standalone HTML mockup; colors/fonts are re-sourced from the site
+ * design tokens so it follows the light/dark themes automatically. Scoped under
+ * `.mosaic-arch` so nothing leaks. */
+.mosaic-arch {
+  max-width: 720px;
+  margin: var(--sp-5) 0 0;
+}
+.mosaic-arch .ma-bar {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin: 0 0 var(--sp-3);
+}
+.mosaic-arch .ma-btn {
+  font: 500 var(--fs-sm) var(--font-sans);
+  color: var(--fg);
+  background: var(--bg-panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-2);
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: var(--t);
+}
+.mosaic-arch .ma-btn:hover {
+  border-color: var(--accent);
+}
+.mosaic-arch .ma-btn.sel {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.mosaic-arch .ma-cap {
+  font-size: var(--fs-sm);
+  color: var(--fg-muted);
+  margin: 2px 0 var(--sp-2);
+  min-height: 16px;
+}
+
+.mosaic-arch svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.mosaic-arch .card {
+  fill: var(--bg-panel);
+  stroke: var(--line-strong);
+  stroke-width: 0.8px;
+  transition: var(--t);
+}
+.mosaic-arch .chip {
+  fill: var(--bg-inset);
+  stroke: var(--line);
+  stroke-width: 0.6px;
+}
+.mosaic-arch .title {
+  fill: var(--fg);
+  font: 500 14px var(--font-sans);
+}
+.mosaic-arch .sub {
+  fill: var(--fg-muted);
+  font: 400 12px var(--font-sans);
+}
+.mosaic-arch .chip-t {
+  fill: var(--fg-muted);
+  font: 400 11px var(--font-sans);
+}
+
+.mosaic-arch .n.on .card {
+  fill: var(--accent-dim);
+  stroke: var(--accent);
+  stroke-width: 1.6px;
+}
+.mosaic-arch .n.on .title {
+  fill: var(--accent);
+}
+.mosaic-arch .n.dim {
+  opacity: 0.28;
+  transition: var(--t);
+}
+
+.mosaic-arch .edge {
+  fill: none;
+  stroke: var(--line-strong);
+  stroke-width: 1.2px;
+  transition: var(--t);
+}
+.mosaic-arch .edge.on {
+  stroke: var(--accent);
+  stroke-width: 2.2px;
+  stroke-dasharray: 7 6;
+  animation: ma-flow 0.8s linear infinite;
+}
+.mosaic-arch .edge.dim {
+  opacity: 0.14;
+}
+@keyframes ma-flow {
+  to {
+    stroke-dashoffset: -13;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mosaic-arch .edge.on {
+    animation: none;
+  }
+}
+
+.mosaic-arch .ma-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
 }
