@@ -6,7 +6,7 @@ An AI loop was used to review the written specs and plan the implementation. Opu
 
 ## What we are building
 
-Stellar Mosaic is a privacy-preserving OTC desk on Stellar. It is owner-anonymous and amount-transparent: who is behind a trade stays confidential, while the assets and amounts settling onchain are public.
+Stellar Mosaic is a privacy-preserving [OTC desk](https://en.wikipedia.org/wiki/Over-the-counter_(finance)) on Stellar for apps, humans, and agents. It is owner-anonymous and amount-transparent: who is behind a trade stays confidential, while the assets and amounts settling onchain are public.
 
 Mosaic is non-custodial by design: users keep control of their assets at all times. Assuming the contracts are bug-free and users do not lose their notes, no loss of funds can occur.
 
