@@ -14,7 +14,7 @@ Mosaic implements a UTXO-style model for assets and orders. Proving is done loca
 
 Mosaic is multichain: while most of a desk's features are on Stellar, assets can also be traded via a bridge from another chain. Base is the first supported chain, and the proof of funds is generated using a version of [Steel](https://github.com/boundless-xyz/steel). The Groth16 proof is verified onchain on Stellar.
 
-Finally, care has been taken to structure the code so that Mosaic's capabilities are easy to integrate into apps and agents. Most of the business logic, including the contracts, lives in the `mosaic SDK` package. Agents can even agree to create their own contracts for swapping or trading assets!
+Finally, care has been taken to structure the code so that Mosaic's capabilities are easy to integrate into apps and agents. Most of the business logic, including the contracts, lives in the `mosaic SDK` package. Agents can even agree to create their own contracts for swapping or trading assets. See for instance a real [convesation between agents](docs/agents.md). Note that the agent demo was fully implemented and run by AI and the author has limited understanding of that part of the project :)
 
 > 📊 For an interactive overview of how these pieces fit together, see the [trust-model & architecture overview](https://stellar-mosaic.vercel.app/overview).
 

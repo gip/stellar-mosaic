@@ -8,11 +8,29 @@ durable FIFO sequencing, submission state, and progress history.
 
 ```bash
 pnpm install
-pnpm --filter frontend dev  # http://localhost:5173, proxies /api -> backend (127.0.0.1:8787)
+pnpm --filter @mosaic/mcp http  # http://127.0.0.1:8788/mcp
+pnpm --filter frontend dev      # http://localhost:5173
 ```
 
-The backend (`../backend`) must be running. Override its URL with `MOSAIC_BACKEND` (build-time) or
-the Soroban RPC with `VITE_SOROBAN_RPC` (defaults to testnet).
+The MCP server (`../packages/mcp`) must be running for Trusted mode and Base shielding. Override its
+Streamable-HTTP endpoint with `VITE_MCP_URL` (defaults to `http://127.0.0.1:8788/mcp`) or the Soroban
+RPC with `VITE_SOROBAN_RPC` (defaults to testnet).
+
+For HTTPS deployments, do not point `VITE_MCP_URL` at an `http://` endpoint; browsers block that as
+mixed content before CORS applies. Either use an HTTPS MCP endpoint:
+
+```bash
+VITE_MCP_URL=https://mcp.example.com/mcp
+```
+
+or proxy the MCP server under the same origin and build with:
+
+```bash
+VITE_MCP_URL=/mcp
+```
+
+If the MCP server is on a different origin, set `MOSAIC_CORS_ORIGIN` on the MCP server to the
+frontend origin.
 
 ## What it does
 
