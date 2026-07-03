@@ -196,17 +196,45 @@ function safeJson(value: unknown): string | null {
   }
 }
 
+/** Walk a viem/EIP-1193 error and its `cause` chain for a wallet user-rejection signal (code 4001,
+ * viem's `UserRejectedRequestError`, or a "user rejected/denied" phrase). */
+function isUserRejection(error: unknown): boolean {
+  let current: unknown = error
+  for (let depth = 0; current && typeof current === 'object' && depth < 10; depth += 1) {
+    const record = current as { code?: number | string; name?: string; shortMessage?: string; message?: string; cause?: unknown }
+    if (record.code === 4001 || record.code === 'ACTION_REJECTED') return true
+    if (record.name === 'UserRejectedRequestError') return true
+    if (/user (rejected|denied)/i.test(`${record.shortMessage ?? ''} ${record.message ?? ''}`)) return true
+    current = record.cause
+  }
+  return false
+}
+
+/** The concise leading text of a message, dropping viem's verbose trailing blocks (Request Arguments,
+ * Contract Call, Docs, Details, Version) that make raw wallet errors unreadable in the UI. */
+function firstParagraph(text: string): string {
+  const trimmed = text.trim()
+  const cut = trimmed.search(/\n\n|\n(?:Request Arguments|Raw Call Arguments|Contract Call|Docs|Details|Version):/)
+  return (cut === -1 ? trimmed : trimmed.slice(0, cut)).trim()
+}
+
+// Turn any wallet/RPC/app error into a short, user-facing string. The FULL error (viem dumps the
+// calldata, contract call, docs link, cause chain, and version) is always logged to the console for
+// debugging; only the concise summary is shown. viem errors carry a tidy `.shortMessage`, so prefer
+// that over the giant multi-line `.message`.
 export function errorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) return error.message
+  console.error('[mosaic] error', error)
+  if (isUserRejection(error)) return 'Request rejected in your wallet.'
+  const short = errorField(error, 'shortMessage')
+  if (typeof short === 'string' && short.trim()) return firstParagraph(short)
   const fields = [
-    errorField(error, 'message'),
-    errorField(error, 'shortMessage'),
     errorField(error, 'details'),
     errorField(errorField(error, 'data'), 'message'),
     errorField(errorField(error, 'data'), 'originalError'),
-  ].filter((value): value is string => typeof value === 'string' && value.length > 0)
+    error instanceof Error ? error.message : errorField(error, 'message'),
+  ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
   const code = providerErrorCode(error)
-  if (fields.length > 0) return [code === undefined ? null : `code ${code}`, ...fields].filter(Boolean).join(': ')
+  if (fields.length > 0) return [code === undefined ? null : `code ${code}`, firstParagraph(fields[0])].filter(Boolean).join(': ')
   return safeJson(error) ?? String(error)
 }
 
