@@ -308,6 +308,18 @@ export interface WalletBackupEnvelope {
   ciphertext_b64: string;
 }
 
+/** Display metadata captured from the depositing client at enqueue time. Lets the mint (terminal) leg
+ * render a complete Activity entry — the amount and the Base deposit tx — even in a browser/session
+ * that never recorded the local deposit event (a shield started on another device, after storage was
+ * cleared, or via the SDK). All optional: older jobs and non-browser callers omit it. */
+export interface BaseShieldDeposit {
+  asset_id?: number;
+  symbol?: string;
+  decimals?: number;
+  amount?: Amount;
+  base_tx_hash?: string;
+}
+
 export interface BaseShieldJob {
   id: string;
   desk_id: string;
@@ -321,5 +333,7 @@ export interface BaseShieldJob {
   /** Stellar tx hash of the `shield_from_base` mint, set once the worker mints the note. Lets the UI
    * link the Stellar leg of a Base shield alongside the Base Sepolia deposit tx. */
   stellar_tx_hash?: string | null;
+  /** Display metadata from the depositing client; see {@link BaseShieldDeposit}. */
+  deposit?: BaseShieldDeposit;
   error?: string | null;
 }

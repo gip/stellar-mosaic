@@ -38,9 +38,19 @@ function baseDepositTxHash(activities: ActivityEvent[], jobId: string): string |
 }
 
 // The Activity event for a Base shield's terminal leg: the Stellar mint tx on success, or the failure.
-// Grouped with the Base deposit tx by `action_id` (the job id) so both legs render as one entry.
+// Grouped with the Base deposit tx by `action_id` (the job id) so both legs render as one entry. The
+// amount/asset and the Base deposit tx come from the job's persisted `deposit` metadata (captured at
+// enqueue), so this leg renders a complete "0.1 USDC from Base Sepolia" entry even when the local
+// deposit event is absent (shield started on another device, storage cleared, or via the SDK).
 function baseShieldTerminalEvent(job: BaseShieldJob, wallet: string, baseTxHash?: string): ActivityEvent {
-  const base = baseTxHash ? { base_tx_hash: baseTxHash } : {}
+  const baseTx = baseTxHash ?? job.deposit?.base_tx_hash
+  const base = baseTx ? { base_tx_hash: baseTx } : {}
+  const deposit = {
+    asset_id: job.deposit?.asset_id,
+    symbol: job.deposit?.symbol,
+    decimals: job.deposit?.decimals,
+    amount: job.deposit?.amount,
+  }
   if (job.status === 'failed') {
     return {
       kind: 'error',
@@ -52,7 +62,7 @@ function baseShieldTerminalEvent(job: BaseShieldJob, wallet: string, baseTxHash?
       message: job.error ?? undefined,
       idempotency_key: `base-shield-fail:${job.id}`,
       created_at: Date.now(),
-      metadata: { action_id: job.id, source: 'base', ...base },
+      metadata: { action_id: job.id, source: 'base', ...deposit, ...base },
     }
   }
   return {
@@ -65,7 +75,7 @@ function baseShieldTerminalEvent(job: BaseShieldJob, wallet: string, baseTxHash?
     tx_hash: job.stellar_tx_hash ?? undefined,
     idempotency_key: `base-shield-mint:${job.id}`,
     created_at: Date.now(),
-    metadata: { action_id: job.id, source: 'base', stellar_tx_hash: job.stellar_tx_hash ?? undefined, ...base },
+    metadata: { action_id: job.id, source: 'base', ...deposit, stellar_tx_hash: job.stellar_tx_hash ?? undefined, ...base },
   }
 }
 

@@ -8,6 +8,7 @@ import type {
   AuthSession,
   BaseDeploymentConfig,
   BaseShieldConfig,
+  BaseShieldDeposit,
   BaseShieldJob,
   BookSide,
   CatalogAsset,
@@ -337,7 +338,7 @@ class HttpMcpClient implements McpClient {
     return this.call("base_shield_config", { desk_id: deskId });
   }
 
-  enqueueBaseShield(deskId: string, body: { expected_bridge: string; deposit_id: number }): Promise<BaseShieldJob> {
+  enqueueBaseShield(deskId: string, body: { expected_bridge: string; deposit_id: number; deposit?: BaseShieldDeposit }): Promise<BaseShieldJob> {
     return this.call("enqueue_base_shield", this.auth({ desk_id: deskId, body }));
   }
 
