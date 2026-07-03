@@ -1076,26 +1076,49 @@ tbody tr:hover {
   text-overflow: ellipsis;
 }
 
-/* ---------------- Responsive header ---------------- */
+/* ---------------- Responsive header ----------------
+   Two rows: brand + nav + icon actions on top, wallet chips below. */
 @media (max-width: 900px) {
   header.topbar {
     flex-wrap: wrap;
     gap: var(--sp-2) var(--sp-4);
-    padding: var(--sp-3);
+    padding: var(--sp-2) var(--sp-3);
   }
   .topbar-spacer {
     display: none;
   }
+  /* Word + logo side by side so the wrapped header stays short. */
+  .brand a {
+    flex-direction: row;
+    gap: var(--sp-2);
+  }
+  .brand-logo {
+    width: 24px;
+    height: 24px;
+  }
+  .topnav {
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    gap: var(--sp-2) var(--sp-3);
+  }
   .topbar-actions {
+    flex-direction: row;
     margin-left: auto;
   }
   .wallet-stack {
+    order: 4;
     width: 100%;
-    flex-wrap: wrap;
     justify-content: flex-start;
   }
-  .topnav {
-    order: 3;
+}
+
+@media (max-width: 560px) {
+  /* Chips go 2-up (an odd last chip takes the full row) instead of jagged rows. */
+  header.topbar .wallet-chain {
+    flex: 1 1 calc(50% - var(--sp-2));
+  }
+  header.topbar .wallet-controls {
+    flex-wrap: wrap;
   }
 }
 
