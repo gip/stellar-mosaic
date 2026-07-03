@@ -29,10 +29,12 @@ Finally, care has been taken to structure the code so that Mosaic's capabilities
 | Local proving | In-browser UltraHonk proof generation (`@noir-lang/noir_js` + `@aztec/bb.js`), so order proofs never leave the user's device. |
 | Benchmarks | Measured proving and settlement costs against Stellar's 400M-instruction per-tx budget — one UltraHonk verify ≈ 80M, an atomic two-sided `settle` ≈ 230M — with the full provenance behind the verifier choice ([benchmarks.md](docs/benchmarks.md)). |
 
-## What's needed
+## What's not there
 
 | Feature | Description |
 |---------|-------------|
+| Unshield to Base | Withdrawing a note back out to Base is not supported: the peg is one-way (Base → Stellar shield only), so notes bridged in from Base are trade-only on Stellar. |
+| Liquidity management between Stellar and Base | Managing liquidity across the two chains — there is no mechanism to rebalance or move liquidity between Stellar and Base. |
 | Permissioned contracts | Access control on desks: today any address can interact with a deployed contract. Needed for KYC'd / permissioned desks (see WS5.2). |
 | Boundless integration | Move proof generation onto the Boundless proving market rather than a self-hosted prover, for decentralized, on-demand proving of Base deposits. |
 | Order book in a Merkle tree | Replace the simple onchain order book with a commitment-tree book where matching and proving happen offchain in Noir and only verification is onchain (WS4). |
@@ -66,7 +68,7 @@ The e2e driver needs the Noir/`bb`, Soroban, and (for the Base leg) Foundry tool
 
 ## Implementation
 
-This section outlines the implementation plan, organized as workstreams (WS). It is background on how the project is structured and sequenced — feel free to skip to the [Workstreams](#workstreams) table for status at a glance.
+This section outlines the implementation plan, organized as workstreams (WS). It is background on how the project is structured and sequenced. Feel free to skip and go try the product.
 
 - **WS1** designs and implements a simple desk on Stellar where users can shield assets and trade.
 - **WS2** goes multichain: supporting shielded assets on Base and swapping them to Stellar.
