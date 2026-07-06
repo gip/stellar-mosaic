@@ -242,6 +242,71 @@ test("sqlite MCP store backup writes are generation-CAS and reads require auth m
   assert.equal((await b.getWalletBackupForRead("backup-1", "read")).generation, 1);
 });
 
+// A backup written with neither a read token nor an owner must not be readable by any junk token or
+// any authenticated session (the earlier `!readToken && !address` guard let both through), and an
+// owner-bound backup must reject a different session's address.
+for (const makeStore of [() => new MemoryMosaicStore(), null]) {
+  const label = makeStore ? "memory" : "sqlite";
+  test(`${label} MCP store denies wallet-backup reads without matching credentials`, async () => {
+    let store = makeStore?.();
+    if (!store) {
+      const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
+      store = openMosaicStore(`sqlite://${join(dir, "mcp.db")}`);
+    }
+    const envelope = { format_version: 1, generation: 0, nonce_b64: "bm9uY2U=", ciphertext_b64: "Y2lwaGVy" };
+    const owner = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+    const other = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBQ4CI";
+
+    // No read token, no owner: a junk token must not grant access, and neither must an anonymous read.
+    await store.putWalletBackup("orphan", "write", undefined, 0, envelope);
+    await assert.rejects(() => store.getWalletBackupForRead("orphan", "junk"), /auth|token|owner/i);
+    await assert.rejects(() => store.getWalletBackupForRead("orphan", undefined, "anyone"), /auth|token|owner/i);
+
+    // Owner-bound backup: only the owner's session address may read it.
+    await store.putWalletBackup("owned", "write", undefined, 0, envelope, owner);
+    await assert.rejects(() => store.getWalletBackupForRead("owned", undefined, other), /owner mismatch/);
+    assert.equal((await store.getWalletBackupForRead("owned", undefined, owner)).generation, 1);
+
+    // A tokenless update must not drop an existing read credential.
+    await store.putWalletBackup("keeps-token", "write", "read", 0, envelope);
+    await store.putWalletBackup("keeps-token", "write", undefined, 1, envelope);
+    await assert.rejects(() => store.getWalletBackupForRead("keeps-token", "junk"), /read token mismatch/);
+    assert.equal((await store.getWalletBackupForRead("keeps-token", "read")).generation, 2);
+  });
+}
+
+// A job that failed during the finality wait must resume at awaiting_finality on retry, never jump
+// straight to minting (which would attest+mint a Base block that was never confirmed finalized).
+for (const makeStore of [() => new MemoryMosaicStore(), null]) {
+  const label = makeStore ? "memory" : "sqlite";
+  test(`${label} MCP store retry resumes a finality-required job at awaiting_finality`, async () => {
+    let store = makeStore?.();
+    if (!store) {
+      const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
+      store = openMosaicStore(`sqlite://${join(dir, "mcp.db")}`);
+    }
+    const address = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+    await insertBaseDesk(store);
+
+    const finalityJob = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 101, address);
+    await store.baseShieldProved(finalityJob.id, 42, "cd".repeat(32), "aa", "bb", true);
+    await store.baseShieldFailed(finalityJob.id, "base rpc down");
+    const resumedFinality = await store.retryBaseShield(finalityJob.id, address);
+    assert.equal(resumedFinality.status, "awaiting_finality", "finality-required job must not skip the finality wait");
+
+    const noFinalityJob = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 102, address);
+    await store.baseShieldProved(noFinalityJob.id, 43, "ef".repeat(32), "aa", "bb", false);
+    await store.baseShieldFailed(noFinalityJob.id, "mint boom");
+    const resumedMint = await store.retryBaseShield(noFinalityJob.id, address);
+    assert.equal(resumedMint.status, "minting", "proved job with finality off resumes at minting");
+
+    const unproved = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 103, address);
+    await store.baseShieldFailed(unproved.id, "prove boom");
+    const resumedProving = await store.retryBaseShield(unproved.id, address);
+    assert.equal(resumedProving.status, "proving", "job that never proved restarts from proving");
+  });
+}
+
 test("sqlite MCP store claims each base-shield job once across two workers", async () => {
   const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
   const url = `sqlite://${join(dir, "mcp.db")}`;

@@ -24,6 +24,21 @@ const SESSION_TTL_MS = 60 * 60_000;
 const CHALLENGE_TTL_MS = 5 * 60_000;
 const LEASE_TTL_MS = 90_000;
 
+/** How long a claimed base-shield job stays locked to its worker. This must outlive the longest a
+ * single worker can hold a job within one tick — otherwise a second process re-claims a job that is
+ * still being minted and double-drives it. A tick advances one job per stage sequentially: the mint
+ * stage runs two `stellar` CLI calls (each hard-capped at the CLI timeout) and the network stages a
+ * handful of `fetch`es (each hard-capped at the fetch timeout), so the lease is derived from those
+ * same caps plus margin. (The contract's deposit-id idempotency is the last-resort backstop against
+ * an actual double mint; this lease prevents the wasted work and status clobbering.) */
+function baseShieldLeaseTtlMs(): number {
+  const cli = Number(process.env.MOSAIC_MCP_CLI_TIMEOUT_MS);
+  const fetchMs = Number(process.env.MOSAIC_MCP_FETCH_TIMEOUT_MS);
+  const cliCap = Number.isFinite(cli) && cli > 0 ? cli : 120_000;
+  const fetchCap = Number.isFinite(fetchMs) && fetchMs > 0 ? fetchMs : 30_000;
+  return 2 * cliCap + 3 * fetchCap + 60_000;
+}
+
 export interface StoredChallenge {
   id: string;
   address: string;
@@ -72,6 +87,7 @@ export interface MosaicStore {
     readToken: string | undefined,
     expectedGeneration: number,
     envelope: WalletBackupEnvelope,
+    ownerAddress?: string,
   ): Promise<{ generation: number }>;
   getWalletBackupForRead(backupId: string, readToken?: string, address?: string): Promise<WalletBackupEnvelope | null>;
   enqueueBaseShield(deskId: string, bridge: string, depositId: number, ownerAddress: string, deposit?: BaseShieldDeposit): Promise<BaseShieldJob>;
@@ -124,6 +140,15 @@ function resetRetryState(job: BaseShieldJob): void {
   job.lock_expires_at = null;
 }
 
+/** The stage a failed job resumes at when retried. A job that already has its proof artifacts must
+ * re-enter the finality wait when the deposit requires finality — jumping straight to `minting` would
+ * attest+mint a Base block that was never confirmed finalized (a reorg could then orphan the deposit
+ * after the Stellar note is minted). Only a job that never got past proving restarts from `proving`. */
+function resumeStatusForRetry(job: BaseShieldJob): string {
+  if (!job.seal_hex || !job.journal_hex) return "proving";
+  return job.require_finality ? "awaiting_finality" : "minting";
+}
+
 /** Record one more transient step failure in the job's current stage. */
 function bumpRetryState(job: BaseShieldJob, error: string): void {
   job.attempts = (job.attempts ?? 0) + 1;
@@ -147,6 +172,27 @@ async function assertBridgeMatches(store: MosaicStore, deskId: string, bridge: s
 
 function tokenHash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+/** Authorize a wallet-backup read against the single policy both stores share. A backup is readable
+ * only by presenting its read token (if one was set) or by an authenticated session whose address
+ * owns it. Anything else — a mismatched/absent token, a mismatched/absent owner, or a backup that
+ * carries neither credential — is denied. Throws on failure; returns normally when authorized.
+ *
+ * Callers must not fall back to "any authenticated session" or "any non-empty token": a backup with
+ * neither a read-token hash nor an owner has no reader and must be refused rather than leaked. */
+function authorizeBackupRead(backup: StoredBackup, readToken?: string, address?: string): void {
+  if (backup.read_token_hash) {
+    if (!readToken || backup.read_token_hash !== tokenHash(readToken)) {
+      throw new MosaicMcpError("AUTH_INVALID", "backup read token mismatch");
+    }
+    return;
+  }
+  if (backup.owner_address) {
+    if (!address || backup.owner_address !== address) throw new MosaicMcpError("AUTH_INVALID", "backup owner mismatch");
+    return;
+  }
+  throw new MosaicMcpError("AUTH_INVALID", "backup read token or authenticated owner required");
 }
 
 function secretKey(): Buffer | null {
@@ -491,25 +537,28 @@ export class MemoryMosaicStore implements MosaicStore {
     readToken: string | undefined,
     expectedGeneration: number,
     envelope: WalletBackupEnvelope,
+    ownerAddress?: string,
   ): Promise<{ generation: number }> {
     const existing = this.backups.get(backupId);
     if (existing && existing.generation !== expectedGeneration) throw new MosaicMcpError("CONFLICT", "backup generation conflict");
     if (existing && existing.write_token_hash !== tokenHash(writeToken)) throw new MosaicMcpError("AUTH_INVALID", "backup write token mismatch");
     const generation = expectedGeneration + 1;
-    this.backups.set(backupId, { ...envelope, generation, write_token_hash: tokenHash(writeToken), read_token_hash: readToken ? tokenHash(readToken) : null });
+    // A tokenless update must not silently drop an existing read credential (that would turn a
+    // protected backup world-readable): fall back to the stored hash / owner when not re-supplied.
+    this.backups.set(backupId, {
+      ...envelope,
+      generation,
+      write_token_hash: tokenHash(writeToken),
+      read_token_hash: readToken ? tokenHash(readToken) : existing?.read_token_hash ?? null,
+      owner_address: ownerAddress ?? existing?.owner_address ?? null,
+    });
     return { generation };
   }
 
   async getWalletBackupForRead(backupId: string, readToken?: string, address?: string): Promise<WalletBackupEnvelope | null> {
     const backup = this.backups.get(backupId);
     if (!backup) return null;
-    if (backup.read_token_hash) {
-      if (!readToken || backup.read_token_hash !== tokenHash(readToken)) throw new MosaicMcpError("AUTH_INVALID", "backup read token mismatch");
-    } else if (backup.owner_address && backup.owner_address !== address) {
-      throw new MosaicMcpError("AUTH_INVALID", "backup owner mismatch");
-    } else if (!readToken && !address) {
-      throw new MosaicMcpError("AUTH_INVALID", "backup read token or authenticated session required");
-    }
+    authorizeBackupRead(backup, readToken, address);
     const { write_token_hash: _writeTokenHash, read_token_hash: _readTokenHash, owner_address: _ownerAddress, ...envelope } = backup;
     return clone(envelope);
   }
@@ -550,7 +599,7 @@ export class MemoryMosaicStore implements MosaicStore {
     if (!job) throw new MosaicMcpError("NOT_FOUND", `base-shield job ${id} not found`);
     if (ownerAddress && job.owner_address && job.owner_address !== ownerAddress) throw new MosaicMcpError("AUTH_INVALID", "base-shield job owner mismatch");
     if (job.status !== "failed") return clone(job);
-    job.status = job.seal_hex && job.journal_hex ? "minting" : "proving";
+    job.status = resumeStatusForRetry(job);
     job.version = (job.version ?? 0) + 1;
     resetRetryState(job);
     return clone(job);
@@ -564,7 +613,7 @@ export class MemoryMosaicStore implements MosaicStore {
   async nextBaseShields(): Promise<BaseShieldJob[]> {
     // Map iteration preserves insertion order, so "first per stage" is "oldest per stage".
     const worker = randomUUID();
-    const lockUntil = now() + LEASE_TTL_MS;
+    const lockUntil = now() + baseShieldLeaseTtlMs();
     const jobs = oldestBaseShieldPerStage([...this.baseShields.values()].filter((job) => !job.lock_expires_at || job.lock_expires_at < now()));
     for (const job of jobs) {
       job.locked_by = worker;
@@ -585,6 +634,7 @@ export class MemoryMosaicStore implements MosaicStore {
     const job = this.baseShieldById(id);
     if (!job) throw new Error(`base-shield job ${id} not found`);
     job.status = requireFinality ? "awaiting_finality" : "minting";
+    job.require_finality = requireFinality;
     job.block_number = blockNumber;
     job.block_hash = blockHash;
     job.seal_hex = sealHex;
@@ -1083,6 +1133,7 @@ export class SqliteMosaicStore implements MosaicStore {
     readToken: string | undefined,
     expectedGeneration: number,
     envelope: WalletBackupEnvelope,
+    ownerAddress?: string,
   ): Promise<{ generation: number }> {
     return this.transaction(() => {
       const existing = parseJson<StoredBackup>(
@@ -1091,11 +1142,14 @@ export class SqliteMosaicStore implements MosaicStore {
       if (existing && existing.generation !== expectedGeneration) throw new MosaicMcpError("CONFLICT", "backup generation conflict");
       if (existing && existing.write_token_hash !== tokenHash(writeToken)) throw new MosaicMcpError("AUTH_INVALID", "backup write token mismatch");
       const generation = expectedGeneration + 1;
+      // A tokenless/sessionless update must not drop an existing read credential (that would turn a
+      // protected backup world-readable): fall back to the stored hash / owner when not re-supplied.
       const stored: StoredBackup = {
         ...envelope,
         generation,
         write_token_hash: tokenHash(writeToken),
         read_token_hash: readToken ? tokenHash(readToken) : existing?.read_token_hash ?? null,
+        owner_address: ownerAddress ?? existing?.owner_address ?? null,
       };
       this.db
         .prepare(
@@ -1112,13 +1166,7 @@ export class SqliteMosaicStore implements MosaicStore {
       this.db.prepare("SELECT json FROM wallet_backups WHERE backup_id = ?").get(backupId) as { json: string } | undefined,
     );
     if (!backup) return null;
-    if (backup.read_token_hash) {
-      if (!readToken || backup.read_token_hash !== tokenHash(readToken)) throw new MosaicMcpError("AUTH_INVALID", "backup read token mismatch");
-    } else if (backup.owner_address && backup.owner_address !== address) {
-      throw new MosaicMcpError("AUTH_INVALID", "backup owner mismatch");
-    } else if (!readToken && !address) {
-      throw new MosaicMcpError("AUTH_INVALID", "backup read token or authenticated session required");
-    }
+    authorizeBackupRead(backup, readToken, address);
     const { write_token_hash: _writeTokenHash, read_token_hash: _readTokenHash, owner_address: _ownerAddress, ...envelope } = backup;
     return clone(envelope);
   }
@@ -1164,7 +1212,7 @@ export class SqliteMosaicStore implements MosaicStore {
       if (!row) throw new MosaicMcpError("NOT_FOUND", `base-shield job ${id} not found`);
       if (ownerAddress && row.job.owner_address && row.job.owner_address !== ownerAddress) throw new MosaicMcpError("AUTH_INVALID", "base-shield job owner mismatch");
       if (row.job.status !== "failed") return clone(row.job);
-      const job: BaseShieldJob = { ...row.job, status: row.job.seal_hex && row.job.journal_hex ? "minting" : "proving", version: (row.job.version ?? 0) + 1 };
+      const job: BaseShieldJob = { ...row.job, status: resumeStatusForRetry(row.job), version: (row.job.version ?? 0) + 1 };
       resetRetryState(job);
       this.writeBaseShield(row.key, job);
       return clone(job);
@@ -1197,7 +1245,7 @@ export class SqliteMosaicStore implements MosaicStore {
         .prepare(`SELECT json FROM base_shields WHERE json_extract(json, '$.status') IN (${placeholders}) ORDER BY rowid ASC`)
         .all(...BASE_SHIELD_STAGES) as { json: string }[];
       const worker = randomUUID();
-      const deadline = now() + LEASE_TTL_MS;
+      const deadline = now() + baseShieldLeaseTtlMs();
       const jobs = oldestBaseShieldPerStage(
         rows
           .map((row) => JSON.parse(row.json) as BaseShieldJob)
@@ -1232,6 +1280,7 @@ export class SqliteMosaicStore implements MosaicStore {
       const job: BaseShieldJob = {
         ...row.job,
         status: requireFinality ? "awaiting_finality" : "minting",
+        require_finality: requireFinality,
         version: (row.job.version ?? 0) + 1,
         block_number: blockNumber,
         block_hash: blockHash,

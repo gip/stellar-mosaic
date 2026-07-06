@@ -137,15 +137,9 @@ class HttpMcpClient implements McpClient {
       isError?: boolean;
     };
     const text = res.content.find((c) => c.type === "text")?.text;
-    if (text) {
-      try {
-        const parsed = JSON.parse(text) as { ok?: boolean; error?: MosaicMcpErrorBody };
-        if (parsed.error) throw new MosaicMcpClientError(name, parsed.error);
-      } catch (error) {
-        if (error instanceof MosaicMcpClientError) throw error;
-      }
-    }
-    if (res.isError || !text) {
+    // Branch on the MCP protocol-level `isError` flag — never on a top-level `error` key, since
+    // successful domain payloads (Operation, BaseShieldJob) legitimately carry `error: string`.
+    if (res.isError) {
       if (text) {
         try {
           const parsed = JSON.parse(text) as { error?: MosaicMcpErrorBody };
@@ -156,6 +150,7 @@ class HttpMcpClient implements McpClient {
       }
       throw new Error(`MCP tool ${name} failed: ${text ?? "no result"}`);
     }
+    if (!text) throw new Error(`MCP tool ${name} failed: no result`);
     return JSON.parse(text) as T;
   }
 
@@ -383,7 +378,9 @@ class HttpMcpClient implements McpClient {
     backupId: string,
     body: WalletBackupEnvelope & { expected_generation: number; write_token: string },
   ): Promise<{ generation: number }> {
-    return this.call("put_wallet_backup", { backup_id: backupId, body });
+    // Send the session when authenticated so the server can bind the backup to this wallet as owner,
+    // enabling session-based restore on a fresh device (no separately-stored read token needed).
+    return this.call("put_wallet_backup", { backup_id: backupId, body, ...(this.sessionToken ? { session: this.sessionToken } : {}) });
   }
 
   baseShieldConfig(deskId: string): Promise<BaseShieldConfig> {

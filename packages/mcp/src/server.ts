@@ -69,7 +69,11 @@ function slowToolThresholdMs(env: NodeJS.ProcessEnv = process.env): number {
 }
 
 const ok = (data: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(data) }] });
-const fail = (error: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify({ ok: false, ...mcpErrorContent(error) }) }] });
+// A tool failure must set the MCP protocol-level `isError` flag, not just embed `{ok:false}` in the
+// text — otherwise a generic MCP client (Claude Desktop, inspector, another agent) reads the failure
+// as a successful result. The structured MosaicMcpErrorBody rides along in the text for clients that
+// want the typed code/retryable/correlation_id.
+const fail = (error: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify({ ok: false, ...mcpErrorContent(error) }) }], isError: true });
 const body = (args: Record<string, unknown>) => (args.body ?? {}) as Record<string, unknown>;
 
 function toolTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -397,16 +401,26 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   );
   reg(
     "put_wallet_backup",
-    { description: "Write opaque wallet backup.", inputSchema: { backup_id: z.string(), body: z.record(z.unknown()) } },
+    { description: "Write opaque wallet backup.", inputSchema: { backup_id: z.string(), session: z.string().optional(), body: z.record(z.unknown()) } },
     async (args) => {
       const b = body(args);
+      // Bind the backup to the authenticated owner when a session is supplied, so it can later be
+      // read back by that wallet on a fresh device without a separately-stored read token.
+      const owner = typeof args.session === "string" && args.session ? (await auth.getSession(args.session))?.address : undefined;
       return ok(
-        await store.putWalletBackup(String(args.backup_id), String(b.write_token), typeof b.read_token === "string" ? b.read_token : undefined, Number(b.expected_generation), {
-          format_version: 1,
-          generation: Number(b.generation ?? 0),
-          nonce_b64: String(b.nonce_b64),
-          ciphertext_b64: String(b.ciphertext_b64),
-        }),
+        await store.putWalletBackup(
+          String(args.backup_id),
+          String(b.write_token),
+          typeof b.read_token === "string" ? b.read_token : undefined,
+          Number(b.expected_generation),
+          {
+            format_version: 1,
+            generation: Number(b.generation ?? 0),
+            nonce_b64: String(b.nonce_b64),
+            ciphertext_b64: String(b.ciphertext_b64),
+          },
+          owner,
+        ),
       );
     },
   );

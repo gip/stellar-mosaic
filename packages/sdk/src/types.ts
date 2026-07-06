@@ -342,6 +342,9 @@ export interface BaseShieldJob {
   version?: number;
   locked_by?: string | null;
   lock_expires_at?: number | null;
+  /** Whether this deposit must wait for Base L1 finality before minting. Set when the proof lands so
+   * a retry of a job that failed during the finality wait resumes at `awaiting_finality`, not `minting`. */
+  require_finality?: boolean;
   block_number?: number | null;
   block_hash?: string | null;
   seal_hex?: string | null;
