@@ -19,12 +19,19 @@ interface StorageModeState {
 
 const Ctx = createContext<StorageModeState | null>(null)
 
-function initialMode(): StorageMode {
+// The explicit preference the user picked with the toggle, or null if they never chose one.
+// Forced fallbacks (logged out, session failure) must not masquerade as a choice here.
+function storedMode(): StorageMode | null {
   try {
-    return localStorage.getItem(STORAGE_MODE_KEY) === 'trusted' ? 'trusted' : 'trustless'
+    const raw = localStorage.getItem(STORAGE_MODE_KEY)
+    return raw === 'trusted' || raw === 'trustless' ? raw : null
   } catch {
-    return 'trustless'
+    return null
   }
+}
+
+function initialMode(): StorageMode {
+  return storedMode() ?? 'trusted'
 }
 
 function persistMode(mode: StorageMode) {
@@ -61,9 +68,26 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
       setRecoveryMode('trustless')
       setRecoveryBackendEnabled(false)
       resetApiCaches()
+      // In-memory only: logging out is not a mode choice, so the trusted default (or an
+      // explicit stored preference) still applies at the next login.
       setModeState('trustless')
-      persistMode('trustless')
       void api.deleteAuthSession().catch(() => {})
+    })
+    return () => {
+      active = false
+    }
+  }, [mode, wallet.address, wallet.ready])
+
+  // Logging in lands in Trusted mode unless the user explicitly chose Trustless.
+  useEffect(() => {
+    if (!wallet.ready || !wallet.address) return
+    if (mode === 'trusted') return
+    if (storedMode() === 'trustless') return
+    let active = true
+    queueMicrotask(() => {
+      if (!active) return
+      resetApiCaches()
+      setModeState('trusted')
     })
     return () => {
       active = false
