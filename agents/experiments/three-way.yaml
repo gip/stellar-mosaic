@@ -28,6 +28,7 @@ agents:
       Today spot price for XLM/USDC is 0.18. Sell 10-20 XLM for USDC at 0.17 or better. carol is
       the buyer; alice is a competing seller. Quote competitively.
 
+# XLM bound leaves room for tx fees + the ~1.6 XLM desk-deploy cost (any agent may deploy).
 verdict:
-  - { agent: carol, asset: XLM, min: "9" }
+  - { agent: carol, asset: XLM, min: "8" }
   - { agent: carol, asset: USDC, max: "-1" }

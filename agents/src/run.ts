@@ -95,6 +95,7 @@ function writeAgentFiles(cfg: ExperimentConfig, provisioned: Provisioned, runDir
       apiKey: agent.apiKey,
       model: agent.model,
       prompt: agent.prompt,
+      webSearch: agent.webSearch,
       maxTurns: cfg.maxTurns,
       stellarSecret: agent.stellarSecret,
       stellarAddress: agent.stellarAddress,
@@ -217,15 +218,22 @@ async function main(): Promise<void> {
   console.log(pass ? "PASS ✅" : "FAIL ❌");
 
   // Per-agent outcome from the transcripts the children wrote (usage, finish reason).
+  interface TokenUsage {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    reasoningTokens?: number;
+    cachedInputTokens?: number;
+  }
   const agentOutcomes = provisioned.agents.map((a, i) => {
     const transcriptPath = join(runDir, `${a.name}.transcript.json`);
     let finishReason: string | undefined;
-    let totalUsage: unknown;
+    let totalUsage: TokenUsage | undefined;
     let steps: number | undefined;
     if (existsSync(transcriptPath)) {
       const t = JSON.parse(readFileSync(transcriptPath, "utf8")) as {
         finishReason?: string;
-        totalUsage?: unknown;
+        totalUsage?: TokenUsage;
         steps?: unknown[];
       };
       finishReason = t.finishReason;
@@ -248,6 +256,19 @@ async function main(): Promise<void> {
       transcript: existsSync(transcriptPath) ? transcriptPath : undefined,
     };
   });
+
+  console.log("--- token usage ---");
+  for (const o of agentOutcomes) {
+    const u = o.totalUsage;
+    const label = `${o.name.padEnd(8)} ${o.provider}/${o.model}`;
+    if (!u) {
+      console.log(`${label}  no transcript`);
+      continue;
+    }
+    console.log(
+      `${label}  in ${u.inputTokens ?? "?"} (cached ${u.cachedInputTokens ?? 0})  out ${u.outputTokens ?? "?"} (reasoning ${u.reasoningTokens ?? 0})  total ${u.totalTokens ?? "?"}`,
+    );
+  }
 
   const resultsDir = join(PACKAGE_ROOT, "results");
   mkdirSync(resultsDir, { recursive: true });

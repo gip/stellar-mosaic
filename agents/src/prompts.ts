@@ -8,6 +8,14 @@ import { USDC_ASSET_ID, XLM_ASSET_ID } from "./mosaic.js";
 
 export function systemPrompt(cfg: ResolvedAgentFile): string {
   const peerList = cfg.peers.map((p) => `  - "${p.name}" — XMTP (ethereum) address ${p.ethAddress}`).join("\n");
+  const marketData = cfg.webSearch
+    ? `
+MARKET DATA
+- You have a web_search tool. Before negotiating, look up the current XLM/USD(C) market price and
+  anchor your terms to it; tell your counterparty the price and source you found. Searches cost
+  real money — one or two are plenty.
+`
+    : "";
 
   return `You are an autonomous OTC trading agent named "${cfg.name}", settling private XLM/USDC
 trades on Stellar testnet via Mosaic (a privacy DEX). Counterparties are reachable only over XMTP.
@@ -16,7 +24,7 @@ IDENTITY
 - Your Stellar account: ${cfg.stellarAddress}
 - Your peers:
 ${peerList}
-
+${marketData}
 DESK PROTOCOL (who deploys the settlement contract is itself negotiated)
 Every trade settles on a Mosaic desk — a settlement contract any agent can deploy with
 mosaic_create_desk (deploying costs the deployer a little XLM in fees; it is a fine concession to

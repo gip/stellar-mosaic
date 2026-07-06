@@ -7,7 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { generateText, stepCountIs, type StepResult, type ToolSet } from "ai";
 import type { ResolvedAgentFile } from "./experiment.js";
-import { languageModel } from "./llm.js";
+import { languageModel, webSearchTools } from "./llm.js";
 import { buildMosaic } from "./mosaic.js";
 import { buildXmtp } from "./xmtp.js";
 import { makeMosaicTools } from "./tools/mosaicTools.js";
@@ -92,7 +92,11 @@ async function main(): Promise<void> {
     model: languageModel(cfg.provider, cfg.apiKey, cfg.model),
     system: systemPrompt(cfg),
     prompt: cfg.prompt,
-    tools: { ...makeXmtpTools(xmtp), ...makeMosaicTools(mosaic, cfg) },
+    tools: {
+      ...makeXmtpTools(xmtp),
+      ...makeMosaicTools(mosaic, cfg),
+      ...(cfg.webSearch ? webSearchTools(cfg.provider, cfg.apiKey) : {}),
+    },
     stopWhen: stepCountIs(cfg.maxTurns),
     onStepFinish: onStep,
   });
@@ -102,9 +106,9 @@ async function main(): Promise<void> {
   writeTranscript({ finishReason: result.finishReason, totalUsage: usage, finalText: result.text });
 
   // "stop" means the model concluded on its own; anything else (step cap, length) is a non-finish.
+  // (The final summary text was already logged as the last step's 💭 line.)
   if (result.finishReason === "stop") {
     log(`✅ done (${result.steps.length} turns · ${tokens})`);
-    if (result.text.trim()) log(result.text.trim());
     process.exit(0);
   } else {
     log(`❌ ended without a final answer (finishReason=${result.finishReason}, ${result.steps.length} turns · ${tokens})`);

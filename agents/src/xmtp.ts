@@ -126,7 +126,7 @@ export async function buildXmtp(cfg: ResolvedAgentFile, log: (line: string) => v
       if (!dm) throw new Error(`no DM open with ${peerKey}`);
       await dm.sendText(text);
       transcript.push({ direction: "sent", peer: peerKey, text, at: new Date().toISOString() });
-      log(`xmtp >> [${peerKey}] ${text}`);
+      // No log line here — the xmtp_send tool call is already logged by the step logger.
     },
   };
 }

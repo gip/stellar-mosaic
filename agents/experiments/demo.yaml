@@ -18,9 +18,11 @@ agents:
     funding:
       usdc: "100"
 
-# Independent PASS/FAIL from Horizon balance deltas (decimal units; XLM deltas absorb fees):
+# Independent PASS/FAIL from Horizon balance deltas (decimal units). XLM deltas absorb tx fees
+# AND the ~1.6 XLM desk-deploy cost, which lands on whichever agent wins the desk-creator
+# negotiation — hence the slack on both XLM bounds.
 verdict:
   - { agent: alice, asset: USDC, min: "1.5" }
   - { agent: alice, asset: XLM, max: "-9" }
   - { agent: bob, asset: USDC, max: "-1.5" }
-  - { agent: bob, asset: XLM, min: "9" }
+  - { agent: bob, asset: XLM, min: "8" }

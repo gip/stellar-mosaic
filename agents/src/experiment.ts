@@ -42,6 +42,8 @@ const agentSchema = z.object({
   model: z.string().min(1),
   /** The agent's trading mandate — becomes its task prompt. */
   prompt: z.string().min(1),
+  /** Enable the provider's native web-search tool (Anthropic web_search / OpenAI Responses web search). */
+  webSearch: z.boolean().optional(),
   /** Funded Stellar secret (S...). Omit to generate a fresh keypair funded via friendbot. */
   stellarSecret: z.string().regex(/^S[A-Z2-7]{55}$/, "expected a Stellar secret seed (S...)").optional(),
   /** Ethereum private key (XMTP identity). Omit to generate one. */
@@ -152,6 +154,7 @@ export interface ResolvedAgentFile {
   apiKey: string;
   model: string;
   prompt: string;
+  webSearch: boolean;
   maxTurns: number;
   stellarSecret: string;
   stellarAddress: string;

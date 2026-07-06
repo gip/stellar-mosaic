@@ -26,6 +26,7 @@ export interface ProvisionedIdentity {
   provider: Provider;
   model: string;
   prompt: string;
+  webSearch: boolean;
   apiKey: string;
   stellarSecret: string;
   stellarAddress: string;
@@ -134,6 +135,7 @@ export async function provision(
       provider: a.provider,
       model: a.model,
       prompt: a.prompt,
+      webSearch: a.webSearch ?? false,
       apiKey: apiKey ?? "",
       stellarSecret: stellar.secret(),
       stellarAddress: stellar.publicKey(),
