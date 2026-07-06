@@ -1237,6 +1237,9 @@ tbody tr:hover {
   width: 1%;
   white-space: nowrap;
 }
+.notes-table .col-type {
+  white-space: nowrap;
+}
 
 /* ---- Overview: interactive trust-model diagram (ArchDiagram.tsx) ----
  * Ported from the standalone HTML mockup; colors/fonts are re-sourced from the site
