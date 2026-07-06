@@ -16,6 +16,17 @@ function normalizedText(error: unknown): string {
   return errorMessage(error).toLowerCase();
 }
 
+/**
+ * The contract error code from a Soroban host error rendering, e.g. `Error(Contract, #27)`, as it
+ * appears in `stellar` CLI / RPC error text; `null` when the text carries no contract error.
+ * Caveat: this parses free-form diagnostic text, so when the failure involves a cross-contract
+ * call the code may belong to a sub-call's contract rather than the invoked one.
+ */
+export function contractErrorCode(error: unknown): number | null {
+  const match = errorMessage(error).match(/Error\(Contract, #(\d+)\)/);
+  return match ? Number(match[1]) : null;
+}
+
 export function transactionErrorMessage(error: unknown, call?: ContractCall): string {
   const text = normalizedText(error);
   if (

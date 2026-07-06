@@ -45,9 +45,13 @@ derives the tag, deposits, then enqueues by `deposit_id`).
 
 **Durability.** Jobs (including proof artifacts) live in the SQLite store, so a restart resumes each
 job from its persisted stage; the prove service caches completed proofs on disk, so re-submits are
-no-ops. Transient step failures (a prove-service error, a Stellar RPC/CLI hiccup during mint) retry
-in-stage with a per-stage attempt cap before the job goes `failed`; a mint rejected by the contract
-as `DepositAlreadyProcessed` (#27) means an earlier attempt landed (e.g. a crash between the mint
+no-ops. Every step failure retries in-stage with an attempt cap before the job goes `failed`:
+tight caps for a service-reported prove error (each retry is a full re-prove) and a failed mint
+submission (a real on-chain attempt), a generous cap (~10 min of continuous failure) for
+transport-level throws (prove service/Base RPC unreachable) — counted and persisted so an outage
+is visible in `list_base_shields` yet cannot leave a job retrying invisibly forever. A mint
+rejected by the contract as `DepositAlreadyProcessed` (#27, classified into a typed error at the
+`mintOnStellar` CLI boundary) means an earlier attempt landed (e.g. a crash between the mint
 and the status write) and resolves the job to `active`. Two caveats: the default
 `MOSAIC_DATABASE_URL` (`sqlite://./mosaic-mcp.db`) is cwd-relative — set an absolute path in
 deployment or a different cwd silently starts an empty store — and the worker assumes a single MCP

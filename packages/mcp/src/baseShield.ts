@@ -13,8 +13,16 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { contractErrorCode, errorMessage } from "@mosaic/sdk";
 
 const execFileAsync = promisify(execFile);
+
+/** The settlement contract's `DepositAlreadyProcessed` error code (contracts/settlement Error enum). */
+const DEPOSIT_ALREADY_PROCESSED_CODE = 27;
+
+/** `shield_from_base` rejected because this Base depositId already minted a note — a previous mint
+ * attempt actually landed (e.g. the process died between the mint and the status write). */
+export class DepositAlreadyProcessedError extends Error {}
 
 /** A Stellar transaction hash as the `stellar` CLI logs it to stderr (64 lowercase hex chars). */
 const STELLAR_TX_HASH = /\b[0-9a-f]{64}\b/g;
@@ -138,11 +146,25 @@ export async function mintOnStellar(
       ["contract", "invoke", "--id", args.contractId, "--source-account", args.sponsorSecret, ...net, "--send", "yes", "--", ...fnArgs],
       { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
     );
+  // Attest first (idempotent: the contract just overwrites the block registry entry), then mint.
   await invoke(["attest_base_block", "--block_number", String(args.blockNumber), "--block_hash", args.blockHash]);
+  let shielded: { stderr?: string };
+  try {
+    shielded = await invoke(["shield_from_base", "--seal-file-path", sealPath, "--journal-file-path", journalPath]);
+  } catch (e) {
+    // Classify the contract's DepositAlreadyProcessed (#27) here, at the CLI boundary, so callers
+    // switch on a typed error instead of matching stderr text. Scoped to `shield_from_base` only:
+    // in the settlement contract #27 is raised solely by its deposit-replay guard, though the code
+    // is parsed from free-form CLI output, so a #27 surfaced by the RISC Zero router sub-call
+    // would also match.
+    if (contractErrorCode(e) === DEPOSIT_ALREADY_PROCESSED_CODE) {
+      throw new DepositAlreadyProcessedError(errorMessage(e));
+    }
+    throw e;
+  }
   // The CLI writes the SUBMITTED TRANSACTION HASH to stderr; stdout carries only the function's
   // return value, which is empty for `shield_from_base` (it returns `()`). So read the hash off
   // stderr, matching how deploy.ts captures the tx of a `--send yes` invoke. Without this the mint
   // tx hash is lost and the Activity entry can never link the Stellar leg.
-  const { stderr } = await invoke(["shield_from_base", "--seal-file-path", sealPath, "--journal-file-path", journalPath]);
-  return { txHash: (stderr ?? "").match(STELLAR_TX_HASH)?.pop() ?? "" };
+  return { txHash: (shielded.stderr ?? "").match(STELLAR_TX_HASH)?.pop() ?? "" };
 }

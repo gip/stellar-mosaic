@@ -102,6 +102,18 @@ function oldestBaseShieldPerStage(jobs: Iterable<BaseShieldJob>): BaseShieldJob[
   return BASE_SHIELD_STAGES.map((stage) => byStage.get(stage)).filter((job): job is BaseShieldJob => job !== undefined);
 }
 
+/** Clear the retry state — every stage transition starts with a fresh attempt budget. */
+function resetRetryState(job: BaseShieldJob): void {
+  job.attempts = 0;
+  job.error = null;
+}
+
+/** Record one more transient step failure in the job's current stage. */
+function bumpRetryState(job: BaseShieldJob, error: string): void {
+  job.attempts = (job.attempts ?? 0) + 1;
+  job.error = error;
+}
+
 /**
  * Reject a base-shield enqueue whose bridge disagrees with what the desk was actually configured
  * with on-chain (recorded at deploy). This is the drift guard: a stale front-end must not queue a
@@ -515,8 +527,7 @@ export class MemoryMosaicStore implements MosaicStore {
     job.block_hash = blockHash;
     job.seal_hex = sealHex;
     job.journal_hex = journalHex;
-    job.attempts = 0;
-    job.error = null;
+    resetRetryState(job);
   }
 
   async baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void> {
@@ -524,15 +535,13 @@ export class MemoryMosaicStore implements MosaicStore {
     if (!job) throw new Error(`base-shield job ${id} not found`);
     job.status = status;
     if (stellarTxHash) job.stellar_tx_hash = stellarTxHash;
-    job.attempts = 0;
-    job.error = null;
+    resetRetryState(job);
   }
 
   async baseShieldRetry(id: string, error: string): Promise<void> {
     const job = this.baseShieldById(id);
     if (!job) throw new Error(`base-shield job ${id} not found`);
-    job.attempts = (job.attempts ?? 0) + 1;
-    job.error = error;
+    bumpRetryState(job, error);
   }
 
   async baseShieldFailed(id: string, error: string): Promise<void> {
@@ -977,8 +986,13 @@ export class SqliteMosaicStore implements MosaicStore {
   }
 
   async nextBaseShields(): Promise<BaseShieldJob[]> {
-    // Oldest first: rowid is monotonic in insertion order.
-    const rows = this.db.prepare("SELECT json FROM base_shields ORDER BY rowid ASC").all() as { json: string }[];
+    // Oldest first: rowid is monotonic in insertion order. Filter to the active stages in SQL so
+    // the ever-growing set of terminal jobs (with their large seal/journal blobs) is never
+    // fetched or parsed.
+    const placeholders = BASE_SHIELD_STAGES.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT json FROM base_shields WHERE json_extract(json, '$.status') IN (${placeholders}) ORDER BY rowid ASC`)
+      .all(...BASE_SHIELD_STAGES) as { json: string }[];
     return oldestBaseShieldPerStage(rows.map((row) => JSON.parse(row.json) as BaseShieldJob));
   }
 
@@ -992,34 +1006,31 @@ export class SqliteMosaicStore implements MosaicStore {
   ): Promise<void> {
     const row = this.baseShieldRowById(id);
     if (!row) throw new Error(`base-shield job ${id} not found`);
-    this.writeBaseShield(row.key, {
+    const job: BaseShieldJob = {
       ...row.job,
       status: requireFinality ? "awaiting_finality" : "minting",
       block_number: blockNumber,
       block_hash: blockHash,
       seal_hex: sealHex,
       journal_hex: journalHex,
-      attempts: 0,
-      error: null,
-    });
+    };
+    resetRetryState(job);
+    this.writeBaseShield(row.key, job);
   }
 
   async baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void> {
     const row = this.baseShieldRowById(id);
     if (!row) throw new Error(`base-shield job ${id} not found`);
-    this.writeBaseShield(row.key, {
-      ...row.job,
-      status,
-      ...(stellarTxHash ? { stellar_tx_hash: stellarTxHash } : {}),
-      attempts: 0,
-      error: null,
-    });
+    const job: BaseShieldJob = { ...row.job, status, ...(stellarTxHash ? { stellar_tx_hash: stellarTxHash } : {}) };
+    resetRetryState(job);
+    this.writeBaseShield(row.key, job);
   }
 
   async baseShieldRetry(id: string, error: string): Promise<void> {
     const row = this.baseShieldRowById(id);
     if (!row) throw new Error(`base-shield job ${id} not found`);
-    this.writeBaseShield(row.key, { ...row.job, attempts: (row.job.attempts ?? 0) + 1, error });
+    bumpRetryState(row.job, error);
+    this.writeBaseShield(row.key, row.job);
   }
 
   async baseShieldFailed(id: string, error: string): Promise<void> {

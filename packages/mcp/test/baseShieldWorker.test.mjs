@@ -1,11 +1,14 @@
 // Worker error-policy tests, driven tick-by-tick via runBaseShieldTick with injected step
 // functions (no prove service, no Base RPC, no `stellar` CLI). Covers the crash-recovery gaps:
-// a re-mint rejected as DepositAlreadyProcessed (#27) resolves to `active`, and transient
-// prove/mint failures retry up to the stage cap instead of failing terminally on first error.
+// a re-mint rejected as DepositAlreadyProcessed resolves to `active`, transient prove/mint
+// failures retry up to the stage cap instead of failing terminally on first error, and
+// transport-level throws (service/RPC unreachable) are counted and capped rather than looping
+// invisibly forever.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { MemoryMosaicStore } from "../dist/store.js";
-import { runBaseShieldTick } from "../dist/baseShieldWorker.js";
+import { runBaseShieldTick, TRANSPORT_MAX_ATTEMPTS } from "../dist/baseShieldWorker.js";
+import { DepositAlreadyProcessedError } from "../dist/baseShield.js";
 
 const BASE_BRIDGE = "0xabababababababababababababababababababab";
 const CFG = {
@@ -63,14 +66,14 @@ test("happy path: proving -> minting (finality off by default) -> active with th
   assert.equal(done.stellar_tx_hash, "ef".repeat(32));
 });
 
-test("mint rejected as DepositAlreadyProcessed (#27) marks the job active, not failed", async () => {
+test("mint rejected as DepositAlreadyProcessed marks the job active, not failed", async () => {
   const { store, job } = await storeWithJob();
   await store.baseShieldProved(job.id, 42, "cd".repeat(32), "aa", "bb", false);
 
-  // The re-mint after a crash-between-mint-and-status-write: the contract says the deposit already
-  // minted a note, which means a previous attempt landed.
+  // The re-mint after a crash-between-mint-and-status-write: mintOnStellar classified the
+  // contract's #27 (deposit already minted a note), meaning a previous attempt landed.
   const s = steps(async () => {
-    throw new Error('transaction simulation failed: HostError: Error(Contract, #27)');
+    throw new DepositAlreadyProcessedError("transaction simulation failed: HostError: Error(Contract, #27)");
   });
   await runBaseShieldTick(store, CFG, s);
 
@@ -158,6 +161,49 @@ test("prove-service errors resubmit on later ticks and only fail after the attem
   state = await jobState(store, job.id);
   assert.equal(state.status, "failed");
   assert.match(state.error, /prove: .*timed out/);
+});
+
+test("a thrown submitProve (prove service unreachable) is counted, visible, and capped", async () => {
+  const { store, job } = await storeWithJob();
+
+  let submits = 0;
+  const s = steps(async () => ({ txHash: "" }), {
+    submitProve: async () => {
+      submits += 1;
+      throw new Error("prove submit failed: 503 service unavailable");
+    },
+  });
+
+  await runBaseShieldTick(store, CFG, s);
+  let state = await jobState(store, job.id);
+  assert.equal(state.status, "proving", "a transport failure keeps the job in its stage");
+  assert.equal(state.attempts, 1, "the failure is counted");
+  assert.match(state.error, /proving: .*503/, "the failure is persisted for list_base_shields");
+
+  // The generous transport cap is still finite: a permanently-failing job goes terminal instead
+  // of head-of-line-blocking its stage forever.
+  for (let i = 1; i < TRANSPORT_MAX_ATTEMPTS; i += 1) await runBaseShieldTick(store, CFG, s);
+  state = await jobState(store, job.id);
+  assert.equal(state.status, "failed");
+  assert.match(state.error, /proving: .*503/);
+  assert.equal(submits, TRANSPORT_MAX_ATTEMPTS);
+});
+
+test("a thrown isFinalized (Base RPC unreachable) is counted against the transport cap", async () => {
+  const { store, job } = await storeWithJob();
+  await store.baseShieldProved(job.id, 42, "cd".repeat(32), "aa", "bb", true);
+
+  const s = steps(async () => ({ txHash: "" }), {
+    isFinalized: async () => {
+      throw new Error("base rpc finalized query failed: 502");
+    },
+  });
+  await runBaseShieldTick(store, CFG, s);
+
+  const state = await jobState(store, job.id);
+  assert.equal(state.status, "awaiting_finality");
+  assert.equal(state.attempts, 1);
+  assert.match(state.error, /awaiting_finality: .*502/);
 });
 
 test("a prove success after transient errors advances the job and resets the counter", async () => {

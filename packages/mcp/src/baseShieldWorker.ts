@@ -14,21 +14,25 @@
 // the remote prove service caches completed proofs on disk. A restart mid-flight simply resubmits or
 // re-polls; nothing re-holds a connection or loses work.
 //
-// Error policy: transient step failures (a prove-service error report, a Stellar RPC/CLI hiccup
-// during mint) bump the job's `attempts` counter and leave it in its stage — the next tick retries —
-// until the stage's attempt cap, and only then move it to the terminal `failed`. The counter resets
-// on every stage transition. A mint rejected with the contract's `DepositAlreadyProcessed` (#27)
-// means a previous attempt (possibly right before a crash) already minted the note, so the job is
-// marked `active`, not `failed`.
+// Error policy: every step failure bumps the job's `attempts` counter and leaves it in its stage —
+// the next tick retries — until an attempt cap, and only then moves it to the terminal `failed`.
+// The counter resets on every stage transition. The cap depends on the failure class: a
+// service-reported prove error (a full ~10-min re-prove per retry) and a failed mint submission
+// (a real on-chain attempt) get tight caps, while transport-level throws (prove service/Base
+// RPC/store unreachable) get a generous cap — the single shared counter is judged against the cap
+// of whichever class the latest failure belongs to. A mint rejected with the contract's
+// `DepositAlreadyProcessed` (#27) means a previous attempt (possibly right before a crash) already
+// minted the note, so the job is marked `active`, not `failed`.
 
 import {
+  DepositAlreadyProcessedError,
   isFinalized,
   mintOnStellar,
   pollProve,
   submitProve,
   type BaseShieldConfig,
 } from "./baseShield.js";
-import type { BaseShieldJob } from "@mosaic/sdk";
+import { errorMessage, type BaseShieldJob, type MosaicLogger } from "@mosaic/sdk";
 import type { MosaicStore } from "./store.js";
 
 export interface BaseShieldWorkerHandle {
@@ -48,14 +52,19 @@ const defaultSteps: BaseShieldSteps = { submitProve, pollProve, isFinalized, min
 
 const DEFAULT_INTERVAL_MS = 12_000;
 
-// Transient-failure caps per stage before a job goes terminal. Each prove retry is a full re-prove
-// (~10 min on the service), so it gets fewer attempts than the ~seconds-long mint submission.
+// Failure caps before a job goes terminal. Each prove retry is a full re-prove (~10 min on the
+// service), so it gets fewer attempts than the ~seconds-long mint submission. Transport-level
+// throws (prove service/Base RPC/store unreachable) are cheap and usually an outage rather than a
+// property of the job, so they get a generous cap (~10 min of continuous failure at the default
+// 12s interval) — finite, so a poisoned job cannot head-of-line-block its stage forever.
 const PROVE_MAX_ATTEMPTS = 3;
 const MINT_MAX_ATTEMPTS = 5;
+export const TRANSPORT_MAX_ATTEMPTS = 50;
 
-/** The settlement contract's `DepositAlreadyProcessed` (#27), as the `stellar` CLI reports it: this
- * deposit id already minted a note, i.e. a previous mint attempt actually landed. */
-const DEPOSIT_ALREADY_PROCESSED = /Error\(Contract, #27\)/;
+type Job = BaseShieldJob;
+type Logger = Pick<MosaicLogger, "info" | "warn">;
+
+const noopLog: Logger = { info: () => {}, warn: () => {} };
 
 /**
  * Start the background worker. No-op-safe to call once per server; returns a handle whose `stop()`
@@ -66,12 +75,12 @@ export function startBaseShieldWorker(
   config: BaseShieldConfig,
   opts: {
     intervalMs?: number;
-    logger?: { info: (m: string) => void; warn: (m: string) => void };
+    logger?: Logger;
     steps?: BaseShieldSteps;
   } = {},
 ): BaseShieldWorkerHandle {
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
-  const log = opts.logger ?? { info: () => {}, warn: () => {} };
+  const log = opts.logger ?? noopLog;
   const steps = opts.steps ?? defaultSteps;
   let stopped = false;
   let busy = false;
@@ -82,7 +91,7 @@ export function startBaseShieldWorker(
     try {
       await runBaseShieldTick(store, config, steps, log);
     } catch (e) {
-      log.warn(`base-shield worker tick failed: ${e instanceof Error ? e.message : String(e)}`);
+      log.warn(`base-shield worker tick failed: ${errorMessage(e)}`);
     } finally {
       busy = false;
     }
@@ -100,11 +109,6 @@ export function startBaseShieldWorker(
   };
 }
 
-type Job = BaseShieldJob;
-type Logger = { info: (m: string) => void; warn: (m: string) => void };
-
-const noopLog: Logger = { info: () => {}, warn: () => {} };
-
 /** One worker tick: advance the oldest job in each active stage by one step. */
 export async function runBaseShieldTick(
   store: MosaicStore,
@@ -120,7 +124,14 @@ export async function runBaseShieldTick(
       else if (job.status === "awaiting_finality") await advanceFinality(store, config, steps, job, log);
       else if (job.status === "minting") await advanceMinting(store, config, steps, job, log);
     } catch (e) {
-      log.warn(`base-shield ${job.id}: tick step failed: ${e instanceof Error ? e.message : String(e)}`);
+      // Transport-level throws (prove service/Base RPC/store unreachable) must still count toward
+      // a terminal state: an uncounted failure would retry forever, invisibly (no persisted
+      // error), and head-of-line-block its whole stage (the batch is oldest-per-stage).
+      try {
+        await retryOrFail(store, job, `${job.status}: ${errorMessage(e)}`, TRANSPORT_MAX_ATTEMPTS, log);
+      } catch (bookkeeping) {
+        log.warn(`base-shield ${job.id}: step failed (${errorMessage(e)}) and retry bookkeeping failed: ${errorMessage(bookkeeping)}`);
+      }
     }
   }
 }
@@ -195,14 +206,13 @@ async function advanceMinting(store: MosaicStore, config: BaseShieldConfig, step
     await store.baseShieldStatus(job.id, "active", txHash);
     log.info(`base-shield ${job.id}: minted (${txHash})`);
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    if (DEPOSIT_ALREADY_PROCESSED.test(message)) {
+    if (e instanceof DepositAlreadyProcessedError) {
       // A previous attempt landed (e.g. the process died between the mint and the status write).
       // The note exists on-chain, so the job is done; the mint tx hash from that attempt is lost.
       await store.baseShieldStatus(job.id, "active");
       log.info(`base-shield ${job.id}: deposit already minted on-chain; marking active`);
       return;
     }
-    await retryOrFail(store, job, `mint: ${message}`, MINT_MAX_ATTEMPTS, log);
+    await retryOrFail(store, job, `mint: ${errorMessage(e)}`, MINT_MAX_ATTEMPTS, log);
   }
 }
