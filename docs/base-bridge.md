@@ -113,8 +113,10 @@ Requires `MOSAIC_BASE_RPC`, `MOSAIC_PROVER_DIR`, `MOSAIC_CAST_BIN`, `MOSAIC_PROV
 
 **The MCP worker (`packages/mcp/src/baseShieldWorker.ts`).** A durable, crash-resumable loop that
 owns the whole lifecycle and drives the prove service by **submit + poll** (never a held
-connection). It advances one `base_shields` job per tick through
-`proving → awaiting_finality → minting → active|failed`:
+connection). Each tick advances the oldest `base_shields` job **per lifecycle stage** through
+`proving → awaiting_finality → minting → active|failed`, so the stages pipeline: one deposit's
+finality wait never blocks the next deposit's proving (the prove service serializes proving
+itself, so concurrent submits just queue there):
 
 - `proving` — `submitProve` (idempotent), then `pollProve`; on `done` it persists
   seal/journal + committed block and moves to `awaiting_finality`.

@@ -67,8 +67,9 @@ export interface MosaicStore {
   ): Promise<{ generation: number }>;
   enqueueBaseShield(deskId: string, bridge: string, depositId: number, deposit?: BaseShieldDeposit): Promise<BaseShieldJob>;
   listBaseShields(deskId: string): Promise<BaseShieldJob[]>;
-  /** Oldest base-shield job still in a non-terminal state (proving|awaiting_finality|minting). */
-  nextBaseShield(): Promise<BaseShieldJob | null>;
+  /** Oldest active base-shield job per lifecycle stage (proving|awaiting_finality|minting), in that
+   * stage order — one deposit's finality wait must not block the next deposit's proving. */
+  nextBaseShields(): Promise<BaseShieldJob[]>;
   /** Persist the proof + committed block and advance the job. When `requireFinality` is true the job
    * moves to `awaiting_finality` (the worker then waits for Base L1 finality); otherwise it goes
    * straight to `minting`. */
@@ -86,8 +87,17 @@ export interface MosaicStore {
   baseShieldFailed(id: string, error: string): Promise<void>;
 }
 
-/** Base-shield job states that the worker still needs to advance. */
-const BASE_SHIELD_ACTIVE = new Set(["proving", "awaiting_finality", "minting"]);
+/** Base-shield job states that the worker still needs to advance, in pipeline order. */
+const BASE_SHIELD_STAGES = ["proving", "awaiting_finality", "minting"] as const;
+
+/** Oldest job per active stage, from jobs given in insertion order — the worker's per-tick batch. */
+function oldestBaseShieldPerStage(jobs: Iterable<BaseShieldJob>): BaseShieldJob[] {
+  const byStage = new Map<string, BaseShieldJob>();
+  for (const job of jobs) {
+    if (!byStage.has(job.status)) byStage.set(job.status, job);
+  }
+  return BASE_SHIELD_STAGES.map((stage) => byStage.get(stage)).filter((job): job is BaseShieldJob => job !== undefined);
+}
 
 /**
  * Reject a base-shield enqueue whose bridge disagrees with what the desk was actually configured
@@ -482,11 +492,9 @@ export class MemoryMosaicStore implements MosaicStore {
     return undefined;
   }
 
-  async nextBaseShield(): Promise<BaseShieldJob | null> {
-    for (const job of this.baseShields.values()) {
-      if (BASE_SHIELD_ACTIVE.has(job.status)) return clone(job);
-    }
-    return null;
+  async nextBaseShields(): Promise<BaseShieldJob[]> {
+    // Map iteration preserves insertion order, so "first per stage" is "oldest per stage".
+    return oldestBaseShieldPerStage(this.baseShields.values()).map(clone);
   }
 
   async baseShieldProved(
@@ -954,14 +962,10 @@ export class SqliteMosaicStore implements MosaicStore {
     this.db.prepare("UPDATE base_shields SET json = ? WHERE key = ?").run(JSON.stringify(job), key);
   }
 
-  async nextBaseShield(): Promise<BaseShieldJob | null> {
+  async nextBaseShields(): Promise<BaseShieldJob[]> {
     // Oldest first: rowid is monotonic in insertion order.
     const rows = this.db.prepare("SELECT json FROM base_shields ORDER BY rowid ASC").all() as { json: string }[];
-    for (const row of rows) {
-      const job = JSON.parse(row.json) as BaseShieldJob;
-      if (BASE_SHIELD_ACTIVE.has(job.status)) return job;
-    }
-    return null;
+    return oldestBaseShieldPerStage(rows.map((row) => JSON.parse(row.json) as BaseShieldJob));
   }
 
   async baseShieldProved(

@@ -1,6 +1,8 @@
 // Durable Base->Stellar shield worker (the MCP counterpart of the old backend/src/base_shield.rs).
 //
-// One step per tick, guarded so a slow step never overlaps the next tick. State machine:
+// Each tick advances the oldest job in each lifecycle stage by one step (guarded so a slow tick
+// never overlaps the next), so one deposit's finality wait doesn't block the next deposit's
+// proving — the stages pipeline. State machine:
 //
 //   proving           -> submit the prove job to the remote service (idempotent), then poll it.
 //                        `done` -> persist seal/journal + committed block -> awaiting_finality.
@@ -30,7 +32,7 @@ const DEFAULT_INTERVAL_MS = 12_000;
 
 /**
  * Start the background worker. No-op-safe to call once per server; returns a handle whose `stop()`
- * clears the timer. Each tick advances at most one job by one step.
+ * clears the timer. Each tick advances at most one job per lifecycle stage by one step.
  */
 export function startBaseShieldWorker(
   store: MosaicStore,
@@ -46,11 +48,18 @@ export function startBaseShieldWorker(
     if (stopped || busy) return;
     busy = true;
     try {
-      const job = await store.nextBaseShield();
-      if (!job) return;
-      if (job.status === "proving") await advanceProving(store, config, job, log);
-      else if (job.status === "awaiting_finality") await advanceFinality(store, config, job, log);
-      else if (job.status === "minting") await advanceMinting(store, config, job, log);
+      const jobs = await store.nextBaseShields();
+      for (const job of jobs) {
+        if (stopped) break;
+        // Per-job guard: one stage failing must not skip this tick's other stages.
+        try {
+          if (job.status === "proving") await advanceProving(store, config, job, log);
+          else if (job.status === "awaiting_finality") await advanceFinality(store, config, job, log);
+          else if (job.status === "minting") await advanceMinting(store, config, job, log);
+        } catch (e) {
+          log.warn(`base-shield ${job.id}: tick step failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
     } catch (e) {
       log.warn(`base-shield worker tick failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {

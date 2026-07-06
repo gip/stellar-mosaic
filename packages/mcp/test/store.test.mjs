@@ -146,8 +146,9 @@ async function assertBaseShieldLifecycle(store) {
   assert.deepEqual(again.deposit, deposit);
   assert.deepEqual((await store.listBaseShields("desk-base")).find((j) => j.id === job.id).deposit, deposit);
 
-  const next = await store.nextBaseShield();
-  assert.equal(next.id, job.id, "proving job is picked up");
+  const next = await store.nextBaseShields();
+  assert.equal(next.length, 1);
+  assert.equal(next[0].id, job.id, "proving job is picked up");
 
   await store.baseShieldProved(job.id, 42, "cd".repeat(32), "aa", "bb", true);
   const proved = (await store.listBaseShields("desk-base")).find((j) => j.id === job.id);
@@ -158,10 +159,27 @@ async function assertBaseShieldLifecycle(store) {
   assert.equal(proved.journal_hex, "bb");
 
   await store.baseShieldStatus(job.id, "minting");
-  assert.equal((await store.nextBaseShield()).status, "minting");
+  assert.equal((await store.nextBaseShields())[0].status, "minting");
+
+  // Pipelining: the minting job must not block newer jobs' proving. With A minting and B, C both
+  // proving, the per-tick batch is oldest-per-stage: [B (proving), A (minting)] — never C.
+  const jobB = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 9);
+  const jobC = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 10);
+  const batch = await store.nextBaseShields();
+  assert.deepEqual(
+    batch.map((j) => [j.id, j.status]),
+    [
+      [jobB.id, "proving"],
+      [job.id, "minting"],
+    ],
+    "oldest job per stage, in stage order",
+  );
+  await store.baseShieldFailed(jobB.id, "cleanup");
+  assert.equal((await store.nextBaseShields()).find((j) => j.status === "proving").id, jobC.id, "next-oldest proving job takes over");
+  await store.baseShieldFailed(jobC.id, "cleanup");
 
   await store.baseShieldStatus(job.id, "active", "ef".repeat(32));
-  assert.equal(await store.nextBaseShield(), null, "terminal jobs are not picked up");
+  assert.deepEqual(await store.nextBaseShields(), [], "terminal jobs are not picked up");
   const minted = (await store.listBaseShields("desk-base")).find((j) => j.id === job.id);
   assert.equal(minted.stellar_tx_hash, "ef".repeat(32), "mint tx hash is persisted for the UI");
 
@@ -171,7 +189,7 @@ async function assertBaseShieldLifecycle(store) {
   const failed = (await store.listBaseShields("desk-base")).find((j) => j.id === job2.id);
   assert.equal(failed.status, "failed");
   assert.equal(failed.error, "boom");
-  assert.equal(await store.nextBaseShield(), null);
+  assert.deepEqual(await store.nextBaseShields(), []);
 }
 
 test("memory MCP store advances base-shield jobs and guards bridge drift", async () => {
