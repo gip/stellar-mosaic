@@ -36,8 +36,9 @@ export default function App() {
     return () => window.removeEventListener('mosaic-storage-mode-changed', onModeChanged)
   }, [location.pathname, navigate])
 
+  // Storage mode is not touched here: StorageModeContext watches wallet.address and falls
+  // back to Trustless in-memory only, so logging out never persists a mode "choice".
   async function logOutStellar() {
-    await mosaicServer.disconnect().catch(() => {})
     await disconnect()
     navigate('/')
   }

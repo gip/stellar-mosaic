@@ -113,8 +113,9 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
           setRecoveryMode('trustless')
           setRecoveryBackendEnabled(false)
           resetApiCaches()
+          // In-memory only: a session failure is a forced fallback, not a user choice, so the
+          // trusted default still applies at the next login.
           setModeState('trustless')
-          persistMode('trustless')
           setError(errorMessage(e))
         })
         .finally(() => {
