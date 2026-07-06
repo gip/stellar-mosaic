@@ -1,24 +1,29 @@
-# Agent-to-agent trading demo (`agents/`)
+# Agent-to-agent trading experiments (`agents/`)
 
-Two autonomous AI agents negotiate and settle a private XLM/USDC trade end to end, with no human
-in the loop. Each agent is a Claude Agent SDK subagent whose entire world is two capabilities,
-exposed as in-process MCP tools:
+Autonomous AI agents negotiate and settle private XLM/USDC trades end to end, with no human in the
+loop. `agents/` is an **experiment runner**: one YAML/JSON config per experiment declares N ≥ 2
+agents — each with its own LLM provider (**Anthropic or OpenAI**), model, API key, mandate prompt,
+and (optionally) Stellar/Ethereum keys, generated and funded at preflight when omitted — and every
+run writes an independent balance-delta verdict to a results file. Each agent runs a
+provider-neutral Vercel AI SDK tool loop whose entire world is two capabilities:
 
-- **XMTP** (`@xmtp/node-sdk`, dev network) — messaging with the counterparty. Each agent holds an
-  Ethereum key and knows only the *other agent's Ethereum address*.
-- **Mosaic** (`@mosaic/sdk`) — create/register a desk, `shield`, place private orders on the
-  on-chain book, and `unshield` on Stellar testnet. Order/unshield proofs (UltraHonk) are generated
-  in-process via bb.js WASM.
+- **XMTP** (`@xmtp/node-sdk`, dev network) — messaging with its peers (one DM per peer). Each
+  agent holds an Ethereum key and knows only the *other agents' names and Ethereum addresses*.
+- **Mosaic** (`@mosaic/sdk`) — create/register a desk, `shield`, place/cancel private orders on
+  the on-chain book, and `unshield` on Stellar testnet. Order/unshield/cancel proofs (UltraHonk)
+  are generated in-process via bb.js WASM.
 
-Each subagent is handed a one-line mandate and left alone:
+Each agent is handed a one-line mandate and left alone. In the canonical two-agent demo
+(`agents/experiments/demo.yaml`):
 
 - **alice** (holds XLM): *"Today spot price for XLM/USDC is 0.18. Sell 10 XLM and get me USDC at
   the best price."*
 - **bob** (holds USDC): *"Today spot price for XLM/USDC is 0.18. Sell about 2 USDC and get me the
   best price in XLM."*
 
-See `agents/README.md` for setup/run instructions. Below is an annotated real session (Stellar
-testnet, 2026-07-03; the whole run took **134 seconds** and both agents exited 0).
+See `agents/README.md` for the config format and run instructions. Below is an annotated real
+session of that demo (Stellar testnet, 2026-07-03, on the pre-runner codebase with both agents on
+`claude-opus-4-8`; the whole run took **134 seconds** and both agents exited 0).
 
 ## Cast
 
@@ -95,7 +100,7 @@ estimated amount with the real on-chain amount), then closed the loop over XMTP:
 
 ## Verdict (independent of the agents)
 
-The orchestrator (`agents/src/demo.ts`) snapshots both wallets on Horizon before and after, and
+The orchestrator (`agents/src/run.ts`) snapshots both wallets on Horizon before and after, and
 trusts nothing the agents reported:
 
 ```

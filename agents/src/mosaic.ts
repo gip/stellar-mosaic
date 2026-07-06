@@ -1,6 +1,6 @@
 // Mosaic wiring for one agent: a fully-local Node MosaicClient (WASM proving, SQLite note store
-// under .demo/) with a pure-RPC deployer so `mosaic_create_desk` needs no `stellar` CLI. The
-// startLedger is captured at process boot — before any desk exists — so both agents can replay the
+// under the run dir) with a pure-RPC deployer so `mosaic_create_desk` needs no `stellar` CLI. The
+// startLedger is captured at process boot — before any desk exists — so all agents can replay the
 // new desk's note-tree events from scratch (same trick as packages/cli).
 
 import { join } from "node:path";
@@ -8,9 +8,9 @@ import { Keypair, rpc } from "@stellar/stellar-sdk";
 import { SecretKeySigner, StellarRpcDeployer, type AssetDef, type PairDef } from "@mosaic/sdk";
 import { createNodeClient, type NodeClient } from "@mosaic/sdk/node";
 import { loadSettlementWasm, loadVk } from "@mosaic/sdk/assets/node";
-import { DEMO_DIR, NETWORK, type AgentConfig } from "./config.js";
+import type { ResolvedAgentFile } from "./experiment.js";
 
-/** The demo desk's immutable asset/pair set. Canonical pair 0 = XLM/USDC (base/quote). */
+/** The experiment desk's immutable asset/pair set. Canonical pair 0 = XLM/USDC (base/quote). */
 export const XLM_ASSET_ID = 1;
 export const USDC_ASSET_ID = 2;
 export function deskSpec(usdcIssuer: string): { assets: AssetDef[]; pairs: Omit<PairDef, "pair_id">[] } {
@@ -28,18 +28,18 @@ export interface MosaicSession extends NodeClient {
   address: string;
 }
 
-export async function buildMosaic(cfg: AgentConfig): Promise<MosaicSession> {
-  const startLedger = (await new rpc.Server(NETWORK.rpcUrl).getLatestLedger()).sequence;
+export async function buildMosaic(cfg: ResolvedAgentFile): Promise<MosaicSession> {
+  const startLedger = (await new rpc.Server(cfg.network.rpcUrl).getLatestLedger()).sequence;
   const deployer = new StellarRpcDeployer({
-    network: NETWORK,
+    network: cfg.network,
     signer: new SecretKeySigner(cfg.stellarSecret),
     loadSettlementWasm,
     loadVk,
   });
   const node = createNodeClient({
-    network: NETWORK,
+    network: cfg.network,
     secretKey: cfg.stellarSecret,
-    dbPath: join(DEMO_DIR, `${cfg.name}-notes.db`),
+    dbPath: join(cfg.runDir, `${cfg.name}-notes.db`),
     startLedger,
     deployer,
   });
