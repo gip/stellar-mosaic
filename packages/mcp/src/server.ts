@@ -2,13 +2,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { readDeskCustody, type BaseShieldDeposit, type BookSide, type Desk, type DeskCustody, type MosaicLogger, type Operation, type SubmitResult } from "@mosaic/sdk";
 import { Networks } from "@stellar/stellar-sdk";
 import { z } from "zod";
-import { AuthService } from "./auth.js";
+import { AuthService, validateNetwork } from "./auth.js";
 import { StellarBookReader } from "./book.js";
 import type { BaseShieldConfig } from "./baseShield.js";
 import { SponsoredStellarDeployHandlers } from "./deploy.js";
 import { createStderrLogger } from "./logging.js";
 import { StellarCliRelayer } from "./relayer.js";
 import { MemoryMosaicStore, type MosaicStore } from "./store.js";
+import { MosaicMcpError, mcpErrorContent } from "./errors.js";
 
 export interface RelayHandlers {
   relayShield(args: { desk_id: string; tx_xdr: string; operation?: Operation | null }): Promise<SubmitResult>;
@@ -52,7 +53,7 @@ export interface MosaicMcpOptions {
   baseShield?: BaseShieldConfig;
 }
 
-type ToolResult = { content: { type: "text"; text: string }[] };
+type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean };
 type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>;
 
 // A client (browser/CLI) aborts a slow tool call with JSON-RPC `-32001 Request timed out`, but that
@@ -68,7 +69,15 @@ function slowToolThresholdMs(env: NodeJS.ProcessEnv = process.env): number {
 }
 
 const ok = (data: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(data) }] });
+const fail = (error: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify({ ok: false, ...mcpErrorContent(error) }) }] });
 const body = (args: Record<string, unknown>) => (args.body ?? {}) as Record<string, unknown>;
+
+function toolTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.MOSAIC_MCP_TOOL_TIMEOUT_MS;
+  if (raw === undefined) return 120_000;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 120_000;
+}
 
 // Display metadata a browser attaches to a Base shield at enqueue time (amount + Base deposit tx), so
 // the mint leg can render a full Activity entry without the local deposit event. Untrusted input:
@@ -139,6 +148,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
   };
   const logger = opts.logger ?? createStderrLogger();
   const slowMs = slowToolThresholdMs();
+  const timeoutMs = toolTimeoutMs();
   const server = new McpServer({ name: "mosaic-mcp", version: "0.0.0" });
 
   const reg = (
@@ -160,12 +170,21 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
           : undefined;
       watchdog?.unref?.();
       try {
-        const result = await handler(args);
+        const run = handler(args);
+        const result =
+          timeoutMs > 0
+            ? await Promise.race([
+                run,
+                new Promise<ToolResult>((_resolve, reject) =>
+                  setTimeout(() => reject(new MosaicMcpError("TIMEOUT", `MCP tool ${name} timed out after ${timeoutMs}ms`)), timeoutMs).unref?.(),
+                ),
+              ])
+            : await run;
         logger.info("mcp tool completed", { tool: name, duration_ms: Date.now() - started });
         return result;
       } catch (error) {
         logger.error("mcp tool failed", { tool: name, duration_ms: Date.now() - started, error });
-        throw error;
+        return fail(error);
       } finally {
         if (watchdog) clearInterval(watchdog);
       }
@@ -177,9 +196,9 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     "auth_challenge",
     {
       description: "Begin wallet authentication: returns a message for the given Stellar address to sign.",
-      inputSchema: { address: z.string().describe("Stellar public key (G...)") },
+      inputSchema: { address: z.string().describe("Stellar public key (G...)"), network: z.string().optional(), audience: z.string().optional() },
     },
-    async ({ address }) => ok(await auth.challenge(String(address))),
+    async ({ address, network, audience }) => ok(await auth.challenge(String(address), { network: network ? String(network) : undefined, audience: audience ? String(audience) : undefined })),
   );
 
   reg(
@@ -219,6 +238,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     { description: "Create and deploy a desk.", inputSchema: { session: z.string(), body: z.record(z.unknown()) } },
     async (args) => {
       const s = await session(auth, args);
+      validateNetwork(s.network);
       const created = await deploy.createDesk(body(args), s.address, s.network);
       return ok(await store.insertDesk(created.desk, created.sponsorSecret ?? null));
     },
@@ -231,6 +251,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     { description: "Complete Base bridge deployment.", inputSchema: { session: z.string(), id: z.string(), body: z.record(z.unknown()) } },
     async (args) => {
       const s = await session(auth, args);
+      validateNetwork(s.network);
       return ok(await deploy.completeBaseDeployment(String(args.id), body(args), s.address));
     },
   );
@@ -239,6 +260,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     { description: "Re-run the server-side Base bridge deploy for a desk whose bridge is not yet active.", inputSchema: { session: z.string(), id: z.string() } },
     async (args) => {
       const s = await session(auth, args);
+      validateNetwork(s.network);
       return ok(await deploy.retryBaseDeployment(String(args.id), s.address, s.network));
     },
   );
@@ -282,7 +304,8 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     { description: "Create a durable wallet operation.", inputSchema: { session: z.string(), body: z.record(z.unknown()), idempotency_key: z.string() } },
     async (args) => {
       const s = await session(auth, args);
-      return ok(await store.createOperation(s.address, "testnet", body(args) as never, String(args.idempotency_key)));
+      validateNetwork(s.network);
+      return ok(await store.createOperation(s.address, s.network, body(args) as never, String(args.idempotency_key)));
     },
   );
   reg("list_operations", { description: "List operations.", inputSchema: { session: z.string() } }, async (args) =>
@@ -367,8 +390,10 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     return ok(await relays.relayCancel({ desk_id: String(args.desk_id), pair_id: Number(args.pair_id), side: Number(args.side), proof_b64: String(args.proof_b64), public_inputs_b64: String(args.public_inputs_b64), operation }));
   });
 
-  reg("get_wallet_backup", { description: "Read opaque wallet backup.", inputSchema: { backup_id: z.string() } }, async ({ backup_id }) =>
-    ok(await store.getWalletBackup(String(backup_id))),
+  reg("get_wallet_backup", { description: "Read opaque wallet backup.", inputSchema: { backup_id: z.string(), read_token: z.string().optional(), session: z.string().optional() } }, async (args) => {
+    const s = typeof args.session === "string" && args.session ? await auth.getSession(args.session) : null;
+    return ok(await store.getWalletBackupForRead(String(args.backup_id), typeof args.read_token === "string" ? args.read_token : undefined, s?.address));
+  },
   );
   reg(
     "put_wallet_backup",
@@ -376,7 +401,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     async (args) => {
       const b = body(args);
       return ok(
-        await store.putWalletBackup(String(args.backup_id), String(b.write_token), Number(b.expected_generation), {
+        await store.putWalletBackup(String(args.backup_id), String(b.write_token), typeof b.read_token === "string" ? b.read_token : undefined, Number(b.expected_generation), {
           format_version: 1,
           generation: Number(b.generation ?? 0),
           nonce_b64: String(b.nonce_b64),
@@ -397,14 +422,19 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
     "enqueue_base_shield",
     { description: "Enqueue a durable Base shield job.", inputSchema: { session: z.string(), desk_id: z.string(), body: z.record(z.unknown()) } },
     async (args) => {
-      await session(auth, args);
+      const s = await session(auth, args);
       const b = body(args);
-      return ok(await store.enqueueBaseShield(String(args.desk_id), String(b.expected_bridge), Number(b.deposit_id), baseShieldDeposit(b.deposit)));
+      return ok(await store.enqueueBaseShield(String(args.desk_id), String(b.expected_bridge), Number(b.deposit_id), s.address, baseShieldDeposit(b.deposit)));
     },
   );
-  reg("list_base_shields", { description: "List Base shield jobs.", inputSchema: { desk_id: z.string() } }, async ({ desk_id }) =>
-    ok(await store.listBaseShields(String(desk_id))),
-  );
+  reg("list_base_shields", { description: "List Base shield jobs.", inputSchema: { session: z.string(), desk_id: z.string() } }, async (args) => {
+    const s = await session(auth, args);
+    return ok(await store.listBaseShields(String(args.desk_id), s.address));
+  });
+  reg("retry_base_shield", { description: "Retry a failed Base shield job.", inputSchema: { session: z.string(), id: z.string() } }, async (args) => {
+    const s = await session(auth, args);
+    return ok(await store.retryBaseShield(String(args.id), s.address));
+  });
 
   return server;
 }

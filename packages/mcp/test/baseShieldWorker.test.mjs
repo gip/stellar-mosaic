@@ -35,12 +35,12 @@ async function storeWithJob(depositId = 7) {
     },
     "SA_SPONSOR_SECRET",
   );
-  const job = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, depositId);
+  const job = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, depositId, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF");
   return { store, job };
 }
 
 async function jobState(store, id) {
-  return (await store.listBaseShields("desk-base")).find((j) => j.id === id);
+  return (await store.listBaseShields("desk-base", "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF")).find((j) => j.id === id);
 }
 
 /** Steps whose prove side always reports done; mint behavior is supplied by the test. */

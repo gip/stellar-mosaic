@@ -1,10 +1,15 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import type { Operation, SubmitResult } from "@mosaic/sdk";
 import type { RelayHandlers } from "./server.js";
 import type { MosaicStore } from "./store.js";
+import { MosaicMcpError } from "./errors.js";
+
+const execFileAsync = promisify(execFile);
+const DEFAULT_CLI_TIMEOUT_MS = 120_000;
 
 export interface StellarRelayerOptions {
   store: MosaicStore;
@@ -30,6 +35,11 @@ function b64File(dir: string, name: string, value: string): string {
   return path;
 }
 
+function cliTimeoutMs(): number {
+  const parsed = Number(process.env.MOSAIC_MCP_CLI_TIMEOUT_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CLI_TIMEOUT_MS;
+}
+
 export class StellarCliRelayer implements RelayHandlers {
   private readonly store: MosaicStore;
   private readonly stellarBin: string;
@@ -51,8 +61,8 @@ export class StellarCliRelayer implements RelayHandlers {
       address: args.operation?.address,
     });
     const secret = await this.requireSponsor(args.desk_id);
-    const signed = this.run(["tx", "sign", args.tx_xdr, "--sign-with-key", secret, "--network", this.network]);
-    return parseResult(this.run(["tx", "send", signed.trim(), "--network", this.network]));
+    const signed = await this.run(["tx", "sign", args.tx_xdr, "--sign-with-key", secret, "--network", this.network]);
+    return parseResult(await this.run(["tx", "send", signed.trim(), "--network", this.network]));
   }
 
   async relayOrder(args: { desk_id: string; proof_b64: string; public_inputs_b64: string; operation?: Operation | null }): Promise<SubmitResult> {
@@ -130,7 +140,7 @@ export class StellarCliRelayer implements RelayHandlers {
       const proof = b64File(dir, "proof.bin", proofB64);
       const publicInputs = b64File(dir, "public_inputs.bin", publicInputsB64);
       return parseResult(
-        this.run([
+        await this.run([
           "contract",
           "invoke",
           "--id",
@@ -187,7 +197,20 @@ export class StellarCliRelayer implements RelayHandlers {
     }
   }
 
-  private run(args: string[]): string {
-    return execFileSync(this.stellarBin, args, { encoding: "utf8" }).trim();
+  private async run(args: string[]): Promise<string> {
+    try {
+      const { stdout } = await execFileAsync(this.stellarBin, args, {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: cliTimeoutMs(),
+      });
+      return stdout.trim();
+    } catch (cause) {
+      const timedOut = !!(cause && typeof cause === "object" && "killed" in cause && (cause as { killed?: boolean }).killed);
+      throw new MosaicMcpError(timedOut ? "CLI_TIMEOUT" : "RELAY_REJECTED", `stellar CLI failed: ${cause instanceof Error ? cause.message : String(cause)}`, {
+        retryable: timedOut,
+        cause,
+      });
+    }
   }
 }

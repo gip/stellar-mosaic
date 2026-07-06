@@ -34,9 +34,22 @@ import {
 } from "./baseShield.js";
 import { errorMessage, type BaseShieldJob, type MosaicLogger } from "@mosaic/sdk";
 import type { MosaicStore } from "./store.js";
+import { classifyMcpError } from "./errors.js";
 
 export interface BaseShieldWorkerHandle {
   stop(): void;
+  status(): BaseShieldWorkerState;
+}
+
+export interface BaseShieldWorkerState {
+  running: boolean;
+  busy: boolean;
+  stopped: boolean;
+  last_tick_at: number | null;
+  last_success_at: number | null;
+  last_error: string | null;
+  active_stage_counts: Record<string, number>;
+  stuck: boolean;
 }
 
 /** The external side effects one tick is built from — injectable so tests can drive the worker
@@ -84,16 +97,36 @@ export function startBaseShieldWorker(
   const steps = opts.steps ?? defaultSteps;
   let stopped = false;
   let busy = false;
+  let busySince: number | null = null;
+  const state: BaseShieldWorkerState = {
+    running: true,
+    busy: false,
+    stopped: false,
+    last_tick_at: null,
+    last_success_at: null,
+    last_error: null,
+    active_stage_counts: {},
+    stuck: false,
+  };
 
   const tick = async () => {
     if (stopped || busy) return;
     busy = true;
+    busySince = Date.now();
+    state.busy = true;
+    state.last_tick_at = busySince;
     try {
-      await runBaseShieldTick(store, config, steps, log);
+      state.active_stage_counts = await runBaseShieldTick(store, config, steps, log);
+      state.last_success_at = Date.now();
+      state.last_error = null;
     } catch (e) {
+      state.last_error = errorMessage(e);
       log.warn(`base-shield worker tick failed: ${errorMessage(e)}`);
     } finally {
       busy = false;
+      busySince = null;
+      state.busy = false;
+      state.stuck = false;
     }
   };
 
@@ -104,7 +137,13 @@ export function startBaseShieldWorker(
   return {
     stop() {
       stopped = true;
+      state.stopped = true;
+      state.running = false;
       clearInterval(timer);
+    },
+    status() {
+      state.stuck = !!busySince && Date.now() - busySince > Math.max(intervalMs * 3, 60_000);
+      return { ...state, active_stage_counts: { ...state.active_stage_counts } };
     },
   };
 }
@@ -115,8 +154,10 @@ export async function runBaseShieldTick(
   config: BaseShieldConfig,
   steps: BaseShieldSteps = defaultSteps,
   log: Logger = noopLog,
-): Promise<void> {
+): Promise<Record<string, number>> {
   const jobs = await store.nextBaseShields();
+  const counts: Record<string, number> = {};
+  for (const job of jobs) counts[job.status] = (counts[job.status] ?? 0) + 1;
   for (const job of jobs) {
     // Per-job guard: one stage failing must not skip this tick's other stages.
     try {
@@ -128,22 +169,24 @@ export async function runBaseShieldTick(
       // a terminal state: an uncounted failure would retry forever, invisibly (no persisted
       // error), and head-of-line-block its whole stage (the batch is oldest-per-stage).
       try {
-        await retryOrFail(store, job, `${job.status}: ${errorMessage(e)}`, TRANSPORT_MAX_ATTEMPTS, log);
+        await retryOrFail(store, job, `${job.status}: ${errorMessage(e)}`, TRANSPORT_MAX_ATTEMPTS, log, e);
       } catch (bookkeeping) {
         log.warn(`base-shield ${job.id}: step failed (${errorMessage(e)}) and retry bookkeeping failed: ${errorMessage(bookkeeping)}`);
       }
     }
   }
+  return counts;
 }
 
 /** Bump the job's attempt counter and keep it in its stage, or fail it once past `maxAttempts`. */
-async function retryOrFail(store: MosaicStore, job: Job, error: string, maxAttempts: number, log: Logger): Promise<void> {
+async function retryOrFail(store: MosaicStore, job: Job, error: string, maxAttempts: number, log: Logger, cause?: unknown): Promise<void> {
   const attempt = (job.attempts ?? 0) + 1;
+  const failure = classifyMcpError(cause ?? error).body();
   if (attempt >= maxAttempts) {
-    await store.baseShieldFailed(job.id, error);
+    await store.baseShieldFailed(job.id, error, failure);
     log.warn(`base-shield ${job.id}: ${error} (attempt ${attempt}/${maxAttempts}, giving up)`);
   } else {
-    await store.baseShieldRetry(job.id, error);
+    await store.baseShieldRetry(job.id, error, failure);
     log.warn(`base-shield ${job.id}: ${error} (attempt ${attempt}/${maxAttempts}, will retry)`);
   }
 }
@@ -165,9 +208,13 @@ async function advanceProving(store: MosaicStore, config: BaseShieldConfig, step
     }
     case "error":
       // The service treats a prior error as retryable: the next tick's submit starts a fresh run.
-      await retryOrFail(store, job, `prove: ${result.error}`, PROVE_MAX_ATTEMPTS, log);
+      await retryOrFail(store, job, `prove: ${result.error}`, PROVE_MAX_ATTEMPTS, log, result.error);
       break;
-    // "running" -> wait; "not_started" (service restarted) -> next tick resubmits.
+    case "running":
+    case "not_started":
+      // No state change; release the worker lock so the normal interval can poll/resubmit.
+      await store.baseShieldRelease(job.id);
+      break;
   }
 }
 
@@ -179,6 +226,8 @@ async function advanceFinality(store: MosaicStore, config: BaseShieldConfig, ste
   if (await steps.isFinalized(config.baseRpc, job.block_number)) {
     await store.baseShieldStatus(job.id, "minting");
     log.info(`base-shield ${job.id}: block ${job.block_number} finalized; minting`);
+  } else {
+    await store.baseShieldRelease(job.id);
   }
 }
 
@@ -213,6 +262,6 @@ async function advanceMinting(store: MosaicStore, config: BaseShieldConfig, step
       log.info(`base-shield ${job.id}: deposit already minted on-chain; marking active`);
       return;
     }
-    await retryOrFail(store, job, `mint: ${errorMessage(e)}`, MINT_MAX_ATTEMPTS, log);
+    await retryOrFail(store, job, `mint: ${errorMessage(e)}`, MINT_MAX_ATTEMPTS, log, e);
   }
 }

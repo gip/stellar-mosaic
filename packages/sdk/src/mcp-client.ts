@@ -19,6 +19,7 @@ import type {
   OperationRequest,
   ProposeAssetBody,
   WalletBackupEnvelope,
+  MosaicMcpErrorBody,
 } from "./types.js";
 import type { DeskCustody } from "./custody.js";
 import type { ActivityEvent } from "./activity.js";
@@ -27,6 +28,26 @@ import type { ClientActionLease, McpClient, StellarSigner, SubmitResult } from "
 export interface McpClientOptions {
   /** Base URL of the MCP server's Streamable-HTTP endpoint. */
   url: string;
+  /** Client-side timeout for one MCP tool call. Default 60s; 0 disables. */
+  callTimeoutMs?: number;
+}
+
+export class MosaicMcpClientError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly status: number;
+  readonly details?: unknown;
+  readonly correlationId: string;
+
+  constructor(tool: string, body: MosaicMcpErrorBody) {
+    super(`MCP tool ${tool} failed [${body.code}]: ${body.message}`);
+    this.name = "MosaicMcpClientError";
+    this.code = body.code;
+    this.retryable = body.retryable;
+    this.status = body.status;
+    this.details = body.details;
+    this.correlationId = body.correlation_id;
+  }
 }
 
 function base64(bytes: Uint8Array): string {
@@ -38,12 +59,14 @@ function base64(bytes: Uint8Array): string {
 class HttpMcpClient implements McpClient {
   private readonly url: string;
   private readonly sessionStorageKey: string;
+  private readonly callTimeoutMs: number;
   private client?: Client;
   private connecting?: Promise<Client>;
   private sessionToken?: string;
 
-  constructor(url: string) {
+  constructor(url: string, callTimeoutMs = 60_000) {
     this.url = url;
+    this.callTimeoutMs = callTimeoutMs;
     this.sessionStorageKey = `mosaic.mcp.session.${url}`;
     this.sessionToken = this.readStoredSession();
   }
@@ -98,12 +121,41 @@ class HttpMcpClient implements McpClient {
 
   private async call<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
     const client = await this.connect();
-    const res = (await client.callTool({ name, arguments: args })) as {
+    const call = client.callTool({ name, arguments: args });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const res = (await (this.callTimeoutMs > 0
+      ? Promise.race([
+          call.finally(() => {
+            if (timer) clearTimeout(timer);
+          }),
+          new Promise((_resolve, reject) => {
+            timer = setTimeout(() => reject(new Error(`MCP tool ${name} timed out after ${this.callTimeoutMs}ms`)), this.callTimeoutMs);
+          }),
+        ])
+      : call)) as {
       content: { type: string; text?: string }[];
       isError?: boolean;
     };
     const text = res.content.find((c) => c.type === "text")?.text;
-    if (res.isError || !text) throw new Error(`MCP tool ${name} failed: ${text ?? "no result"}`);
+    if (text) {
+      try {
+        const parsed = JSON.parse(text) as { ok?: boolean; error?: MosaicMcpErrorBody };
+        if (parsed.error) throw new MosaicMcpClientError(name, parsed.error);
+      } catch (error) {
+        if (error instanceof MosaicMcpClientError) throw error;
+      }
+    }
+    if (res.isError || !text) {
+      if (text) {
+        try {
+          const parsed = JSON.parse(text) as { error?: MosaicMcpErrorBody };
+          if (parsed.error) throw new MosaicMcpClientError(name, parsed.error);
+        } catch (error) {
+          if (error instanceof MosaicMcpClientError) throw error;
+        }
+      }
+      throw new Error(`MCP tool ${name} failed: ${text ?? "no result"}`);
+    }
     return JSON.parse(text) as T;
   }
 
@@ -323,8 +375,8 @@ class HttpMcpClient implements McpClient {
     );
   }
 
-  getWalletBackup(backupId: string): Promise<WalletBackupEnvelope | null> {
-    return this.call("get_wallet_backup", { backup_id: backupId });
+  getWalletBackup(backupId: string, readToken?: string): Promise<WalletBackupEnvelope | null> {
+    return this.call("get_wallet_backup", { backup_id: backupId, ...(readToken ? { read_token: readToken } : this.sessionToken ? { session: this.sessionToken } : {}) });
   }
 
   putWalletBackup(
@@ -343,11 +395,15 @@ class HttpMcpClient implements McpClient {
   }
 
   listBaseShields(deskId: string): Promise<BaseShieldJob[]> {
-    return this.call("list_base_shields", { desk_id: deskId });
+    return this.call("list_base_shields", this.auth({ desk_id: deskId }));
+  }
+
+  retryBaseShield(jobId: string): Promise<BaseShieldJob> {
+    return this.call("retry_base_shield", this.auth({ id: jobId }));
   }
 }
 
 /** Build an {@link McpClient} bound to a remote MCP server. */
 export function createMcpClient(opts: McpClientOptions): McpClient {
-  return new HttpMcpClient(opts.url);
+  return new HttpMcpClient(opts.url, opts.callTimeoutMs);
 }

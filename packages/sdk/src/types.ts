@@ -235,8 +235,11 @@ export interface BaseShieldConfig {
 
 export interface AuthChallenge {
   challenge_id: string;
+  challengeId?: string;
   message: string;
   expires_at: number;
+  network?: string;
+  audience?: string;
 }
 
 export interface AuthSession {
@@ -308,6 +311,15 @@ export interface WalletBackupEnvelope {
   ciphertext_b64: string;
 }
 
+export interface MosaicMcpErrorBody {
+  code: string;
+  message: string;
+  retryable: boolean;
+  status: number;
+  details?: unknown;
+  correlation_id: string;
+}
+
 /** Display metadata captured from the depositing client at enqueue time. Lets the mint (terminal) leg
  * render a complete Activity entry — the amount and the Base deposit tx — even in a browser/session
  * that never recorded the local deposit event (a shield started on another device, after storage was
@@ -323,9 +335,13 @@ export interface BaseShieldDeposit {
 export interface BaseShieldJob {
   id: string;
   desk_id: string;
+  owner_address?: string | null;
   bridge: string;
   deposit_id: number;
   status: string;
+  version?: number;
+  locked_by?: string | null;
+  lock_expires_at?: number | null;
   block_number?: number | null;
   block_hash?: string | null;
   seal_hex?: string | null;
@@ -339,5 +355,7 @@ export interface BaseShieldJob {
    * a job to `failed` once this passes the attempt cap of the latest failure's class (a
    * service-reported prove error, a mint submission, or a transport-level throw). */
   attempts?: number;
+  stage_attempts?: Record<string, number>;
   error?: string | null;
+  failure?: MosaicMcpErrorBody | null;
 }
