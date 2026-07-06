@@ -10,7 +10,6 @@ agents:
   - name: alice
     provider: anthropic
     model: claude-opus-4-8
-    role: desk_creator
     prompt: "Today spot price for XLM/USDC is 0.18. Sell 10 XLM and get me USDC at the best price."
   - name: bob
     provider: anthropic

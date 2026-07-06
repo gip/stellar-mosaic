@@ -1,6 +1,7 @@
 # Illustrative 3-agent experiment: two XLM sellers compete for one USDC buyer's flow. All trades
-# settle on the single desk carol (the creator) deploys. Multi-party negotiation quality depends
-# heavily on models and prompts — treat this as a template to tune, not a benchmark.
+# settle on one desk — the agents negotiate among themselves who deploys it. Multi-party
+# negotiation quality depends heavily on models and prompts — treat this as a template to tune,
+# not a benchmark.
 
 name: three-way
 maxTurns: 120
@@ -8,12 +9,10 @@ agents:
   - name: carol
     provider: anthropic
     model: claude-opus-4-8
-    role: desk_creator
     prompt: >-
       Today spot price for XLM/USDC is 0.18. You hold 100 USDC. Buy 10-20 XLM at or below spot.
       Two sellers (alice, dave) will compete for your order — get quotes from both and trade with
-      the better one. You created the desk, but you may place your order second in a trade;
-      coordinate explicitly who places first.
+      the better one.
     funding:
       usdc: "100"
   - name: alice

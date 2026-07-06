@@ -12,7 +12,6 @@ import { Networks } from "@stellar/stellar-sdk";
 import type { NetworkConfig } from "@mosaic/sdk";
 
 export type Provider = "anthropic" | "openai";
-export type AgentRole = "desk_creator" | "participant";
 
 const DEFAULT_MAX_TURNS = 80;
 /** Wall-clock cap for the agent phase. Proofs take 1-5 min each; a 2-agent run is ~10-20 min. */
@@ -43,8 +42,6 @@ const agentSchema = z.object({
   model: z.string().min(1),
   /** The agent's trading mandate — becomes its task prompt. */
   prompt: z.string().min(1),
-  /** Exactly one agent may be the desk_creator; if nobody is, the first agent is promoted. */
-  role: z.enum(["desk_creator", "participant"]).optional(),
   /** Funded Stellar secret (S...). Omit to generate a fresh keypair funded via friendbot. */
   stellarSecret: z.string().regex(/^S[A-Z2-7]{55}$/, "expected a Stellar secret seed (S...)").optional(),
   /** Ethereum private key (XMTP identity). Omit to generate one. */
@@ -86,7 +83,7 @@ const experimentSchema = z.object({
   verdict: z.array(verdictRuleSchema).optional(),
 });
 
-export type AgentSpec = z.infer<typeof agentSchema> & { role: AgentRole };
+export type AgentSpec = z.infer<typeof agentSchema>;
 export type VerdictRule = z.infer<typeof verdictRuleSchema>;
 
 export interface ExperimentConfig {
@@ -131,12 +128,6 @@ export function loadExperiment(filePath: string): ExperimentConfig {
     throw new Error(`agent names must be unique (got ${names.join(", ")})`);
   }
 
-  const creators = cfg.agents.filter((a) => a.role === "desk_creator");
-  if (creators.length > 1) {
-    throw new Error(`exactly one agent may have role desk_creator (got ${creators.map((a) => a.name).join(", ")})`);
-  }
-  const creatorName = creators[0]?.name ?? cfg.agents[0].name;
-
   for (const rule of cfg.verdict ?? []) {
     if (!names.includes(rule.agent.toLowerCase())) {
       throw new Error(`verdict rule references unknown agent "${rule.agent}"`);
@@ -148,10 +139,7 @@ export function loadExperiment(filePath: string): ExperimentConfig {
     network: { ...DEFAULT_NETWORK, ...(cfg.network ?? {}) },
     maxTurns: cfg.maxTurns ?? DEFAULT_MAX_TURNS,
     timeoutMinutes: cfg.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES,
-    agents: cfg.agents.map((a) => ({
-      ...a,
-      role: a.name === creatorName ? ("desk_creator" as const) : ("participant" as const),
-    })),
+    agents: cfg.agents,
     verdict: cfg.verdict ?? [],
   };
 }
@@ -164,7 +152,6 @@ export interface ResolvedAgentFile {
   apiKey: string;
   model: string;
   prompt: string;
-  role: AgentRole;
   maxTurns: number;
   stellarSecret: string;
   stellarAddress: string;

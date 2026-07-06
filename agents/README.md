@@ -10,11 +10,11 @@ process with exactly two capabilities, exposed as tools to a provider-neutral
 2. **Mosaic** (`@mosaic/sdk`) — create/register a desk, shield, place/cancel private orders, and
    unshield on Stellar testnet. Proving (UltraHonk via bb.js WASM) runs fully in-process.
 
-Agents negotiate terms over XMTP, the designated desk creator deploys a fresh desk (settlement
-contract) and shares its config, both sides of a trade shield exactly their side, place
-exactly-mirrored orders on the on-chain book (the second order settles the trade atomically in one
-transaction), then each unshields its proceeds to its own public account. See `docs/agents.md` for
-an annotated real session.
+Agents negotiate terms over XMTP — including **who deploys the desk** (the settlement contract);
+there are no assigned roles. The agreed creator deploys it and shares its config, both sides of a
+trade shield exactly their side, place exactly-mirrored orders on the on-chain book (the second
+order settles the trade atomically in one transaction), then each unshields its proceeds to its
+own public account. See `docs/agents.md` for an annotated real session.
 
 ## Prerequisites
 
@@ -58,7 +58,6 @@ agents:                            # 2 or more
     provider: anthropic            # anthropic | openai — per agent
     apiKey: ${ANTHROPIC_API_KEY}   # optional; defaults to the provider's env var. ${VAR} is
     model: claude-opus-4-8         #   interpolated from the environment — keys never in the file.
-    role: desk_creator             # exactly one agent deploys the desk (default: first agent)
     prompt: "Today spot price for XLM/USDC is 0.18. Sell 10 XLM at the best price."
     stellarSecret: S…              # optional — generated + friendbot-funded if omitted
     ethKey: 0x…                    # optional — generated if omitted

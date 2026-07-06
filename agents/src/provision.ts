@@ -16,7 +16,7 @@ import {
   rpc,
 } from "@stellar/stellar-sdk";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import type { AgentRole, ExperimentConfig, Provider } from "./experiment.js";
+import type { ExperimentConfig, Provider } from "./experiment.js";
 import { DEFAULT_API_KEY_ENV, pingModel } from "./llm.js";
 
 const USDC_CODE = "USDC";
@@ -25,7 +25,6 @@ export interface ProvisionedIdentity {
   name: string;
   provider: Provider;
   model: string;
-  role: AgentRole;
   prompt: string;
   apiKey: string;
   stellarSecret: string;
@@ -134,7 +133,6 @@ export async function provision(
       name: a.name,
       provider: a.provider,
       model: a.model,
-      role: a.role,
       prompt: a.prompt,
       apiKey: apiKey ?? "",
       stellarSecret: stellar.secret(),
