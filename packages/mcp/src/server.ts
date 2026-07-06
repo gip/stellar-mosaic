@@ -7,6 +7,7 @@ import { StellarBookReader } from "./book.js";
 import type { BaseShieldConfig } from "./baseShield.js";
 import { SponsoredStellarDeployHandlers } from "./deploy.js";
 import { createStderrLogger } from "./logging.js";
+import { envNumber } from "./env.js";
 import { StellarCliRelayer } from "./relayer.js";
 import { MemoryMosaicStore, type MosaicStore } from "./store.js";
 import { MosaicMcpError, mcpErrorContent } from "./errors.js";
@@ -61,12 +62,7 @@ type ToolHandler = (args: Record<string, unknown>) => Promise<ToolResult>;
 // logs nothing for the still-running call (start is `debug`, completion is `info`). This threshold
 // makes a long-running tool emit `warn` lines while it runs, so "what timed out" is visible in the
 // server log at the moment the client gives up. Tune via MOSAIC_MCP_SLOW_TOOL_MS (0 disables).
-function slowToolThresholdMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.MOSAIC_MCP_SLOW_TOOL_MS;
-  if (raw === undefined) return 15_000;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 15_000;
-}
+const slowToolThresholdMs = (): number => envNumber("MOSAIC_MCP_SLOW_TOOL_MS", 15_000, { allowZero: true });
 
 const ok = (data: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(data) }] });
 // A tool failure must set the MCP protocol-level `isError` flag, not just embed `{ok:false}` in the
@@ -76,12 +72,7 @@ const ok = (data: unknown): ToolResult => ({ content: [{ type: "text", text: JSO
 const fail = (error: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify({ ok: false, ...mcpErrorContent(error) }) }], isError: true });
 const body = (args: Record<string, unknown>) => (args.body ?? {}) as Record<string, unknown>;
 
-function toolTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.MOSAIC_MCP_TOOL_TIMEOUT_MS;
-  if (raw === undefined) return 120_000;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 120_000;
-}
+const toolTimeoutMs = (): number => envNumber("MOSAIC_MCP_TOOL_TIMEOUT_MS", 120_000, { allowZero: true });
 
 // Display metadata a browser attaches to a Base shield at enqueue time (amount + Base deposit tx), so
 // the mint leg can render a full Activity entry without the local deposit event. Untrusted input:

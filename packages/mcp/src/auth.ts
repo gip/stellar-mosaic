@@ -88,17 +88,17 @@ export class AuthService {
           network: stored.network,
         }))
       : this.challenges.get(challengeId);
-    if (!c || c.address !== address) throw new Error("unknown or mismatched challenge");
+    if (!c || c.address !== address) throw new MosaicMcpError("AUTH_INVALID", "unknown or mismatched challenge");
     if (Date.now() > c.expiresAt) {
       this.challenges.delete(challengeId);
-      throw new Error("challenge expired");
+      throw new MosaicMcpError("AUTH_EXPIRED", "challenge expired");
     }
     // SEP-0053: wallets sign SHA256("Stellar Signed Message:\n" || message), not the raw bytes.
     const ok = Keypair.fromPublicKey(address).verify(
       Buffer.from(sep53Digest(Buffer.from(c.message, "utf8"))),
       Buffer.from(signatureB64, "base64"),
     );
-    if (!ok) throw new Error("signature verification failed");
+    if (!ok) throw new MosaicMcpError("AUTH_INVALID", "signature verification failed");
     if (!this.store) this.challenges.delete(challengeId);
     const storedNetwork = (c as unknown as { network?: unknown }).network;
     const network = validateNetwork(typeof storedNetwork === "string" ? storedNetwork : parseNetworkFromMessage(c.message) ?? "testnet");
@@ -112,11 +112,11 @@ export class AuthService {
   async requireSession(token: string): Promise<Session> {
     if (this.store) {
       const session = await this.store.getSession(token);
-      if (!session) throw new Error("invalid or expired session");
+      if (!session) throw new MosaicMcpError("AUTH_EXPIRED", "invalid or expired session");
       return { address: session.address, network: session.network, token, expiresAt: session.expires_at ?? Date.now() + SESSION_TTL_MS };
     }
     const s = this.sessions.get(token);
-    if (!s || Date.now() > s.expiresAt) throw new Error("invalid or expired session");
+    if (!s || Date.now() > s.expiresAt) throw new MosaicMcpError("AUTH_EXPIRED", "invalid or expired session");
     return s;
   }
 

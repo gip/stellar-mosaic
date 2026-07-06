@@ -6,7 +6,10 @@ import { baseShieldConfigFromEnv } from "./baseShield.js";
 import { startBaseShieldWorker, type BaseShieldWorkerHandle } from "./baseShieldWorker.js";
 import { createMosaicMcpServer, type MosaicMcpOptions } from "./server.js";
 import { openMosaicStore } from "./store.js";
+import { errorMessage } from "@mosaic/sdk";
 import { AuthService } from "./auth.js";
+import { envNumber } from "./env.js";
+import { fetchWithTimeout } from "./fetch.js";
 import { classifyMcpError, MosaicMcpError } from "./errors.js";
 
 export interface HttpServerOptions extends MosaicMcpOptions {
@@ -35,11 +38,6 @@ function parseOrigins(value: string): Set<string> {
 
 function loopbackDevOrigin(origin: string): boolean {
   return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(origin);
-}
-
-function envNumber(name: string, fallback: number): number {
-  const parsed = Number(process.env[name]);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 async function readJson(req: IncomingMessage, maxBytes: number): Promise<unknown> {
@@ -90,15 +88,18 @@ function jsonRpcId(body: unknown): unknown {
 }
 
 async function fetchJsonWithTimeout(url: string, init: RequestInit, timeoutMs = 3_000): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  timer.unref?.();
+  const res = await fetchWithTimeout(url, init, timeoutMs);
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  return res.json();
+}
+
+/** Run one readiness probe, capturing failure as a `{ ok: false, error }` value rather than throwing
+ * so a single dependency being down still produces a full report. */
+async function probe(run: () => Promise<unknown>): Promise<{ value: unknown; ok: boolean }> {
   try {
-    const res = await fetch(url, { ...init, signal: controller.signal });
-    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-    return await res.json();
-  } finally {
-    clearTimeout(timer);
+    return { value: await run(), ok: true };
+  } catch (error) {
+    return { value: { ok: false, error: errorMessage(error) }, ok: false };
   }
 }
 
@@ -107,46 +108,52 @@ async function readiness(opts: {
   baseShield: ReturnType<typeof baseShieldConfigFromEnv>;
   worker?: BaseShieldWorkerHandle;
 }): Promise<{ ok: boolean; checks: Record<string, unknown> }> {
+  const stellarRpc = process.env.MOSAIC_RPC ?? "https://soroban-testnet.stellar.org";
+  // Kick off every network/store probe concurrently — /readyz is polled often, so paying the sum of
+  // the probe timeouts sequentially would make a healthy check as slow as all dependencies combined.
+  const probes: Array<[string, Promise<{ value: unknown; ok: boolean }>]> = [
+    ["store", probe(() => opts.store!.healthCheck())],
+    [
+      "stellar_rpc",
+      probe(() =>
+        fetchJsonWithTimeout(stellarRpc, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
+        }),
+      ),
+    ],
+  ];
+  if (opts.baseShield) {
+    const baseShield = opts.baseShield;
+    probes.push([
+      "base_rpc",
+      probe(() =>
+        fetchJsonWithTimeout(baseShield.baseRpc, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
+        }),
+      ),
+    ]);
+    probes.push([
+      "prove_service",
+      probe(() => fetchJsonWithTimeout(`${baseShield.proveServiceUrl}/healthz`, { headers: { authorization: `Bearer ${baseShield.proveToken}` } })),
+    ]);
+  }
+
   const checks: Record<string, unknown> = {};
   let ok = true;
-  try {
-    checks.store = await opts.store!.healthCheck();
-  } catch (error) {
-    ok = false;
-    checks.store = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  for (const [name, pending] of probes) {
+    const result = await pending;
+    checks[name] = result.value;
+    if (!result.ok) ok = false;
   }
-  const stellarRpc = process.env.MOSAIC_RPC ?? "https://soroban-testnet.stellar.org";
-  try {
-    checks.stellar_rpc = await fetchJsonWithTimeout(stellarRpc, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
-    });
-  } catch (error) {
-    ok = false;
-    checks.stellar_rpc = { ok: false, error: error instanceof Error ? error.message : String(error) };
-  }
+
   if (opts.baseShield) {
-    try {
-      checks.base_rpc = await fetchJsonWithTimeout(opts.baseShield.baseRpc, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
-      });
-    } catch (error) {
-      ok = false;
-      checks.base_rpc = { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-    try {
-      checks.prove_service = await fetchJsonWithTimeout(`${opts.baseShield.proveServiceUrl}/healthz`, {
-        headers: { authorization: `Bearer ${opts.baseShield.proveToken}` },
-      });
-    } catch (error) {
-      ok = false;
-      checks.prove_service = { ok: false, error: error instanceof Error ? error.message : String(error) };
-    }
-    checks.base_shield_worker = opts.worker?.status() ?? { running: false };
-    if (opts.worker?.status().stuck) ok = false;
+    const status = opts.worker?.status() ?? { running: false };
+    checks.base_shield_worker = status;
+    if ((status as { stuck?: boolean }).stuck) ok = false;
   } else {
     checks.base_shield_worker = { running: false, reason: "worker_disabled" };
   }
@@ -163,8 +170,8 @@ export async function startHttpServer(opts: HttpServerOptions = {}): Promise<{ c
   );
   const store = opts.store ?? openMosaicStore(process.env.MOSAIC_DATABASE_URL);
   const transports = new Map<string, TransportRecord>();
-  const maxBodyBytes = envNumber("MOSAIC_MCP_MAX_BODY_BYTES", 16 * 1024 * 1024);
-  const transportTtlMs = envNumber("MOSAIC_MCP_TRANSPORT_TTL_MS", 30 * 60_000);
+  const maxBodyBytes = envNumber("MOSAIC_MCP_MAX_BODY_BYTES", 16 * 1024 * 1024, { allowZero: true });
+  const transportTtlMs = envNumber("MOSAIC_MCP_TRANSPORT_TTL_MS", 30 * 60_000, { allowZero: true });
   const baseShield = opts.baseShield ?? baseShieldConfigFromEnv();
   // One AuthService for the whole process, shared across every MCP session. A fresh transport is
   // created per initialize, so a per-server AuthService would reset the auth rate limiter on each new

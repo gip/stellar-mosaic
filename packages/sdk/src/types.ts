@@ -358,7 +358,6 @@ export interface BaseShieldJob {
    * a job to `failed` once this passes the attempt cap of the latest failure's class (a
    * service-reported prove error, a mint submission, or a transport-level throw). */
   attempts?: number;
-  stage_attempts?: Record<string, number>;
   error?: string | null;
   failure?: MosaicMcpErrorBody | null;
 }

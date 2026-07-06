@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { contractErrorCode, errorMessage } from "@mosaic/sdk";
+import { envNumber } from "./env.js";
+import { fetchWithTimeout } from "./fetch.js";
 import { MosaicMcpError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
@@ -77,21 +79,11 @@ const authHeaders = (cfg: BaseShieldConfig) => ({
   "content-type": "application/json",
 });
 
-function timeoutMs(envName: string, fallback: number): number {
-  const parsed = Number(process.env[envName]);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-async function fetchWithTimeout(url: string, init: RequestInit, code: "PROVE_UNAVAILABLE" | "BASE_RPC_UNAVAILABLE"): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs("MOSAIC_MCP_FETCH_TIMEOUT_MS", DEFAULT_FETCH_TIMEOUT_MS));
-  timer.unref?.();
+async function fetchOrThrow(url: string, init: RequestInit, code: "PROVE_UNAVAILABLE" | "BASE_RPC_UNAVAILABLE"): Promise<Response> {
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await fetchWithTimeout(url, init, envNumber("MOSAIC_MCP_FETCH_TIMEOUT_MS", DEFAULT_FETCH_TIMEOUT_MS));
   } catch (cause) {
     throw new MosaicMcpError(code, `${url} request failed: ${errorMessage(cause)}`, { retryable: true, cause });
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -100,7 +92,7 @@ export async function submitProve(
   cfg: BaseShieldConfig,
   args: { jobId: string; bridge: string; depositId: number },
 ): Promise<ProveResult> {
-  const res = await fetchWithTimeout(`${cfg.proveServiceUrl}/prove/base-deposit`, {
+  const res = await fetchOrThrow(`${cfg.proveServiceUrl}/prove/base-deposit`, {
     method: "POST",
     headers: authHeaders(cfg),
     body: JSON.stringify({ job_id: args.jobId, bridge: args.bridge, deposit_id: args.depositId }),
@@ -111,7 +103,7 @@ export async function submitProve(
 
 /** Poll a prove job's status without starting anything. */
 export async function pollProve(cfg: BaseShieldConfig, jobId: string): Promise<ProveResult> {
-  const res = await fetchWithTimeout(`${cfg.proveServiceUrl}/prove/base-deposit/${encodeURIComponent(jobId)}`, {
+  const res = await fetchOrThrow(`${cfg.proveServiceUrl}/prove/base-deposit/${encodeURIComponent(jobId)}`, {
     headers: authHeaders(cfg),
   }, "PROVE_UNAVAILABLE");
   if (!res.ok) throw new Error(`prove poll failed: ${res.status} ${await res.text()}`);
@@ -123,7 +115,7 @@ export async function pollProve(cfg: BaseShieldConfig, jobId: string): Promise<P
  * against the "finalized" tag — no eth_getProof, no foundry `cast` on this host.
  */
 export async function isFinalized(baseRpc: string, blockNumber: number): Promise<boolean> {
-  const res = await fetchWithTimeout(baseRpc, {
+  const res = await fetchOrThrow(baseRpc, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBlockByNumber", params: ["finalized", false] }),
@@ -165,7 +157,7 @@ export async function mintOnStellar(
     execFileAsync(
       "stellar",
       ["contract", "invoke", "--id", args.contractId, "--source-account", args.sponsorSecret, ...net, "--send", "yes", "--", ...fnArgs],
-      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs("MOSAIC_MCP_CLI_TIMEOUT_MS", DEFAULT_CLI_TIMEOUT_MS) },
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: envNumber("MOSAIC_MCP_CLI_TIMEOUT_MS", DEFAULT_CLI_TIMEOUT_MS) },
     );
   // Attest first (idempotent: the contract just overwrites the block registry entry), then mint.
   await invoke(["attest_base_block", "--block_number", String(args.blockNumber), "--block_hash", args.blockHash]);

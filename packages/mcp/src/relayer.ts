@@ -3,9 +3,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { Operation, SubmitResult } from "@mosaic/sdk";
+import { errorMessage, type Operation, type SubmitResult } from "@mosaic/sdk";
 import type { RelayHandlers } from "./server.js";
 import type { MosaicStore } from "./store.js";
+import { envNumber } from "./env.js";
 import { MosaicMcpError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
@@ -35,10 +36,6 @@ function b64File(dir: string, name: string, value: string): string {
   return path;
 }
 
-function cliTimeoutMs(): number {
-  const parsed = Number(process.env.MOSAIC_MCP_CLI_TIMEOUT_MS);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_CLI_TIMEOUT_MS;
-}
 
 export class StellarCliRelayer implements RelayHandlers {
   private readonly store: MosaicStore;
@@ -202,11 +199,11 @@ export class StellarCliRelayer implements RelayHandlers {
       const { stdout } = await execFileAsync(this.stellarBin, args, {
         encoding: "utf8",
         maxBuffer: 64 * 1024 * 1024,
-        timeout: cliTimeoutMs(),
+        timeout: envNumber("MOSAIC_MCP_CLI_TIMEOUT_MS", DEFAULT_CLI_TIMEOUT_MS),
       });
       return stdout.trim();
     } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
+      const message = errorMessage(cause);
       const timedOut = !!(cause && typeof cause === "object" && "killed" in cause && (cause as { killed?: boolean }).killed);
       if (timedOut) throw new MosaicMcpError("CLI_TIMEOUT", `stellar CLI timed out: ${message}`, { retryable: true, cause });
       // A transient infrastructure failure (RPC 5xx, connection reset, DNS) must stay retryable —

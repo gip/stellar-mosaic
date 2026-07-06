@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { errorMessage } from "@mosaic/sdk";
+import { errorMessage, type MosaicMcpErrorBody } from "@mosaic/sdk";
+
+export type { MosaicMcpErrorBody };
 
 export type MosaicMcpErrorCode =
   | "AUTH_EXPIRED"
@@ -17,15 +19,6 @@ export type MosaicMcpErrorCode =
   | "TIMEOUT"
   | "UNAVAILABLE"
   | "INTERNAL";
-
-export interface MosaicMcpErrorBody {
-  code: MosaicMcpErrorCode;
-  message: string;
-  retryable: boolean;
-  status: number;
-  details?: unknown;
-  correlation_id: string;
-}
 
 const STATUS: Record<MosaicMcpErrorCode, number> = {
   AUTH_EXPIRED: 401,

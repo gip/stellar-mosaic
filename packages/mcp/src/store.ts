@@ -17,6 +17,7 @@ import type {
   MosaicMcpErrorBody,
 } from "@mosaic/sdk";
 import { normalizeActivityEvent } from "@mosaic/sdk";
+import { envNumber } from "./env.js";
 import { MosaicMcpError, classifyMcpError } from "./errors.js";
 
 const now = () => Date.now();
@@ -32,10 +33,8 @@ const LEASE_TTL_MS = 90_000;
  * same caps plus margin. (The contract's deposit-id idempotency is the last-resort backstop against
  * an actual double mint; this lease prevents the wasted work and status clobbering.) */
 function baseShieldLeaseTtlMs(): number {
-  const cli = Number(process.env.MOSAIC_MCP_CLI_TIMEOUT_MS);
-  const fetchMs = Number(process.env.MOSAIC_MCP_FETCH_TIMEOUT_MS);
-  const cliCap = Number.isFinite(cli) && cli > 0 ? cli : 120_000;
-  const fetchCap = Number.isFinite(fetchMs) && fetchMs > 0 ? fetchMs : 30_000;
+  const cliCap = envNumber("MOSAIC_MCP_CLI_TIMEOUT_MS", 120_000);
+  const fetchCap = envNumber("MOSAIC_MCP_FETCH_TIMEOUT_MS", 30_000);
   return 2 * cliCap + 3 * fetchCap + 60_000;
 }
 
@@ -152,7 +151,6 @@ function resumeStatusForRetry(job: BaseShieldJob): string {
 /** Record one more transient step failure in the job's current stage. */
 function bumpRetryState(job: BaseShieldJob, error: string): void {
   job.attempts = (job.attempts ?? 0) + 1;
-  job.stage_attempts = { ...(job.stage_attempts ?? {}), [job.status]: ((job.stage_attempts ?? {})[job.status] ?? 0) + 1 };
   job.error = error;
 }
 
@@ -782,6 +780,7 @@ export class SqliteMosaicStore implements MosaicStore {
       );
       CREATE TABLE IF NOT EXISTS wallet_backups (backup_id TEXT PRIMARY KEY, write_token_hash TEXT NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS base_shields (key TEXT PRIMARY KEY, desk_id TEXT NOT NULL, json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS health_checks (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS idx_operations_address ON operations(address, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_actions_claim ON actions(address, status, lease_expires_at);
       CREATE INDEX IF NOT EXISTS idx_events_address_cursor ON events(address, cursor);
@@ -1428,9 +1427,10 @@ export class SqliteMosaicStore implements MosaicStore {
   }
 
   async healthCheck(): Promise<{ ok: boolean; path?: string }> {
+    // A real write probe (the worker needs a writable DB), but the table is created once at open —
+    // no per-probe DDL. /readyz can poll this frequently without re-running CREATE TABLE each time.
     const key = `health-${randomUUID()}`;
     this.transaction(() => {
-      this.db.prepare("CREATE TABLE IF NOT EXISTS health_checks (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL)").run();
       this.db.prepare("INSERT INTO health_checks(id, created_at) VALUES(?, ?)").run(key, now());
       this.db.prepare("DELETE FROM health_checks WHERE id = ?").run(key);
     });
