@@ -83,6 +83,9 @@ export interface MosaicStore {
   ): Promise<void>;
   /** Move a job to a new status (e.g. `minting`, `active`). */
   baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void>;
+  /** Record a transient step failure: bump `attempts` and keep the job in its current stage so the
+   * worker retries it on a later tick. */
+  baseShieldRetry(id: string, error: string): Promise<void>;
   /** Move a job to the terminal `failed` state with a message. */
   baseShieldFailed(id: string, error: string): Promise<void>;
 }
@@ -512,6 +515,8 @@ export class MemoryMosaicStore implements MosaicStore {
     job.block_hash = blockHash;
     job.seal_hex = sealHex;
     job.journal_hex = journalHex;
+    job.attempts = 0;
+    job.error = null;
   }
 
   async baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void> {
@@ -519,6 +524,15 @@ export class MemoryMosaicStore implements MosaicStore {
     if (!job) throw new Error(`base-shield job ${id} not found`);
     job.status = status;
     if (stellarTxHash) job.stellar_tx_hash = stellarTxHash;
+    job.attempts = 0;
+    job.error = null;
+  }
+
+  async baseShieldRetry(id: string, error: string): Promise<void> {
+    const job = this.baseShieldById(id);
+    if (!job) throw new Error(`base-shield job ${id} not found`);
+    job.attempts = (job.attempts ?? 0) + 1;
+    job.error = error;
   }
 
   async baseShieldFailed(id: string, error: string): Promise<void> {
@@ -985,13 +999,27 @@ export class SqliteMosaicStore implements MosaicStore {
       block_hash: blockHash,
       seal_hex: sealHex,
       journal_hex: journalHex,
+      attempts: 0,
+      error: null,
     });
   }
 
   async baseShieldStatus(id: string, status: string, stellarTxHash?: string): Promise<void> {
     const row = this.baseShieldRowById(id);
     if (!row) throw new Error(`base-shield job ${id} not found`);
-    this.writeBaseShield(row.key, { ...row.job, status, ...(stellarTxHash ? { stellar_tx_hash: stellarTxHash } : {}) });
+    this.writeBaseShield(row.key, {
+      ...row.job,
+      status,
+      ...(stellarTxHash ? { stellar_tx_hash: stellarTxHash } : {}),
+      attempts: 0,
+      error: null,
+    });
+  }
+
+  async baseShieldRetry(id: string, error: string): Promise<void> {
+    const row = this.baseShieldRowById(id);
+    if (!row) throw new Error(`base-shield job ${id} not found`);
+    this.writeBaseShield(row.key, { ...row.job, attempts: (row.job.attempts ?? 0) + 1, error });
   }
 
   async baseShieldFailed(id: string, error: string): Promise<void> {

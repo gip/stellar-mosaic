@@ -335,5 +335,8 @@ export interface BaseShieldJob {
   stellar_tx_hash?: string | null;
   /** Display metadata from the depositing client; see {@link BaseShieldDeposit}. */
   deposit?: BaseShieldDeposit;
+  /** Transient-failure count for the current stage; reset on every stage transition. The worker
+   * only moves a job to `failed` once this passes the stage's attempt cap. */
+  attempts?: number;
   error?: string | null;
 }
