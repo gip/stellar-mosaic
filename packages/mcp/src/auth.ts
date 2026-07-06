@@ -36,6 +36,11 @@ export class AuthService {
     const current = this.attempts.get(key);
     const at = Date.now();
     if (!current || current.resetAt < at) {
+      // Opportunistically evict expired windows so the map can't grow without bound as distinct
+      // addresses churn through (each key would otherwise leave a permanent entry).
+      if (this.attempts.size > 1_000) {
+        for (const [k, v] of this.attempts) if (v.resetAt < at) this.attempts.delete(k);
+      }
       this.attempts.set(key, { count: 1, resetAt: at + windowMs });
       return;
     }

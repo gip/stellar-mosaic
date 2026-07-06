@@ -6,6 +6,7 @@ import { baseShieldConfigFromEnv } from "./baseShield.js";
 import { startBaseShieldWorker, type BaseShieldWorkerHandle } from "./baseShieldWorker.js";
 import { createMosaicMcpServer, type MosaicMcpOptions } from "./server.js";
 import { openMosaicStore } from "./store.js";
+import { AuthService } from "./auth.js";
 import { classifyMcpError, MosaicMcpError } from "./errors.js";
 
 export interface HttpServerOptions extends MosaicMcpOptions {
@@ -14,7 +15,7 @@ export interface HttpServerOptions extends MosaicMcpOptions {
 }
 
 type Transport = StreamableHTTPServerTransport;
-type TransportRecord = { transport: Transport; lastUsed: number };
+type TransportRecord = { transport: Transport; lastUsed: number; openStreams: number };
 
 function parseBind(bind: string): { host: string; port: number } {
   const [host, rawPort] = bind.includes(":") ? bind.split(":") : ["127.0.0.1", bind];
@@ -165,10 +166,15 @@ export async function startHttpServer(opts: HttpServerOptions = {}): Promise<{ c
   const maxBodyBytes = envNumber("MOSAIC_MCP_MAX_BODY_BYTES", 16 * 1024 * 1024);
   const transportTtlMs = envNumber("MOSAIC_MCP_TRANSPORT_TTL_MS", 30 * 60_000);
   const baseShield = opts.baseShield ?? baseShieldConfigFromEnv();
+  // One AuthService for the whole process, shared across every MCP session. A fresh transport is
+  // created per initialize, so a per-server AuthService would reset the auth rate limiter on each new
+  // session and leave verify brute-forceable — the shared instance keeps the limiter effective.
+  const auth = opts.auth ?? new AuthService(store);
   const serverOptions: MosaicMcpOptions = {
     ...opts,
     store,
     baseShield,
+    auth,
   };
 
   // The durable Base->Stellar shield worker runs once per HTTP server when a prove service is set.
@@ -180,7 +186,10 @@ export async function startHttpServer(opts: HttpServerOptions = {}): Promise<{ c
   const cleanup = setInterval(() => {
     const cutoff = Date.now() - transportTtlMs;
     for (const [id, record] of transports) {
-      if (record.lastUsed < cutoff) {
+      // Only reap sessions that are both idle and have no open stream. A long-lived SSE (GET) stream
+      // keeps the session live even with no tool calls, so evicting it on `lastUsed` alone would tear
+      // down a still-connected client mid-stream.
+      if (record.openStreams <= 0 && record.lastUsed < cutoff) {
         record.transport.close?.();
         transports.delete(id);
       }
@@ -227,7 +236,7 @@ export async function startHttpServer(opts: HttpServerOptions = {}): Promise<{ c
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (id) => {
-            transports.set(id, { transport: transport!, lastUsed: Date.now() });
+            transports.set(id, { transport: transport!, lastUsed: Date.now(), openStreams: 0 });
           },
         });
         transport.onclose = () => {
@@ -236,7 +245,14 @@ export async function startHttpServer(opts: HttpServerOptions = {}): Promise<{ c
         };
         await createMosaicMcpServer(serverOptions).connect(transport);
       } else {
+        // Mark the session busy for the lifetime of this request so the idle sweeper cannot reap a
+        // session with an in-flight or long-lived (SSE) stream; refresh idle time when it closes.
         record.lastUsed = Date.now();
+        record.openStreams += 1;
+        res.on("close", () => {
+          record!.openStreams -= 1;
+          record!.lastUsed = Date.now();
+        });
       }
       if (!transport) throw new MosaicMcpError("INTERNAL", "MCP transport was not initialized");
       await transport.handleRequest(req, res, parsedBody);

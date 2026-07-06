@@ -206,11 +206,24 @@ export class StellarCliRelayer implements RelayHandlers {
       });
       return stdout.trim();
     } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
       const timedOut = !!(cause && typeof cause === "object" && "killed" in cause && (cause as { killed?: boolean }).killed);
-      throw new MosaicMcpError(timedOut ? "CLI_TIMEOUT" : "RELAY_REJECTED", `stellar CLI failed: ${cause instanceof Error ? cause.message : String(cause)}`, {
-        retryable: timedOut,
-        cause,
-      });
+      if (timedOut) throw new MosaicMcpError("CLI_TIMEOUT", `stellar CLI timed out: ${message}`, { retryable: true, cause });
+      // A transient infrastructure failure (RPC 5xx, connection reset, DNS) must stay retryable —
+      // reporting it as a permanent RELAY_REJECTED would abandon an already-signed transaction that
+      // an immediate retry would land. Only a genuine rejection (the tx reached the network and was
+      // refused) is terminal.
+      if (isTransientCliFailure(message)) throw new MosaicMcpError("UNAVAILABLE", `stellar CLI transient failure: ${message}`, { retryable: true, cause });
+      throw new MosaicMcpError("RELAY_REJECTED", `stellar CLI failed: ${message}`, { retryable: false, cause });
     }
   }
+}
+
+/** Whether a `stellar` CLI failure looks like a transient network/RPC condition (safe to retry) as
+ * opposed to a definite contract/transaction rejection. Heuristic on the CLI's error text; errs
+ * toward terminal (a missing binary or bad args is not matched, since retrying cannot help). */
+function isTransientCliFailure(message: string): boolean {
+  return /timed out|timeout|connection|econnrefused|econnreset|etimedout|ehostunreach|enetunreach|enotfound|socket hang up|network|temporarily|try again|rate limit|too many requests|\b429\b|\b50[234]\b|bad gateway|service unavailable|gateway timeout|sending request|upstream/i.test(
+    message,
+  );
 }

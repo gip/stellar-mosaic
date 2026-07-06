@@ -29,3 +29,12 @@ test("a signature from a different key is rejected", async () => {
 test("an unknown session token throws", async () => {
   await assert.rejects(() => new AuthService().requireSession("nope"), /invalid or expired/);
 });
+
+test("repeated challenges from one address are rate limited on a shared service", async () => {
+  // The HTTP server shares one AuthService across sessions precisely so this limiter is not reset by
+  // opening a fresh MCP session per attempt. Drive the shared instance directly.
+  const kp = Keypair.random();
+  const svc = new AuthService();
+  for (let i = 0; i < 20; i++) await svc.challenge(kp.publicKey());
+  await assert.rejects(() => svc.challenge(kp.publicKey()), /rate limit exceeded/);
+});

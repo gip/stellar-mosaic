@@ -63,6 +63,8 @@ class HttpMcpClient implements McpClient {
   private client?: Client;
   private connecting?: Promise<Client>;
   private sessionToken?: string;
+  private signer?: StellarSigner;
+  private reauth?: Promise<void>;
 
   constructor(url: string, callTimeoutMs = 60_000) {
     this.url = url;
@@ -120,6 +122,35 @@ class HttpMcpClient implements McpClient {
   }
 
   private async call<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
+    try {
+      return await this.callOnce<T>(name, args);
+    } catch (error) {
+      // A session-scoped call whose session expired mid-flight (e.g. a base-shield poll outliving the
+      // server's session TTL) is transparently recovered: re-authenticate with the retained signer
+      // and retry the call once with the fresh token. Non-authenticated calls (no `session` arg) and
+      // the auth handshake itself (no signer retention loop) are unaffected.
+      const recoverable = error instanceof MosaicMcpClientError && (error.code === "AUTH_EXPIRED" || error.code === "AUTH_INVALID");
+      if (recoverable && this.signer && typeof args.session === "string") {
+        await this.reauthenticate(this.signer);
+        return this.callOnce<T>(name, { ...args, session: this.sessionToken });
+      }
+      throw error;
+    }
+  }
+
+  /** Coalesce concurrent re-auth attempts (a burst of polls all seeing AUTH_EXPIRED) into one. */
+  private reauthenticate(signer: StellarSigner): Promise<void> {
+    if (!this.reauth) {
+      this.reauth = this.authenticate(signer)
+        .then(() => undefined)
+        .finally(() => {
+          this.reauth = undefined;
+        });
+    }
+    return this.reauth;
+  }
+
+  private async callOnce<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
     const client = await this.connect();
     const call = client.callTool({ name, arguments: args });
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -172,6 +203,8 @@ class HttpMcpClient implements McpClient {
   }
 
   async authenticate(signer: StellarSigner): Promise<{ session: string }> {
+    // Retain the signer so an expired session can be renewed transparently on the next call.
+    this.signer = signer;
     const address = await signer.address();
     const ch = await this.call<{ challengeId: string; message: string }>("auth_challenge", { address });
     const signature = base64(await signer.signMessage(new TextEncoder().encode(ch.message)));
@@ -193,6 +226,7 @@ class HttpMcpClient implements McpClient {
   async logout(): Promise<void> {
     const token = this.sessionToken;
     this.sessionToken = undefined;
+    this.signer = undefined;
     this.writeStoredSession(undefined);
     if (!token) return;
     await this.call("auth_logout", { session: token });
