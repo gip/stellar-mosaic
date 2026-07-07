@@ -19,6 +19,13 @@ if (!agentFile) {
   console.error("AGENT_FILE env var is required (path to the resolved agent JSON)");
   process.exit(1);
 }
+// The provider API key is deliberately kept out of the agent file (never on disk) — the
+// orchestrator hands it over through the environment.
+const apiKey = process.env.MOSAIC_AGENT_API_KEY ?? "";
+if (!apiKey) {
+  console.error("MOSAIC_AGENT_API_KEY env var is required (the provider API key is not in the agent file)");
+  process.exit(1);
+}
 const cfg = JSON.parse(readFileSync(agentFile, "utf8")) as ResolvedAgentFile;
 const log = (line: string) => console.log(`[${cfg.name}] ${line}`);
 
@@ -29,6 +36,8 @@ function truncate(value: unknown, max = 400): string {
 
 interface TranscriptStep {
   text?: string;
+  /** Step finish time — lets the renderer interleave the agents' transcripts chronologically. */
+  at: string;
   toolCalls: { toolName: string; input: unknown }[];
   toolResults: { toolName: string; output: unknown }[];
   finishReason: string;
@@ -37,6 +46,7 @@ interface TranscriptStep {
 
 const transcriptSteps: TranscriptStep[] = [];
 const startedAt = new Date().toISOString();
+const system = systemPrompt(cfg);
 
 function onStep(step: StepResult<ToolSet>): void {
   if (step.text.trim()) log(`💭 ${step.text.trim()}`);
@@ -44,6 +54,7 @@ function onStep(step: StepResult<ToolSet>): void {
   for (const result of step.toolResults) log(`   ↳ ${truncate(result.output, 300)}`);
   transcriptSteps.push({
     text: step.text || undefined,
+    at: new Date().toISOString(),
     toolCalls: step.toolCalls.map((c) => ({ toolName: c.toolName, input: c.input })),
     toolResults: step.toolResults.map((r) => ({ toolName: r.toolName, output: r.output })),
     finishReason: step.finishReason,
@@ -59,6 +70,8 @@ function writeTranscript(extra: Record<string, unknown>): void {
         name: cfg.name,
         provider: cfg.provider,
         model: cfg.model,
+        system,
+        prompt: cfg.prompt,
         startedAt,
         finishedAt: new Date().toISOString(),
         steps: transcriptSteps,
@@ -89,13 +102,13 @@ async function main(): Promise<void> {
   log(`stellar ${mosaic.address} · xmtp ${xmtp.client.inboxId.slice(0, 12)}… · ${cfg.provider}/${cfg.model}`);
 
   const result = await generateText({
-    model: languageModel(cfg.provider, cfg.apiKey, cfg.model),
-    system: systemPrompt(cfg),
+    model: languageModel(cfg.provider, apiKey, cfg.model),
+    system,
     prompt: cfg.prompt,
     tools: {
       ...makeXmtpTools(xmtp),
       ...makeMosaicTools(mosaic, cfg),
-      ...(cfg.webSearch ? webSearchTools(cfg.provider, cfg.apiKey) : {}),
+      ...(cfg.webSearch ? webSearchTools(cfg.provider, apiKey) : {}),
     },
     stopWhen: stepCountIs(cfg.maxTurns),
     onStepFinish: onStep,

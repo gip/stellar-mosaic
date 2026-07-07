@@ -13,28 +13,40 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Horizon } from "@stellar/stellar-sdk";
 import { loadExperiment, type ExperimentConfig, type ResolvedAgentFile, type VerdictRule } from "./experiment.js";
-import { provision, type Provisioned } from "./provision.js";
+import { buildDeskSpec } from "./mosaic.js";
+import { provision, type Provisioned, type ProvisionedAsset } from "./provision.js";
+import { renderRunHtml, type RunResults, type Transcript } from "./render.js";
 
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-interface Balances {
-  xlm: number;
-  usdc: number;
-}
+/** Balance per experiment asset symbol. */
+type Balances = Record<string, number>;
 
-async function balances(horizon: Horizon.Server, address: string, usdcIssuer: string): Promise<Balances> {
+async function balances(horizon: Horizon.Server, address: string, assets: ProvisionedAsset[]): Promise<Balances> {
   const account = await horizon.loadAccount(address);
-  let xlm = 0;
-  let usdc = 0;
+  const out: Balances = Object.fromEntries(assets.map((a) => [a.symbol, 0]));
   for (const b of account.balances) {
     const line = b as { asset_code?: string; asset_issuer?: string };
-    if (b.asset_type === "native") xlm = Number(b.balance);
-    // Only the per-run demo USDC counts — a pre-existing USDC line from another issuer must not
-    // leak into the deltas the verdict is computed from.
-    else if (line.asset_code === "USDC" && line.asset_issuer === usdcIssuer) usdc = Number(b.balance);
+    for (const a of assets) {
+      // Only the experiment's exact issuers count — a pre-existing same-code line from another
+      // issuer must not leak into the deltas the verdict is computed from.
+      if (a.issuer ? line.asset_code === a.symbol && line.asset_issuer === a.issuer : b.asset_type === "native") {
+        out[a.symbol] = Number(b.balance);
+      }
+    }
   }
-  return { xlm, usdc };
+  return out;
 }
+
+const balanceLine = (b: Balances) =>
+  Object.entries(b)
+    .map(([symbol, v]) => `${symbol} ${v}`)
+    .join("  ");
+
+const deltaLine = (b: Balances) =>
+  Object.entries(b)
+    .map(([symbol, v]) => `${symbol} ${v.toFixed(7)}`)
+    .join("  ");
 
 interface AgentHandle {
   /** Resolves to the exit code (null if killed by signal). */
@@ -43,9 +55,10 @@ interface AgentHandle {
   kill: () => void;
 }
 
-function runAgent(name: string, agentFile: string, appendLog: (line: string) => void): AgentHandle {
+function runAgent(name: string, agentFile: string, apiKey: string, appendLog: (line: string) => void): AgentHandle {
   const child = spawn(process.execPath, [join(PACKAGE_ROOT, "dist/agentMain.js")], {
-    env: { ...process.env, AGENT_FILE: agentFile },
+    // The API key travels only through the child's environment — never written to any file.
+    env: { ...process.env, AGENT_FILE: agentFile, MOSAIC_AGENT_API_KEY: apiKey },
     stdio: ["ignore", "pipe", "pipe"],
   });
   // Agent stdout is already [name]-prefixed; prefix stderr (stack traces, SDK noise) ourselves.
@@ -76,7 +89,7 @@ function evaluateVerdict(
   deltas: Record<string, Balances>,
 ): { rules: Array<VerdictRule & { delta: number; pass: boolean }>; pass: boolean } {
   const evaluated = rules.map((rule) => {
-    const delta = rule.asset === "XLM" ? deltas[rule.agent].xlm : deltas[rule.agent].usdc;
+    const delta = deltas[rule.agent][rule.asset];
     const pass =
       (rule.min === undefined || delta >= Number(rule.min)) &&
       (rule.max === undefined || delta <= Number(rule.max));
@@ -87,12 +100,12 @@ function evaluateVerdict(
 
 function writeAgentFiles(cfg: ExperimentConfig, provisioned: Provisioned, runDir: string): Map<string, string> {
   const files = new Map<string, string>();
+  const desk = buildDeskSpec(provisioned.assets, cfg.pairs);
   for (const agent of provisioned.agents) {
     const resolved: ResolvedAgentFile = {
       experiment: cfg.name,
       name: agent.name,
       provider: agent.provider,
-      apiKey: agent.apiKey,
       model: agent.model,
       prompt: agent.prompt,
       webSearch: agent.webSearch,
@@ -105,7 +118,7 @@ function writeAgentFiles(cfg: ExperimentConfig, provisioned: Provisioned, runDir
       peers: provisioned.agents
         .filter((p) => p.name !== agent.name)
         .map((p) => ({ name: p.name, ethAddress: p.ethAddress })),
-      usdcIssuer: provisioned.usdc.issuer,
+      desk,
       network: {
         rpcUrl: cfg.network.rpcUrl,
         networkPassphrase: cfg.network.networkPassphrase,
@@ -146,7 +159,8 @@ async function main(): Promise<void> {
     join(runDir, "identities.json"),
     JSON.stringify(
       {
-        usdc: provisioned.usdc,
+        assets: provisioned.assets,
+        demoIssuer: provisioned.demoIssuer,
         agents: provisioned.agents.map(({ apiKey: _apiKey, ...rest }) => rest),
       },
       null,
@@ -163,15 +177,15 @@ async function main(): Promise<void> {
 
   const before: Record<string, Balances> = {};
   for (const a of provisioned.agents) {
-    before[a.name] = await balances(horizon, a.stellarAddress, provisioned.usdc.issuer);
-    console.log(`${a.name.padEnd(8)} ${a.stellarAddress}  XLM ${before[a.name].xlm}  USDC ${before[a.name].usdc}`);
+    before[a.name] = await balances(horizon, a.stellarAddress, provisioned.assets);
+    console.log(`${a.name.padEnd(8)} ${a.stellarAddress}  ${balanceLine(before[a.name])}`);
   }
 
   console.log(`--- launching agents (wall-clock cap ${cfg.timeoutMinutes} min) ---`);
   const logPath = join(runDir, "run.log");
   const appendLog = (line: string) => writeFileSync(logPath, line + "\n", { flag: "a" });
   const started = Date.now();
-  const handles = provisioned.agents.map((a) => runAgent(a.name, agentFiles.get(a.name)!, appendLog));
+  const handles = provisioned.agents.map((a) => runAgent(a.name, agentFiles.get(a.name)!, a.apiKey, appendLog));
   const finished = new Set<number>();
   handles.forEach((h, i) => void h.exited.then(() => finished.add(i)));
   const timedOutAgents: string[] = [];
@@ -196,12 +210,11 @@ async function main(): Promise<void> {
   const after: Record<string, Balances> = {};
   const deltas: Record<string, Balances> = {};
   for (const a of provisioned.agents) {
-    after[a.name] = await balances(horizon, a.stellarAddress, provisioned.usdc.issuer);
-    deltas[a.name] = {
-      xlm: after[a.name].xlm - before[a.name].xlm,
-      usdc: after[a.name].usdc - before[a.name].usdc,
-    };
-    console.log(`${a.name.padEnd(8)} Δ  XLM ${deltas[a.name].xlm.toFixed(7)}  USDC ${deltas[a.name].usdc.toFixed(7)}`);
+    after[a.name] = await balances(horizon, a.stellarAddress, provisioned.assets);
+    deltas[a.name] = Object.fromEntries(
+      provisioned.assets.map(({ symbol }) => [symbol, after[a.name][symbol] - before[a.name][symbol]]),
+    );
+    console.log(`${a.name.padEnd(8)} Δ  ${deltaLine(deltas[a.name])}`);
   }
 
   const timedOut = timedOutAgents.length > 0;
@@ -273,27 +286,34 @@ async function main(): Promise<void> {
   const resultsDir = join(PACKAGE_ROOT, "results");
   mkdirSync(resultsDir, { recursive: true });
   const resultsPath = join(resultsDir, `${cfg.name}-${runId}.json`);
-  writeFileSync(
-    resultsPath,
-    JSON.stringify(
-      {
-        experiment: cfg.name,
-        runId,
-        configPath: resolve(configPath),
-        network: cfg.network,
-        startedAt: new Date(started).toISOString(),
-        durationSeconds,
-        usdcIssuer: provisioned.usdc.issuer,
-        agents: agentOutcomes,
-        balances: { before, after, delta: deltas },
-        verdict: { rules: verdict.rules, allAgentsExitedClean: allExitedClean, timedOut, pass },
-        runDir,
-      },
-      null,
-      2,
-    ) + "\n",
-  );
+  const results: RunResults & { configPath: string; network: ExperimentConfig["network"] } = {
+    experiment: cfg.name,
+    runId,
+    configPath: resolve(configPath),
+    network: cfg.network,
+    startedAt: new Date(started).toISOString(),
+    durationSeconds,
+    assets: provisioned.assets,
+    agents: agentOutcomes,
+    balances: { before, after, delta: deltas },
+    verdict: { rules: verdict.rules, allAgentsExitedClean: allExitedClean, timedOut, pass },
+    runDir,
+  };
+  writeFileSync(resultsPath, JSON.stringify(results, null, 2) + "\n");
   console.log(`results → ${resultsPath}`);
+
+  // Human-readable HTML transcript next to the JSON — best-effort, never fails the run.
+  try {
+    const transcripts = new Map<string, Transcript>();
+    for (const o of agentOutcomes) {
+      if (o.transcript) transcripts.set(o.name, JSON.parse(readFileSync(o.transcript, "utf8")) as Transcript);
+    }
+    const htmlPath = join(resultsDir, `${cfg.name}-${runId}.html`);
+    writeFileSync(htmlPath, renderRunHtml(results, transcripts));
+    console.log(`transcript → ${htmlPath}`);
+  } catch (err) {
+    console.error(`html transcript render failed: ${err instanceof Error ? err.message : err}`);
+  }
   process.exit(pass ? 0 : 1);
 }
 

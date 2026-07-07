@@ -16,7 +16,7 @@ agents:
     model: claude-opus-4-8
     prompt: "Today spot price for XLM/USDC is 0.18. Sell about 2 USDC and get me the best price in XLM."
     funding:
-      usdc: "100"
+      USDC: "100"
 
 # Independent PASS/FAIL from Horizon balance deltas (decimal units). XLM deltas absorb tx fees
 # AND the ~1.6 XLM desk-deploy cost, which lands on whichever agent wins the desk-creator

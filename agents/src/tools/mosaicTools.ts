@@ -9,16 +9,21 @@ import { z } from "zod";
 import { Horizon } from "@stellar/stellar-sdk";
 import { SIDE_BUY, SIDE_SELL, type DeskConfig, type NoteLoop } from "@mosaic/sdk";
 import type { ResolvedAgentFile } from "../experiment.js";
-import { USDC_ASSET_ID, XLM_ASSET_ID, deskSpec, type MosaicSession } from "../mosaic.js";
+import type { MosaicSession } from "../mosaic.js";
 
 const json = (v: unknown) => JSON.stringify(v, null, 2);
 const errText = (err: unknown) => `ERROR: ${err instanceof Error ? err.message : String(err)}`;
 
-const amount = z.string().regex(/^[0-9]+$/).describe("Raw integer amount (7 decimals; 1 XLM/USDC = 10000000)");
+const amount = z.string().regex(/^[0-9]+$/).describe("Raw integer amount (7 decimals; 1 unit of any asset = 10000000)");
 
 export function makeMosaicTools(session: MosaicSession, cfg: ResolvedAgentFile): ToolSet {
   const { client, desks } = session;
   const horizon = new Horizon.Server(cfg.horizonUrl);
+  const symbolById = new Map(cfg.desk.assets.map((a) => [a.asset_id, a.symbol]));
+  const assetsDesc = cfg.desk.assets.map((a) => `${a.asset_id}=${a.symbol}`).join(", ");
+  const pairsDesc = cfg.desk.pairs
+    .map((p, i) => `${i} = ${symbolById.get(p.base_asset)}/${symbolById.get(p.quote_asset)} (base/quote)`)
+    .join(", ");
   const loops = new Map<string, NoteLoop>();
   const watch = (deskId: string) => {
     if (!loops.has(deskId)) loops.set(deskId, client.startNoteLoop(deskId, { intervalMs: 3000 }));
@@ -36,13 +41,13 @@ export function makeMosaicTools(session: MosaicSession, cfg: ResolvedAgentFile):
 
   return {
     mosaic_create_desk: tool({
-      description: `Deploy a fresh Mosaic desk (settlement contract) on Stellar testnet with the experiment's fixed asset set — asset ${XLM_ASSET_ID}=XLM (base), asset ${USDC_ASSET_ID}=USDC (quote), pair 0 = XLM/USDC. Takes ~30-60s. Returns the desk config JSON; send it to every peer verbatim so they can register the same desk.`,
+      description: `Deploy a fresh Mosaic desk (settlement contract) on Stellar testnet with the experiment's fixed asset set — assets: ${assetsDesc}; pairs: ${pairsDesc}. Takes ~30-60s. Returns the desk config JSON; send it to every peer verbatim so they can register the same desk.`,
       inputSchema: z.object({
         name: z.string().default("agent-experiment-desk").describe("Human-readable desk name"),
       }),
       execute: async (args) => {
         try {
-          const desk = await client.deploy({ name: args.name, ...deskSpec(cfg.usdcIssuer) });
+          const desk = await client.deploy({ name: args.name, ...cfg.desk });
           desks.register(desk);
           watch(desk.id);
           return json(desk);
@@ -53,7 +58,7 @@ export function makeMosaicTools(session: MosaicSession, cfg: ResolvedAgentFile):
     }),
     mosaic_register_desk: tool({
       description:
-        "Register a desk created by the desk creator, from the desk-config JSON they sent over XMTP. Validates it is the expected XLM/USDC desk.",
+        "Register a desk created by the desk creator, from the desk-config JSON they sent over XMTP. Validates it carries the experiment's exact asset/pair set.",
       inputSchema: z.object({
         desk_config_json: z.string().describe("The exact desk config JSON received from the desk creator"),
       }),
@@ -63,10 +68,21 @@ export function makeMosaicTools(session: MosaicSession, cfg: ResolvedAgentFile):
           if (!desk.id || !desk.contractId || !Array.isArray(desk.assets) || !Array.isArray(desk.pairs)) {
             throw new Error("desk config missing id/contractId/assets/pairs");
           }
-          const pair = desk.pairs[0];
-          if (!pair || pair.base_asset !== XLM_ASSET_ID || pair.quote_asset !== USDC_ASSET_ID) {
-            throw new Error(`expected pair 0 = base ${XLM_ASSET_ID} (XLM) / quote ${USDC_ASSET_ID} (USDC), got ${JSON.stringify(desk.pairs)}`);
+          if (desk.assets.length !== cfg.desk.assets.length || desk.pairs.length !== cfg.desk.pairs.length) {
+            throw new Error(`expected ${cfg.desk.assets.length} assets (${assetsDesc}) and pairs ${pairsDesc}, got ${desk.assets.length} assets / ${desk.pairs.length} pairs`);
           }
+          cfg.desk.assets.forEach((expected, i) => {
+            const got = desk.assets[i];
+            if (got.asset_id !== expected.asset_id || got.token !== expected.token) {
+              throw new Error(`asset ${expected.asset_id} mismatch: expected ${expected.symbol} (token ${expected.token}), got ${JSON.stringify(got)}`);
+            }
+          });
+          cfg.desk.pairs.forEach((expected, i) => {
+            const got = desk.pairs[i];
+            if (got.base_asset !== expected.base_asset || got.quote_asset !== expected.quote_asset) {
+              throw new Error(`pair ${i} mismatch: expected base ${expected.base_asset} / quote ${expected.quote_asset}, got ${JSON.stringify(got)}`);
+            }
+          });
           desks.register(desk);
           watch(desk.id);
           return json({ registered: desk.id, contractId: desk.contractId });
@@ -91,7 +107,7 @@ export function makeMosaicTools(session: MosaicSession, cfg: ResolvedAgentFile):
         "Move public funds from your Stellar account into a private note on the desk. Shield EXACTLY the amount_in you will trade. Takes ~10-40s.",
       inputSchema: z.object({
         desk_id: z.string(),
-        asset_id: z.number().int().describe(`${XLM_ASSET_ID}=XLM, ${USDC_ASSET_ID}=USDC`),
+        asset_id: z.number().int().describe(assetsDesc),
         amount,
       }),
       execute: async (args) => {
@@ -105,12 +121,12 @@ export function makeMosaicTools(session: MosaicSession, cfg: ResolvedAgentFile):
       },
     }),
     mosaic_place_order: tool({
-      description:
-        "Place a private limit order on the desk's on-chain book (pair 0 = XLM/USDC). sell = give XLM, want USDC; buy = give USDC, want XLM. SLOW: generates a zero-knowledge proof in-process — expect 1-5 minutes. If a matching opposite order is already resting, this call settles the trade atomically. Returns the proceeds note; its amount becomes real once the trade settles (see mosaic_wait_for_fill).",
+      description: `Place a private limit order on the desk's on-chain book (pairs: ${pairsDesc}). sell = give the pair's base asset, want quote; buy = give quote, want base. SLOW: generates a zero-knowledge proof in-process — expect 1-5 minutes. If a matching opposite order is already resting, this call settles the trade atomically. Returns the proceeds note; its amount becomes real once the trade settles (see mosaic_wait_for_fill).`,
       inputSchema: z.object({
         desk_id: z.string(),
+        pair_id: z.number().int().min(0).default(0).describe(`The pair to trade: ${pairsDesc}`),
         side: z.enum(["buy", "sell"]),
-        amount_in: amount.describe("Raw amount you give (XLM for sell, USDC for buy)"),
+        amount_in: amount.describe("Raw amount you give (the base asset for sell, the quote asset for buy)"),
         min_out: amount.describe("Raw minimum you accept in return"),
         partial_allowed: z
           .boolean()
@@ -123,13 +139,13 @@ export function makeMosaicTools(session: MosaicSession, cfg: ResolvedAgentFile):
           watch(args.desk_id);
           const { note } = await client.placeOrder({
             deskId: args.desk_id,
-            pairId: 0,
+            pairId: args.pair_id,
             side: args.side === "sell" ? SIDE_SELL : SIDE_BUY,
             amountIn: args.amount_in,
             minOut: args.min_out,
             partialAllowed: args.partial_allowed,
           });
-          return json({ placed: { side: args.side, amount_in: args.amount_in, min_out: args.min_out, partial_allowed: args.partial_allowed }, proceeds_note: noteSummary(note) });
+          return json({ placed: { pair_id: args.pair_id, side: args.side, amount_in: args.amount_in, min_out: args.min_out, partial_allowed: args.partial_allowed }, proceeds_note: noteSummary(note) });
         } catch (err) {
           return errText(err);
         }
@@ -193,7 +209,7 @@ export function makeMosaicTools(session: MosaicSession, cfg: ResolvedAgentFile):
       description: `Withdraw shielded funds to YOUR OWN public Stellar account (${session.address}). SLOW: generates a zero-knowledge proof — expect 1-5 minutes.`,
       inputSchema: z.object({
         desk_id: z.string(),
-        asset_id: z.number().int().describe(`${XLM_ASSET_ID}=XLM, ${USDC_ASSET_ID}=USDC`),
+        asset_id: z.number().int().describe(assetsDesc),
         amount,
       }),
       execute: async (args) => {

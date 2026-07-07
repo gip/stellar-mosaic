@@ -5,21 +5,30 @@
 
 import { join } from "node:path";
 import { Keypair, rpc } from "@stellar/stellar-sdk";
-import { SecretKeySigner, StellarRpcDeployer, type AssetDef, type PairDef } from "@mosaic/sdk";
+import { SecretKeySigner, StellarRpcDeployer } from "@mosaic/sdk";
 import { createNodeClient, type NodeClient } from "@mosaic/sdk/node";
 import { loadSettlementWasm, loadVk } from "@mosaic/sdk/assets/node";
-import type { ResolvedAgentFile } from "./experiment.js";
+import type { DeskSpec, ExperimentPair, ResolvedAgentFile } from "./experiment.js";
 
-/** The experiment desk's immutable asset/pair set. Canonical pair 0 = XLM/USDC (base/quote). */
-export const XLM_ASSET_ID = 1;
-export const USDC_ASSET_ID = 2;
-export function deskSpec(usdcIssuer: string): { assets: AssetDef[]; pairs: Omit<PairDef, "pair_id">[] } {
+/**
+ * The experiment desk's immutable asset/pair set, built from the config's declaration order:
+ * asset ids start at 1, an asset without an issuer is the native lumen, everything is a 7-decimal
+ * classic Stellar asset. Pair orientation is canonical (base/quote) as declared.
+ */
+export function buildDeskSpec(
+  assets: { symbol: string; issuer?: string }[],
+  pairs: ExperimentPair[],
+): DeskSpec {
+  const idBySymbol = new Map(assets.map((a, i) => [a.symbol, i + 1]));
   return {
-    assets: [
-      { asset_id: XLM_ASSET_ID, symbol: "XLM", token: "native", decimals: 7, kind: "Stellar" },
-      { asset_id: USDC_ASSET_ID, symbol: "USDC", token: `USDC:${usdcIssuer}`, decimals: 7, kind: "Stellar" },
-    ],
-    pairs: [{ base_asset: XLM_ASSET_ID, quote_asset: USDC_ASSET_ID }],
+    assets: assets.map((a, i) => ({
+      asset_id: i + 1,
+      symbol: a.symbol,
+      token: a.issuer ? `${a.symbol}:${a.issuer}` : "native",
+      decimals: 7,
+      kind: "Stellar",
+    })),
+    pairs: pairs.map((p) => ({ base_asset: idBySymbol.get(p.base)!, quote_asset: idBySymbol.get(p.quote)! })),
   };
 }
 

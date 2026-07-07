@@ -14,7 +14,7 @@ agents:
       Two sellers (alice, dave) will compete for your order — get quotes from both and trade with
       the better one.
     funding:
-      usdc: "100"
+      USDC: "100"
   - name: alice
     provider: anthropic
     model: claude-opus-4-8

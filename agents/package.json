@@ -13,6 +13,7 @@
     "clean": "tsc -b --clean",
     "postinstall": "node scripts/fix-xmtp.mjs",
     "experiment": "node scripts/fix-xmtp.mjs && node dist/run.js",
+    "render": "node dist/render.js",
     "demo": "node scripts/fix-xmtp.mjs && node dist/run.js experiments/demo.yaml"
   },
   "dependencies": {

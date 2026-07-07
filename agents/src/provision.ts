@@ -1,9 +1,12 @@
 // Preflight + provisioning for one experiment run. The contract is "every agent starts with
 // working identities": whatever the config omits is manufactured here — Stellar keypairs funded
-// via friendbot, Ethereum keys for XMTP, a per-run demo-USDC issuer with trustlines for every
-// agent (anyone may receive unshielded USDC), configured USDC funding, and the USDC Stellar Asset
-// Contract. Every check fails fast, before any LLM tokens or testnet transactions are spent on a
-// doomed run.
+// via friendbot, Ethereum keys for XMTP, trustlines for every agent on every classic asset
+// (anyone may receive unshielded funds), configured funding, and each asset's Stellar Asset
+// Contract. A declared asset is either the native lumen (XLM), demo-issued by a per-run issuer
+// (funding minted here), or an existing on-network asset via `issuer` (e.g. Circle testnet
+// USDC) — then nothing can be minted and its funding amount is a fail-fast check on the
+// account's pre-existing balance. Every check fails fast, before any LLM tokens or testnet
+// transactions are spent on a doomed run.
 
 import { randomBytes } from "node:crypto";
 import {
@@ -19,8 +22,6 @@ import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { ExperimentConfig, Provider } from "./experiment.js";
 import { DEFAULT_API_KEY_ENV, pingModel } from "./llm.js";
 
-const USDC_CODE = "USDC";
-
 export interface ProvisionedIdentity {
   name: string;
   provider: Provider;
@@ -35,12 +36,26 @@ export interface ProvisionedIdentity {
   ethAddress: `0x${string}`;
   ethGenerated: boolean;
   xmtpDbKey: `0x${string}`;
-  usdcFunding: string;
+  /** Starting inventory by asset symbol (validated at config load). */
+  funding: Record<string, string>;
+}
+
+export interface ProvisionedAsset {
+  symbol: string;
+  /** Undefined = the native lumen. */
+  issuer?: string;
+  /** Issued by the per-run demo issuer (i.e. mintable). */
+  demo: boolean;
+  /** SAC contract id; undefined only for the native lumen (its token is "native"). */
+  sac?: string;
 }
 
 export interface Provisioned {
   agents: ProvisionedIdentity[];
-  usdc: { issuer: string; issuerSecret: string; sac: string };
+  /** Same order as the config's declaration (desk asset id = index + 1). */
+  assets: ProvisionedAsset[];
+  /** Present only when at least one asset is demo-issued (secret kept to reclaim testnet funds). */
+  demoIssuer?: { address: string; secret: string };
 }
 
 type Log = (line: string) => void;
@@ -62,6 +77,17 @@ async function accountExists(horizon: Horizon.Server, address: string): Promise<
   }
 }
 
+/** Every classic trustline the account holds, keyed "CODE:ISSUER" → balance. */
+async function heldLines(horizon: Horizon.Server, address: string): Promise<Map<string, string>> {
+  const account = await horizon.loadAccount(address);
+  const lines = new Map<string, string>();
+  for (const b of account.balances) {
+    const line = b as { asset_code?: string; asset_issuer?: string };
+    if (line.asset_code && line.asset_issuer) lines.set(`${line.asset_code}:${line.asset_issuer}`, b.balance);
+  }
+  return lines;
+}
+
 async function submitClassic(
   cfg: ExperimentConfig,
   horizon: Horizon.Server,
@@ -79,10 +105,14 @@ async function submitClassic(
   await horizon.submitTransaction(tx);
 }
 
-/** Deploy the classic asset's SAC so desk deployment / custody can address it by contract id. */
-async function deployAssetContract(cfg: ExperimentConfig, issuer: Keypair, asset: Asset): Promise<string> {
+/**
+ * Deploy the classic asset's SAC so desk deployment / custody can address it by contract id.
+ * Anyone may deploy a SAC, so `source` is just a funded account; if the SAC already exists
+ * (always the case for Circle testnet USDC) this is a no-op returning the contract id.
+ */
+async function deployAssetContract(cfg: ExperimentConfig, source: Keypair, asset: Asset): Promise<string> {
   const server = new rpc.Server(cfg.network.rpcUrl);
-  const account = await server.getAccount(issuer.publicKey());
+  const account = await server.getAccount(source.publicKey());
   const raw = new TransactionBuilder(account, {
     fee: BASE_FEE,
     networkPassphrase: cfg.network.networkPassphrase,
@@ -96,7 +126,7 @@ async function deployAssetContract(cfg: ExperimentConfig, issuer: Keypair, asset
     throw new Error(`SAC deploy simulation failed: ${sim.error}`);
   }
   const tx = rpc.assembleTransaction(raw, sim).build();
-  tx.sign(issuer);
+  tx.sign(source);
   const sent = await server.sendTransaction(tx);
   if (sent.status !== "PENDING" && sent.status !== "DUPLICATE") {
     throw new Error(`SAC deploy rejected: ${sent.status}`);
@@ -144,7 +174,7 @@ export async function provision(
       ethAddress: privateKeyToAccount(ethKey).address,
       ethGenerated: !a.ethKey,
       xmtpDbKey: `0x${randomBytes(32).toString("hex")}` as `0x${string}`,
-      usdcFunding: a.funding?.usdc ?? "0",
+      funding: a.funding ?? {},
     };
   });
   if (missingKeys.length > 0) {
@@ -169,9 +199,10 @@ export async function provision(
   }
 
   // 3. Stellar accounts: friendbot-fund anything that does not exist yet (generated or supplied).
-  const issuer = Keypair.random();
+  //    A demo issuer is only manufactured when some declared asset needs one.
+  const demoIssuer = cfg.assets.some((a) => a.symbol !== "XLM" && !a.issuer) ? Keypair.random() : undefined;
   await Promise.all([
-    friendbot(cfg.network.friendbotUrl, issuer.publicKey()),
+    ...(demoIssuer ? [friendbot(cfg.network.friendbotUrl, demoIssuer.publicKey())] : []),
     ...agents.map(async (a) => {
       if (a.stellarGenerated || !(await accountExists(horizon, a.stellarAddress))) {
         await friendbot(cfg.network.friendbotUrl, a.stellarAddress);
@@ -182,18 +213,86 @@ export async function provision(
     log(`✓ ${a.name} stellar ${a.stellarAddress}${a.stellarGenerated ? " (generated + friendbot)" : ""} · eth ${a.ethAddress}${a.ethGenerated ? " (generated)" : ""}`);
   }
 
-  // 4. Demo USDC: per-run issuer, trustlines for every agent (anyone may receive unshielded USDC),
-  //    configured starting inventory, and the asset's SAC for the desk.
-  const usdc = new Asset(USDC_CODE, issuer.publicKey());
-  await Promise.all(
-    agents.map((a) => submitClassic(cfg, horizon, Keypair.fromSecret(a.stellarSecret), [Operation.changeTrust({ asset: usdc })])),
+  // 4. Assets: resolve each declared asset (native / demo-issued / external), verify external
+  //    ones exist on the network, add missing trustlines (anyone may receive unshielded funds),
+  //    arrange funding (minted for demo assets, asserted pre-existing for external ones), and
+  //    deploy each classic asset's SAC.
+  const assets: ProvisionedAsset[] = cfg.assets.map((a) =>
+    a.symbol === "XLM"
+      ? { symbol: a.symbol, demo: false }
+      : { symbol: a.symbol, issuer: a.issuer ?? demoIssuer!.publicKey(), demo: !a.issuer },
   );
-  const payments = agents
-    .filter((a) => Number(a.usdcFunding) > 0)
-    .map((a) => Operation.payment({ destination: a.stellarAddress, asset: usdc, amount: a.usdcFunding }));
-  if (payments.length > 0) await submitClassic(cfg, horizon, issuer, payments);
-  const sac = await deployAssetContract(cfg, issuer, usdc);
-  log(`✓ USDC issuer ${issuer.publicKey()} · SAC ${sac}${payments.length > 0 ? ` · funded ${agents.filter((a) => Number(a.usdcFunding) > 0).map((a) => `${a.name}=${a.usdcFunding}`).join(", ")}` : ""}`);
+  const classic = assets.filter((a) => a.issuer !== undefined);
+  const lineKey = (a: ProvisionedAsset) => `${a.symbol}:${a.issuer}`;
+  const classicAsset = (a: ProvisionedAsset) => new Asset(a.symbol, a.issuer);
 
-  return { agents, usdc: { issuer: issuer.publicKey(), issuerSecret: issuer.secret(), sac } };
+  await Promise.all(
+    classic
+      .filter((a) => !a.demo)
+      .map(async (a) => {
+        const known = await horizon.assets().forCode(a.symbol).forIssuer(a.issuer!).call();
+        if (known.records.length === 0) {
+          throw new Error(`issuer ${a.issuer} has issued no ${a.symbol} on this network`);
+        }
+      }),
+  );
+
+  const linesByAgent = new Map<string, Map<string, string>>();
+  await Promise.all(
+    agents.map(async (a) => linesByAgent.set(a.name, await heldLines(horizon, a.stellarAddress))),
+  );
+  await Promise.all(
+    agents.map((agent) => {
+      const missing = classic.filter((a) => !linesByAgent.get(agent.name)!.has(lineKey(a)));
+      if (missing.length === 0) return Promise.resolve();
+      return submitClassic(
+        cfg,
+        horizon,
+        Keypair.fromSecret(agent.stellarSecret),
+        missing.map((a) => Operation.changeTrust({ asset: classicAsset(a) })),
+      );
+    }),
+  );
+
+  const mints: ReturnType<typeof Operation.payment>[] = [];
+  const mintNotes: string[] = [];
+  const short: string[] = [];
+  for (const agent of agents) {
+    for (const [symbol, amount] of Object.entries(agent.funding)) {
+      if (Number(amount) <= 0) continue;
+      const asset = classic.find((a) => a.symbol === symbol)!; // non-XLM + declared, per config validation
+      if (asset.demo) {
+        mints.push(Operation.payment({ destination: agent.stellarAddress, asset: classicAsset(asset), amount }));
+        mintNotes.push(`${agent.name}=${amount} ${symbol}`);
+      } else {
+        const held = linesByAgent.get(agent.name)!.get(lineKey(asset));
+        if (Number(held ?? "0") < Number(amount)) {
+          short.push(`${agent.name} ${agent.stellarAddress}: ${symbol} has ${held ?? "no trustline"}, needs ${amount}`);
+        }
+      }
+    }
+  }
+  if (short.length > 0) {
+    throw new Error(`external assets cannot be minted — accounts below their funding:\n  - ${short.join("\n  - ")}`);
+  }
+  if (mints.length > 0) await submitClassic(cfg, horizon, demoIssuer!, mints);
+
+  const sacSource = demoIssuer ?? Keypair.fromSecret(agents[0].stellarSecret);
+  for (const a of classic) {
+    a.sac = await deployAssetContract(cfg, sacSource, classicAsset(a));
+  }
+  for (const a of assets) {
+    log(
+      a.issuer
+        ? `✓ asset ${a.symbol} issuer ${a.issuer} (${a.demo ? "demo" : "external"}) · SAC ${a.sac}`
+        : `✓ asset ${a.symbol} (native)`,
+    );
+  }
+  if (mintNotes.length > 0) log(`✓ funded ${mintNotes.join(", ")}`);
+
+  return {
+    agents,
+    assets,
+    demoIssuer: demoIssuer ? { address: demoIssuer.publicKey(), secret: demoIssuer.secret() } : undefined,
+  };
 }

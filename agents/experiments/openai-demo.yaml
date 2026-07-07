@@ -11,7 +11,7 @@ agents:
     webSearch: true
     prompt: "Look up the current XLM/USDC market price online, then buy XLM with USDC at a fair price near market."
     funding:
-      usdc: "100"
+      USDC: "100"
 
 # Independent PASS/FAIL from Horizon balance deltas (decimal units; XLM deltas absorb fees).
 # Bounds are price-agnostic (the agents fetch the live price): 10 XLM must move alice→bob, and a

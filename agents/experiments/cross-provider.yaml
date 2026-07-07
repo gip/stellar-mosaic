@@ -17,7 +17,7 @@ agents:
     model: gpt-5.2
     prompt: "Today spot price for XLM/USDC is 0.18. Sell about 2 USDC and get me the best price in XLM."
     funding:
-      usdc: "100"
+      USDC: "100"
 
 # XLM bounds leave room for tx fees + the ~1.6 XLM desk-deploy cost (either agent may deploy).
 verdict:

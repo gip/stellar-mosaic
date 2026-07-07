@@ -9,7 +9,7 @@ import { basename } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { Networks } from "@stellar/stellar-sdk";
-import type { NetworkConfig } from "@mosaic/sdk";
+import type { AssetDef, NetworkConfig, PairDef } from "@mosaic/sdk";
 
 export type Provider = "anthropic" | "openai";
 
@@ -32,6 +32,26 @@ const decimalAmount = z
   .string()
   .regex(/^[0-9]+(\.[0-9]+)?$/, "expected a decimal amount string, e.g. \"100\" or \"1.5\"");
 
+const assetSymbol = z
+  .string()
+  .regex(/^[A-Za-z0-9]{1,12}$/, "expected a Stellar asset code (1-12 alphanumeric characters)");
+
+const stellarAccountId = z
+  .string()
+  .regex(/^G[A-Z2-7]{55}$/, "expected a Stellar account id (G...)");
+
+const assetSchema = z.object({
+  symbol: assetSymbol,
+  /**
+   * Existing on-network issuer (e.g. Circle testnet USDC,
+   * GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5) — the provisioner cannot mint it.
+   * Omit for a per-run demo-issued asset. "XLM" is always the native lumen and takes no issuer.
+   */
+  issuer: stellarAccountId.optional(),
+});
+
+const pairSchema = z.object({ base: assetSymbol, quote: assetSymbol });
+
 const agentSchema = z.object({
   name: z
     .string()
@@ -48,14 +68,19 @@ const agentSchema = z.object({
   stellarSecret: z.string().regex(/^S[A-Z2-7]{55}$/, "expected a Stellar secret seed (S...)").optional(),
   /** Ethereum private key (XMTP identity). Omit to generate one. */
   ethKey: hexKey.optional(),
-  /** Starting inventory the provisioner must arrange (demo USDC issued at provision time). */
-  funding: z.object({ usdc: decimalAmount.optional() }).optional(),
+  /**
+   * Starting inventory by asset symbol, e.g. { USDC: "100" }. Demo-issued assets are minted at
+   * provision time; external assets cannot be minted, so the amount becomes a fail-fast
+   * minimum-balance check on the supplied account. XLM is not fundable (friendbot covers it).
+   */
+  funding: z.record(assetSymbol, decimalAmount).optional(),
 });
 
 const verdictRuleSchema = z
   .object({
     agent: z.string(),
-    asset: z.enum(["XLM", "USDC"]),
+    /** One of the experiment's asset symbols (XLM included). */
+    asset: assetSymbol,
     /** Minimum acceptable balance delta (decimal string, may be negative). */
     min: z.string().regex(/^-?[0-9]+(\.[0-9]+)?$/).optional(),
     /** Maximum acceptable balance delta. */
@@ -81,18 +106,37 @@ const experimentSchema = z.object({
   maxTurns: z.number().int().min(4).max(400).optional(),
   /** Wall-clock cap in minutes for the agent phase; stragglers are killed and the run FAILs. */
   timeoutMinutes: z.number().min(0.1).max(720).optional(),
+  /**
+   * The desk's asset set; desk asset ids are assigned by declaration order, starting at 1.
+   * Default: XLM + per-run demo USDC.
+   */
+  assets: z.array(assetSchema).min(2).optional(),
+  /** Trading pairs by symbol, canonical orientation (base/quote). Default: assets[0]/assets[1]. */
+  pairs: z.array(pairSchema).min(1).optional(),
   agents: z.array(agentSchema).min(2, "an experiment needs at least 2 agents"),
   verdict: z.array(verdictRuleSchema).optional(),
 });
 
 export type AgentSpec = z.infer<typeof agentSchema>;
 export type VerdictRule = z.infer<typeof verdictRuleSchema>;
+export type ExperimentAsset = z.infer<typeof assetSchema>;
+export type ExperimentPair = z.infer<typeof pairSchema>;
+
+/** The desk's immutable asset/pair set, in the shape `client.deploy` takes. */
+export interface DeskSpec {
+  assets: AssetDef[];
+  pairs: Omit<PairDef, "pair_id">[];
+}
 
 export interface ExperimentConfig {
   name: string;
   network: typeof DEFAULT_NETWORK;
   maxTurns: number;
   timeoutMinutes: number;
+  /** Validated: unique symbols, XLM never has an issuer. */
+  assets: ExperimentAsset[];
+  /** Validated: both symbols declared, base ≠ quote, no duplicate/reversed pair. */
+  pairs: ExperimentPair[];
   agents: AgentSpec[];
   verdict: VerdictRule[];
 }
@@ -130,9 +174,45 @@ export function loadExperiment(filePath: string): ExperimentConfig {
     throw new Error(`agent names must be unique (got ${names.join(", ")})`);
   }
 
+  const assets = cfg.assets ?? [{ symbol: "XLM" }, { symbol: "USDC" }];
+  const symbols = assets.map((a) => a.symbol);
+  if (new Set(symbols).size !== symbols.length) {
+    throw new Error(`asset symbols must be unique (got ${symbols.join(", ")})`);
+  }
+  for (const a of assets) {
+    if (a.symbol === "XLM" && a.issuer) {
+      throw new Error("XLM is the native lumen — it cannot have an issuer");
+    }
+  }
+
+  const pairs =
+    cfg.pairs ?? (assets.length === 2 ? [{ base: assets[0].symbol, quote: assets[1].symbol }] : undefined);
+  if (!pairs) throw new Error("pairs is required when more than 2 assets are declared");
+  const seenPairs = new Set<string>();
+  for (const p of pairs) {
+    for (const s of [p.base, p.quote]) {
+      if (!symbols.includes(s)) throw new Error(`pair ${p.base}/${p.quote} references undeclared asset "${s}"`);
+    }
+    if (p.base === p.quote) throw new Error(`pair ${p.base}/${p.quote}: base and quote must differ`);
+    // The contract rejects the reverse orientation of an existing pair, so ban it here too.
+    const key = [p.base, p.quote].sort().join("/");
+    if (seenPairs.has(key)) throw new Error(`duplicate pair ${p.base}/${p.quote} (orientation is canonical)`);
+    seenPairs.add(key);
+  }
+
+  for (const agent of cfg.agents) {
+    for (const symbol of Object.keys(agent.funding ?? {})) {
+      if (symbol === "XLM") throw new Error(`${agent.name}: XLM funding is not supported (friendbot covers it)`);
+      if (!symbols.includes(symbol)) throw new Error(`${agent.name}: funding references undeclared asset "${symbol}"`);
+    }
+  }
+
   for (const rule of cfg.verdict ?? []) {
     if (!names.includes(rule.agent.toLowerCase())) {
       throw new Error(`verdict rule references unknown agent "${rule.agent}"`);
+    }
+    if (!symbols.includes(rule.asset)) {
+      throw new Error(`verdict rule references undeclared asset "${rule.asset}"`);
     }
   }
 
@@ -141,17 +221,22 @@ export function loadExperiment(filePath: string): ExperimentConfig {
     network: { ...DEFAULT_NETWORK, ...(cfg.network ?? {}) },
     maxTurns: cfg.maxTurns ?? DEFAULT_MAX_TURNS,
     timeoutMinutes: cfg.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES,
+    assets,
+    pairs,
     agents: cfg.agents,
     verdict: cfg.verdict ?? [],
   };
 }
 
-/** Everything one agent child process needs, written to `<runDir>/<name>.agent.json`. */
+/**
+ * Everything one agent child process needs, written to `<runDir>/<name>.agent.json`.
+ * Deliberately excludes the provider API key — that is never written to disk; the orchestrator
+ * passes it to the child via the MOSAIC_AGENT_API_KEY environment variable.
+ */
 export interface ResolvedAgentFile {
   experiment: string;
   name: string;
   provider: Provider;
-  apiKey: string;
   model: string;
   prompt: string;
   webSearch: boolean;
@@ -162,7 +247,8 @@ export interface ResolvedAgentFile {
   ethAddress: `0x${string}`;
   xmtpDbKey: `0x${string}`;
   peers: { name: string; ethAddress: `0x${string}` }[];
-  usdcIssuer: string;
+  /** The desk spec this experiment's creator must deploy and every peer must expect. */
+  desk: DeskSpec;
   network: NetworkConfig;
   horizonUrl: string;
   /** Per-run scratch dir: note DBs, XMTP DBs, transcripts. */
