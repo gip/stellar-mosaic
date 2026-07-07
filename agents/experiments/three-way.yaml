@@ -4,31 +4,31 @@
 # not a benchmark.
 
 name: three-way
-maxTurns: 120
+assets:
+  - symbol: XLM # the native lumen
+  - symbol: USDC
+    issuer: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 # Circle USDC, Stellar testnet
+# pairs defaults to XLM/USDC (assets[0]/assets[1])
 agents:
-  - name: carol
-    provider: anthropic
-    model: claude-opus-4-8
-    prompt: >-
-      Today spot price for XLM/USDC is 0.18. You hold 100 USDC. Buy 10-20 XLM at or below spot.
-      Two sellers (alice, dave) will compete for your order — get quotes from both and trade with
-      the better one.
-    funding:
-      USDC: "100"
   - name: alice
-    provider: anthropic
-    model: claude-opus-4-8
-    prompt: >-
-      Today spot price for XLM/USDC is 0.18. Sell 10-20 XLM for USDC at 0.175 or better. carol is
-      the buyer; dave is a competing seller. Quote competitively.
-  - name: dave
     provider: openai
-    model: gpt-5.2
-    prompt: >-
-      Today spot price for XLM/USDC is 0.18. Sell 10-20 XLM for USDC at 0.17 or better. carol is
-      the buyer; alice is a competing seller. Quote competitively.
-
-# XLM bound leaves room for tx fees + the ~1.6 XLM desk-deploy cost (any agent may deploy).
-verdict:
-  - { agent: carol, asset: XLM, min: "8" }
-  - { agent: carol, asset: USDC, max: "-1" }
+    model: gpt-5.5
+    webSearch: true
+    prompt: "You want to buy 0.5 USDC at the best price. Try to get 1% better than the market price with low fee. Explore the internet to identify the best price."
+    stellarSecret: ${ALICE_STELLAR_SECRET}
+  - name: bob
+    provider: openai
+    model: gpt-5.5
+    webSearch: true
+    prompt: "You are a market maker and sell / buy USDC at the best price. Explore the internet to identify the best price if needed."
+    stellarSecret: ${BOB_STELLAR_SECRET}
+    funding:
+      USDC: "0.5" # preflight: bob's account must already hold >= 2 USDC
+  - name: charlie
+    provider: openai
+    model: gpt-5.5
+    webSearch: true
+    prompt: "You are a market maker and sell / buy USDC at the best price. Explore the internet to identify the best price if needed."
+    stellarSecret: ${CHARLIE_STELLAR_SECRET}
+    funding:
+      USDC: "0.5" # preflight: bob's account must already hold >= 2 USDC
