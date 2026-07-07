@@ -26,6 +26,21 @@ Logs are JSON lines on stderr, so they are safe with stdio MCP transport. Set `M
 or `MOSAIC_LOG_LEVEL=debug` for verbose tool logs; supported levels are `debug`, `info`, `warn`,
 `error`, and `silent`. The default is `warn`.
 
+HTTP mode exposes `GET /healthz` for process liveness and `GET /readyz` for dependency readiness
+(SQLite write probe, Stellar RPC, Base RPC/prove service when configured, and Base-shield worker
+liveness). Production deployments should set an absolute `MOSAIC_DATABASE_URL`; if sponsor custody
+is persisted in production, `MOSAIC_SERVER_KEY` is required so sponsor secrets are encrypted.
+
+Operational knobs:
+
+| Env | Meaning |
+| --- | --- |
+| `MOSAIC_MCP_MAX_BODY_BYTES` | max HTTP request body size (default 16 MiB) |
+| `MOSAIC_MCP_TRANSPORT_TTL_MS` | idle Streamable-HTTP transport cleanup TTL (default 30 min) |
+| `MOSAIC_MCP_TOOL_TIMEOUT_MS` | server-side tool timeout (default 120s, `0` disables) |
+| `MOSAIC_MCP_FETCH_TIMEOUT_MS` | prove/Base RPC fetch timeout for worker calls (default 30s) |
+| `MOSAIC_MCP_CLI_TIMEOUT_MS` | Stellar CLI timeout for relays/mints (default 120s) |
+
 Base shielding is gated by configuration; without it `base_shield_config` reports `worker_disabled`
 and only authentication + local features are available. Enqueued jobs are advanced by a **durable
 in-process worker** that drives a **remote prove service** (the `backend/` crate) by submit + poll —
@@ -42,6 +57,19 @@ The worker advances each job `proving → awaiting_finality → minting → acti
 prove service, wait for Base finality, then `attest_base_block` + `shield_from_base` via the desk
 sponsor (from the store). The Base deposit itself must be made with the note's owner tag (the browser
 derives the tag, deposits, then enqueues by `deposit_id`).
+
+**Durability.** Jobs (including proof artifacts) live in the SQLite store, so a restart resumes each
+job from its persisted stage; the prove service caches completed proofs on disk, so re-submits are
+no-ops. Every step failure retries in-stage with an attempt cap before the job goes `failed`:
+tight caps for a service-reported prove error (each retry is a full re-prove) and a failed mint
+submission (a real on-chain attempt), a generous cap (~10 min of continuous failure) for
+transport-level throws (prove service/Base RPC unreachable) — counted and persisted so an outage
+is visible in `list_base_shields` yet cannot leave a job retrying invisibly forever. A mint
+rejected by the contract as `DepositAlreadyProcessed` (#27, classified into a typed error at the
+`mintOnStellar` CLI boundary) means an earlier attempt landed (e.g. a crash between the mint
+and the status write) and resolves the job to `active`. Base-shield jobs are owner-scoped and
+worker-claimed with persisted locks, so multiple MCP processes can safely share one SQLite database
+on the same host. Multi-host shared SQLite remains unsupported.
 
 ## Server-side desk deployment (Trusted mode)
 
@@ -70,6 +98,9 @@ signs; the server records the deploy activity (with tx hashes) which the wallet 
 
 ## Auth model
 
-A client signs a server-issued challenge with its Stellar key; the server verifies with the address's
-public key (raw ed25519 — works with `SecretKeySigner` for CLI/agents). Browser Freighter signing
-prefixes messages, so a Freighter-backed `signMessage` needs prefix-aware verification (follow-up).
+A client signs a server-issued challenge with its Stellar key; the challenge binds the Stellar
+address, network, audience, issue/expiry time, and nonce. The server verifies with the address's
+public key (raw ed25519 — works with `SecretKeySigner` for CLI/agents) and issues a network-scoped
+session token. Wallet-scoped tools such as Base-shield job listing and backup reads require either
+that session or a backup read token. Browser Freighter signing prefixes messages, so a
+Freighter-backed `signMessage` needs prefix-aware verification (follow-up).

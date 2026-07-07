@@ -1,6 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { transactionErrorMessage } from "../dist/index.js";
+import { contractErrorCode, transactionErrorMessage } from "../dist/index.js";
+
+test("contractErrorCode parses the Soroban host's contract-error rendering", () => {
+  assert.equal(
+    contractErrorCode(new Error("transaction simulation failed: HostError: Error(Contract, #27)")),
+    27,
+  );
+  assert.equal(contractErrorCode("HostError: Error(Contract, #13)\nEvent log: ..."), 13);
+  assert.equal(contractErrorCode(new Error("stellar rpc: connection reset")), null);
+  assert.equal(contractErrorCode(new Error("Error(WasmVm, InvalidAction)")), null);
+});
 
 test("transactionErrorMessage maps missing trustline failures to an asset funding message", () => {
   const message = transactionErrorMessage(

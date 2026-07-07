@@ -1,10 +1,16 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Operation, SubmitResult } from "@mosaic/sdk";
+import { promisify } from "node:util";
+import { errorMessage, type Operation, type SubmitResult } from "@mosaic/sdk";
 import type { RelayHandlers } from "./server.js";
 import type { MosaicStore } from "./store.js";
+import { envNumber } from "./env.js";
+import { MosaicMcpError } from "./errors.js";
+
+const execFileAsync = promisify(execFile);
+const DEFAULT_CLI_TIMEOUT_MS = 120_000;
 
 export interface StellarRelayerOptions {
   store: MosaicStore;
@@ -30,6 +36,7 @@ function b64File(dir: string, name: string, value: string): string {
   return path;
 }
 
+
 export class StellarCliRelayer implements RelayHandlers {
   private readonly store: MosaicStore;
   private readonly stellarBin: string;
@@ -51,8 +58,8 @@ export class StellarCliRelayer implements RelayHandlers {
       address: args.operation?.address,
     });
     const secret = await this.requireSponsor(args.desk_id);
-    const signed = this.run(["tx", "sign", args.tx_xdr, "--sign-with-key", secret, "--network", this.network]);
-    return parseResult(this.run(["tx", "send", signed.trim(), "--network", this.network]));
+    const signed = await this.run(["tx", "sign", args.tx_xdr, "--sign-with-key", secret, "--network", this.network]);
+    return parseResult(await this.run(["tx", "send", signed.trim(), "--network", this.network]));
   }
 
   async relayOrder(args: { desk_id: string; proof_b64: string; public_inputs_b64: string; operation?: Operation | null }): Promise<SubmitResult> {
@@ -130,7 +137,7 @@ export class StellarCliRelayer implements RelayHandlers {
       const proof = b64File(dir, "proof.bin", proofB64);
       const publicInputs = b64File(dir, "public_inputs.bin", publicInputsB64);
       return parseResult(
-        this.run([
+        await this.run([
           "contract",
           "invoke",
           "--id",
@@ -187,7 +194,33 @@ export class StellarCliRelayer implements RelayHandlers {
     }
   }
 
-  private run(args: string[]): string {
-    return execFileSync(this.stellarBin, args, { encoding: "utf8" }).trim();
+  private async run(args: string[]): Promise<string> {
+    try {
+      const { stdout } = await execFileAsync(this.stellarBin, args, {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: envNumber("MOSAIC_MCP_CLI_TIMEOUT_MS", DEFAULT_CLI_TIMEOUT_MS),
+      });
+      return stdout.trim();
+    } catch (cause) {
+      const message = errorMessage(cause);
+      const timedOut = !!(cause && typeof cause === "object" && "killed" in cause && (cause as { killed?: boolean }).killed);
+      if (timedOut) throw new MosaicMcpError("CLI_TIMEOUT", `stellar CLI timed out: ${message}`, { retryable: true, cause });
+      // A transient infrastructure failure (RPC 5xx, connection reset, DNS) must stay retryable —
+      // reporting it as a permanent RELAY_REJECTED would abandon an already-signed transaction that
+      // an immediate retry would land. Only a genuine rejection (the tx reached the network and was
+      // refused) is terminal.
+      if (isTransientCliFailure(message)) throw new MosaicMcpError("UNAVAILABLE", `stellar CLI transient failure: ${message}`, { retryable: true, cause });
+      throw new MosaicMcpError("RELAY_REJECTED", `stellar CLI failed: ${message}`, { retryable: false, cause });
+    }
   }
+}
+
+/** Whether a `stellar` CLI failure looks like a transient network/RPC condition (safe to retry) as
+ * opposed to a definite contract/transaction rejection. Heuristic on the CLI's error text; errs
+ * toward terminal (a missing binary or bad args is not matched, since retrying cannot help). */
+function isTransientCliFailure(message: string): boolean {
+  return /timed out|timeout|connection|econnrefused|econnreset|etimedout|ehostunreach|enetunreach|enotfound|socket hang up|network|temporarily|try again|rate limit|too many requests|\b429\b|\b50[234]\b|bad gateway|service unavailable|gateway timeout|sending request|upstream/i.test(
+    message,
+  );
 }

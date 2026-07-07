@@ -57,6 +57,7 @@ test("exposes the MCP-only frontend tool set", async () => {
     "base_shield_config",
     "enqueue_base_shield",
     "list_base_shields",
+    "retry_base_shield",
     "retry_base_deployment",
   ]) {
     assert.ok(names.has(name), `missing tool ${name}`);
@@ -113,7 +114,26 @@ test("wallet auth handshake over the protocol, then enqueue_base_shield gated by
       body: { expected_bridge: "0xabababababababababababababababababababab", deposit_id: 1 },
     },
   });
-  assert.ok(bs.isError, "enqueue_base_shield must error for an unknown/unconfigured desk");
+  const err = textOf(bs).error;
+  assert.equal(err.code, "NOT_FOUND");
+});
+
+test("auth challenge binds the requested network into the issued session", async () => {
+  const kp = Keypair.random();
+  const client = await connect();
+
+  const ch = textOf(await client.callTool({ name: "auth_challenge", arguments: { address: kp.publicKey(), network: "public", audience: "unit-test" } }));
+  assert.match(ch.message, /Network: public/);
+  assert.match(ch.message, /Audience: unit-test/);
+  const signature = kp.sign(Buffer.from(sep53Digest(new TextEncoder().encode(ch.message)))).toString("base64");
+  const verified = textOf(
+    await client.callTool({
+      name: "auth_verify",
+      arguments: { address: kp.publicKey(), challengeId: ch.challengeId, signature },
+    }),
+  );
+  const session = textOf(await client.callTool({ name: "auth_session", arguments: { session: verified.token } }));
+  assert.equal(session.network, "public");
 });
 
 test("activity tools persist scoped activity over the protocol", async () => {
@@ -268,4 +288,33 @@ test("base_shield_config reports unconfigured desks separately", async () => {
     worker_ready: true,
     reason: "contract_unconfigured",
   });
+});
+
+test("wallet backups require read auth and preserve structured errors", async () => {
+  const client = await connect();
+  await client.callTool({
+    name: "put_wallet_backup",
+    arguments: {
+      backup_id: "backup-protocol",
+      body: {
+        write_token: "write",
+        read_token: "read",
+        expected_generation: 0,
+        nonce_b64: "bm9uY2U=",
+        ciphertext_b64: "Y2lwaGVy",
+      },
+    },
+  });
+
+  const denied = await client.callTool({ name: "get_wallet_backup", arguments: { backup_id: "backup-protocol" } });
+  assert.equal(textOf(denied).error.code, "AUTH_INVALID");
+
+  const ok = textOf(await client.callTool({ name: "get_wallet_backup", arguments: { backup_id: "backup-protocol", read_token: "read" } }));
+  assert.equal(ok.generation, 1);
+});
+
+test("list_base_shields requires an authenticated session", async () => {
+  const client = await connect();
+  const denied = await client.callTool({ name: "list_base_shields", arguments: { session: "bad-session", desk_id: "desk-base" } });
+  assert.equal(textOf(denied).error.code, "AUTH_EXPIRED");
 });

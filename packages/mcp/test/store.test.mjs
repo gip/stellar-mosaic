@@ -128,29 +128,31 @@ async function insertBaseDesk(store) {
 
 async function assertBaseShieldLifecycle(store) {
   await insertBaseDesk(store);
+  const address = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 
   // Drift guard: a bridge that isn't the desk's configured one is rejected.
-  await assert.rejects(() => store.enqueueBaseShield("desk-base", "0xdead", 1), /bridge mismatch/);
+  await assert.rejects(() => store.enqueueBaseShield("desk-base", "0xdead", 1, address), /bridge mismatch/);
   // Unknown desk is rejected too.
-  await assert.rejects(() => store.enqueueBaseShield("nope", BASE_BRIDGE, 1), /not found|no configured/);
+  await assert.rejects(() => store.enqueueBaseShield("nope", BASE_BRIDGE, 1, address), /not found|no configured/);
 
   const deposit = { asset_id: 2, symbol: "USDC", decimals: 6, amount: "100000", base_tx_hash: "0x" + "ab".repeat(32) };
-  const job = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 7, deposit);
+  const job = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 7, address, deposit);
   assert.equal(job.status, "proving");
   // Display metadata from the depositing client is persisted so the mint leg can render a complete
   // Activity entry even without the local deposit event.
   assert.deepEqual(job.deposit, deposit);
   // Idempotent enqueue returns the same job (metadata intact).
-  const again = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 7);
+  const again = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 7, address);
   assert.equal(again.id, job.id);
   assert.deepEqual(again.deposit, deposit);
-  assert.deepEqual((await store.listBaseShields("desk-base")).find((j) => j.id === job.id).deposit, deposit);
+  assert.deepEqual((await store.listBaseShields("desk-base", address)).find((j) => j.id === job.id).deposit, deposit);
 
-  const next = await store.nextBaseShield();
-  assert.equal(next.id, job.id, "proving job is picked up");
+  const next = await store.nextBaseShields();
+  assert.equal(next.length, 1);
+  assert.equal(next[0].id, job.id, "proving job is picked up");
 
   await store.baseShieldProved(job.id, 42, "cd".repeat(32), "aa", "bb", true);
-  const proved = (await store.listBaseShields("desk-base")).find((j) => j.id === job.id);
+  const proved = (await store.listBaseShields("desk-base", address)).find((j) => j.id === job.id);
   assert.equal(proved.status, "awaiting_finality");
   assert.equal(proved.block_number, 42);
   assert.equal(proved.block_hash, "cd".repeat(32));
@@ -158,20 +160,38 @@ async function assertBaseShieldLifecycle(store) {
   assert.equal(proved.journal_hex, "bb");
 
   await store.baseShieldStatus(job.id, "minting");
-  assert.equal((await store.nextBaseShield()).status, "minting");
+  assert.equal((await store.nextBaseShields())[0].status, "minting");
+  await store.baseShieldRelease(job.id);
+
+  // Pipelining: the minting job must not block newer jobs' proving. With A minting and B, C both
+  // proving, the per-tick batch is oldest-per-stage: [B (proving), A (minting)] — never C.
+  const jobB = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 9, address);
+  const jobC = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 10, address);
+  const batch = await store.nextBaseShields();
+  assert.deepEqual(
+    batch.map((j) => [j.id, j.status]),
+    [
+      [jobB.id, "proving"],
+      [job.id, "minting"],
+    ],
+    "oldest job per stage, in stage order",
+  );
+  await store.baseShieldFailed(jobB.id, "cleanup");
+  assert.equal((await store.nextBaseShields()).find((j) => j.status === "proving").id, jobC.id, "next-oldest proving job takes over");
+  await store.baseShieldFailed(jobC.id, "cleanup");
 
   await store.baseShieldStatus(job.id, "active", "ef".repeat(32));
-  assert.equal(await store.nextBaseShield(), null, "terminal jobs are not picked up");
-  const minted = (await store.listBaseShields("desk-base")).find((j) => j.id === job.id);
+  assert.deepEqual(await store.nextBaseShields(), [], "terminal jobs are not picked up");
+  const minted = (await store.listBaseShields("desk-base", address)).find((j) => j.id === job.id);
   assert.equal(minted.stellar_tx_hash, "ef".repeat(32), "mint tx hash is persisted for the UI");
 
   // A second job can fail and reports its message.
-  const job2 = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 8);
+  const job2 = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 8, address);
   await store.baseShieldFailed(job2.id, "boom");
-  const failed = (await store.listBaseShields("desk-base")).find((j) => j.id === job2.id);
+  const failed = (await store.listBaseShields("desk-base", address)).find((j) => j.id === job2.id);
   assert.equal(failed.status, "failed");
   assert.equal(failed.error, "boom");
-  assert.equal(await store.nextBaseShield(), null);
+  assert.deepEqual(await store.nextBaseShields(), []);
 }
 
 test("memory MCP store advances base-shield jobs and guards bridge drift", async () => {
@@ -181,4 +201,125 @@ test("memory MCP store advances base-shield jobs and guards bridge drift", async
 test("sqlite MCP store advances base-shield jobs and guards bridge drift", async () => {
   const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
   await assertBaseShieldLifecycle(openMosaicStore(`sqlite://${join(dir, "mcp.db")}`));
+});
+
+test("sqlite MCP store atomically claims one client action across two handles", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
+  const url = `sqlite://${join(dir, "mcp.db")}`;
+  const a = openMosaicStore(url);
+  const b = openMosaicStore(url);
+  const address = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  await a.createOperation(address, "testnet", { kind: "shield", desk_id: "desk-1", asset_id: 1, amount: "1" }, "same-op");
+
+  const [first, second] = await Promise.all([a.claimAction(address), b.claimAction(address)]);
+  assert.equal([first, second].filter(Boolean).length, 1);
+});
+
+test("sqlite MCP store preserves operation idempotency across two handles", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
+  const url = `sqlite://${join(dir, "mcp.db")}`;
+  const a = openMosaicStore(url);
+  const b = openMosaicStore(url);
+  const address = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  const request = { kind: "shield", desk_id: "desk-1", asset_id: 1, amount: "1" };
+
+  const [one, two] = await Promise.all([a.createOperation(address, "testnet", request, "idem"), b.createOperation(address, "testnet", request, "idem")]);
+  assert.equal(one.id, two.id);
+  assert.equal((await a.listOperations(address)).length, 1);
+});
+
+test("sqlite MCP store backup writes are generation-CAS and reads require auth material", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
+  const url = `sqlite://${join(dir, "mcp.db")}`;
+  const a = openMosaicStore(url);
+  const b = openMosaicStore(url);
+  const envelope = { format_version: 1, generation: 0, nonce_b64: "bm9uY2U=", ciphertext_b64: "Y2lwaGVy" };
+
+  await a.putWalletBackup("backup-1", "write", "read", 0, envelope);
+  await assert.rejects(() => b.putWalletBackup("backup-1", "write", "read", 0, envelope), /generation conflict/);
+  await assert.rejects(() => b.getWalletBackupForRead("backup-1"), /read token|auth/i);
+  await assert.rejects(() => b.getWalletBackupForRead("backup-1", "wrong"), /read token mismatch/);
+  assert.equal((await b.getWalletBackupForRead("backup-1", "read")).generation, 1);
+});
+
+// A backup written with neither a read token nor an owner must not be readable by any junk token or
+// any authenticated session (the earlier `!readToken && !address` guard let both through), and an
+// owner-bound backup must reject a different session's address.
+for (const makeStore of [() => new MemoryMosaicStore(), null]) {
+  const label = makeStore ? "memory" : "sqlite";
+  test(`${label} MCP store denies wallet-backup reads without matching credentials`, async () => {
+    let store = makeStore?.();
+    if (!store) {
+      const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
+      store = openMosaicStore(`sqlite://${join(dir, "mcp.db")}`);
+    }
+    const envelope = { format_version: 1, generation: 0, nonce_b64: "bm9uY2U=", ciphertext_b64: "Y2lwaGVy" };
+    const owner = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+    const other = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBQ4CI";
+
+    // No read token, no owner: a junk token must not grant access, and neither must an anonymous read.
+    await store.putWalletBackup("orphan", "write", undefined, 0, envelope);
+    await assert.rejects(() => store.getWalletBackupForRead("orphan", "junk"), /auth|token|owner/i);
+    await assert.rejects(() => store.getWalletBackupForRead("orphan", undefined, "anyone"), /auth|token|owner/i);
+
+    // Owner-bound backup: only the owner's session address may read it.
+    await store.putWalletBackup("owned", "write", undefined, 0, envelope, owner);
+    await assert.rejects(() => store.getWalletBackupForRead("owned", undefined, other), /owner mismatch/);
+    assert.equal((await store.getWalletBackupForRead("owned", undefined, owner)).generation, 1);
+
+    // A tokenless update must not drop an existing read credential.
+    await store.putWalletBackup("keeps-token", "write", "read", 0, envelope);
+    await store.putWalletBackup("keeps-token", "write", undefined, 1, envelope);
+    await assert.rejects(() => store.getWalletBackupForRead("keeps-token", "junk"), /read token mismatch/);
+    assert.equal((await store.getWalletBackupForRead("keeps-token", "read")).generation, 2);
+  });
+}
+
+// A job that failed during the finality wait must resume at awaiting_finality on retry, never jump
+// straight to minting (which would attest+mint a Base block that was never confirmed finalized).
+for (const makeStore of [() => new MemoryMosaicStore(), null]) {
+  const label = makeStore ? "memory" : "sqlite";
+  test(`${label} MCP store retry resumes a finality-required job at awaiting_finality`, async () => {
+    let store = makeStore?.();
+    if (!store) {
+      const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
+      store = openMosaicStore(`sqlite://${join(dir, "mcp.db")}`);
+    }
+    const address = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+    await insertBaseDesk(store);
+
+    const finalityJob = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 101, address);
+    await store.baseShieldProved(finalityJob.id, 42, "cd".repeat(32), "aa", "bb", true);
+    await store.baseShieldFailed(finalityJob.id, "base rpc down");
+    const resumedFinality = await store.retryBaseShield(finalityJob.id, address);
+    assert.equal(resumedFinality.status, "awaiting_finality", "finality-required job must not skip the finality wait");
+
+    const noFinalityJob = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 102, address);
+    await store.baseShieldProved(noFinalityJob.id, 43, "ef".repeat(32), "aa", "bb", false);
+    await store.baseShieldFailed(noFinalityJob.id, "mint boom");
+    const resumedMint = await store.retryBaseShield(noFinalityJob.id, address);
+    assert.equal(resumedMint.status, "minting", "proved job with finality off resumes at minting");
+
+    const unproved = await store.enqueueBaseShield("desk-base", BASE_BRIDGE, 103, address);
+    await store.baseShieldFailed(unproved.id, "prove boom");
+    const resumedProving = await store.retryBaseShield(unproved.id, address);
+    assert.equal(resumedProving.status, "proving", "job that never proved restarts from proving");
+  });
+}
+
+test("sqlite MCP store claims each base-shield job once across two workers", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mosaic-mcp-store-"));
+  const url = `sqlite://${join(dir, "mcp.db")}`;
+  const a = openMosaicStore(url);
+  const b = openMosaicStore(url);
+  const address = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  await insertBaseDesk(a);
+  const job = await a.enqueueBaseShield("desk-base", BASE_BRIDGE, 77, address);
+
+  const first = await a.nextBaseShields();
+  const second = await b.nextBaseShields();
+  assert.deepEqual(first.map((j) => j.id), [job.id]);
+  assert.deepEqual(second, []);
+  await a.baseShieldRelease(job.id);
+  assert.deepEqual((await b.nextBaseShields()).map((j) => j.id), [job.id]);
 });

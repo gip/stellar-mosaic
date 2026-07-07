@@ -251,7 +251,7 @@ export interface McpClient {
     publicInputsB64: string,
     lease?: ClientActionLease,
   ): Promise<SubmitResult>;
-  getWalletBackup(backupId: string): Promise<WalletBackupEnvelope | null>;
+  getWalletBackup(backupId: string, readToken?: string): Promise<WalletBackupEnvelope | null>;
   putWalletBackup(
     backupId: string,
     body: WalletBackupEnvelope & { expected_generation: number; write_token: string },
@@ -259,6 +259,7 @@ export interface McpClient {
   baseShieldConfig(deskId: string): Promise<BaseShieldConfig>;
   enqueueBaseShield(deskId: string, body: { expected_bridge: string; deposit_id: number; deposit?: BaseShieldDeposit }): Promise<BaseShieldJob>;
   listBaseShields(deskId: string): Promise<BaseShieldJob[]>;
+  retryBaseShield?(jobId: string): Promise<BaseShieldJob>;
 }
 
 export interface ClientActionLease {

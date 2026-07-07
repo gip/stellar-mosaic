@@ -113,8 +113,10 @@ Requires `MOSAIC_BASE_RPC`, `MOSAIC_PROVER_DIR`, `MOSAIC_CAST_BIN`, `MOSAIC_PROV
 
 **The MCP worker (`packages/mcp/src/baseShieldWorker.ts`).** A durable, crash-resumable loop that
 owns the whole lifecycle and drives the prove service by **submit + poll** (never a held
-connection). It advances one `base_shields` job per tick through
-`proving → awaiting_finality → minting → active|failed`:
+connection). Each tick advances the oldest `base_shields` job **per lifecycle stage** through
+`proving → awaiting_finality → minting → active|failed`, so the stages pipeline: one deposit's
+finality wait never blocks the next deposit's proving (the prove service serializes proving
+itself, so concurrent submits just queue there):
 
 - `proving` — `submitProve` (idempotent), then `pollProve`; on `done` it persists
   seal/journal + committed block and moves to `awaiting_finality`.
@@ -123,7 +125,12 @@ connection). It advances one `base_shields` job per tick through
 - `minting` — `attest_base_block` + `shield_from_base` via the desk sponsor (the `stellar` CLI).
 
 The job row (with persisted seal/journal) survives an MCP restart, so a mid-flight restart just
-resubmits or re-polls; nothing re-holds a connection or loses work. Enqueue is drift-guarded: a
+resubmits or re-polls; nothing re-holds a connection or loses work. Every step failure bumps the
+job's persisted `attempts` counter and retries in-stage until an attempt cap (tight for prove
+errors and mint submissions, generous for transport-level throws like an unreachable prove
+service or Base RPC), then goes terminally `failed`; a re-mint the contract rejects as
+`DepositAlreadyProcessed` (#27) resolves to `active` — an earlier attempt landed. Enqueue is
+drift-guarded: a
 bridge that isn't the desk's configured `base_deployment.bridge_address` is rejected. The worker runs
 only when the MCP server is pointed at a prove service via `MOSAIC_PROVE_SERVICE_URL`,
 `MOSAIC_PROVE_TOKEN`, and `MOSAIC_BASE_RPC` (plus `MOSAIC_RPC` / `MOSAIC_NETWORK_PASSPHRASE` for the
