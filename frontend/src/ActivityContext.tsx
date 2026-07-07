@@ -11,6 +11,7 @@ import { browserActivityStore } from './sdk/indexedDbStore'
 import { useStorageMode } from './StorageModeContext'
 import { ensureBackendSession } from './auth'
 import { syncTrustedActivity } from './sdk/activitySync'
+import { baseShieldDepositEvent, baseShieldJobEvents, baseShieldStatusEvent } from './components/baseShieldActivity'
 
 interface ActivityState {
   operations: Operation[]
@@ -37,48 +38,6 @@ function baseDepositTxHash(activities: ActivityEvent[], jobId: string): string |
   return metadata?.base_tx_hash ?? deposit?.tx_hash
 }
 
-// The Activity event for a Base shield's terminal leg: the Stellar mint tx on success, or the failure.
-// Grouped with the Base deposit tx by `action_id` (the job id) so both legs render as one entry. The
-// amount/asset and the Base deposit tx come from the job's persisted `deposit` metadata (captured at
-// enqueue), so this leg renders a complete "0.1 USDC from Base Sepolia" entry even when the local
-// deposit event is absent (shield started on another device, storage cleared, or via the SDK).
-function baseShieldTerminalEvent(job: BaseShieldJob, wallet: string, baseTxHash?: string): ActivityEvent {
-  const baseTx = baseTxHash ?? job.deposit?.base_tx_hash
-  const base = baseTx ? { base_tx_hash: baseTx } : {}
-  const deposit = {
-    asset_id: job.deposit?.asset_id,
-    symbol: job.deposit?.symbol,
-    decimals: job.deposit?.decimals,
-    amount: job.deposit?.amount,
-  }
-  if (job.status === 'failed') {
-    return {
-      kind: 'error',
-      action: 'shield_from_base',
-      method: 'shield_from_base',
-      status: 'failed',
-      wallet_address: wallet,
-      desk_id: job.desk_id,
-      message: job.error ?? undefined,
-      idempotency_key: `base-shield-fail:${job.id}`,
-      created_at: Date.now(),
-      metadata: { action_id: job.id, source: 'base', ...deposit, ...base },
-    }
-  }
-  return {
-    kind: 'transaction',
-    action: 'shield_from_base',
-    method: 'shield_from_base',
-    status: 'succeeded',
-    wallet_address: wallet,
-    desk_id: job.desk_id,
-    tx_hash: job.stellar_tx_hash ?? undefined,
-    idempotency_key: `base-shield-mint:${job.id}`,
-    created_at: Date.now(),
-    metadata: { action_id: job.id, source: 'base', ...deposit, stellar_tx_hash: job.stellar_tx_hash ?? undefined, ...base },
-  }
-}
-
 export function ActivityProvider({ children }: { children: ReactNode }) {
   const wallet = useWallet()
   const mosaicServer = useMosaicServer()
@@ -88,6 +47,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
   const history = useMemo(() => new ActivityHistory(activityStore), [activityStore])
   const [operations, setOperations] = useState<Operation[]>([])
   const [activities, setActivities] = useState<ActivityEvent[]>([])
+  const [baseShieldJobs, setBaseShieldJobs] = useState<BaseShieldJob[]>([])
   const [connected, setConnected] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [desks, setDesks] = useState<Desk[]>([])
@@ -198,7 +158,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     const selectWallet = async () => {
       await Promise.resolve()
       if (!active) return
-      setOperations([]); setActivities([]); setConnected(false); setError(null); eventCursor.current = 0
+      setOperations([]); setActivities([]); setBaseShieldJobs([]); setConnected(false); setError(null); eventCursor.current = 0
       await refreshActivities().catch(() => {})
       if (wallet.address && wallet.networkPassphrase && mosaicServer.trusted) await refresh()
     }
@@ -264,19 +224,32 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     }
   }, [activityStore, connected, refreshActivities, storageMode.trusted, wallet.address, wallet.networkPassphrase])
 
-  // Reconcile in-flight Base shields into Activity, independent of the ShieldFromBaseForm lifecycle.
-  // A Base shield takes ~10–15 min to prove + finalize + mint, so the form that started it is usually
-  // long gone by the time the Stellar note is minted. Poll every job across the user's desks and log
-  // each terminal leg once — the mint tx (turning the entry green + linking the Stellar tx) or the
-  // failure — grouped with the Base deposit tx by the job id. The store dedups by idempotency key; the
-  // pre-check just avoids re-refreshing the UI every tick once a leg is already recorded.
+  // Base shields render straight from their server-side jobs (see baseShieldActivity.ts), so poll
+  // every job across the user's desks into state — a Base shield takes ~10–15 min to prove + finalize
+  // + mint, and the form that started it is usually long gone by the time the Stellar note is minted.
+  // Each poll also persists durable history legs once: the deposit leg (backfilling sessions that
+  // never saw the local write — another device, cleared storage, the SDK) and the terminal leg — the
+  // mint tx or the failure — grouped with the deposit by the job id. The store dedups by idempotency
+  // key; the pre-check just avoids re-refreshing the UI every tick once a leg is already recorded.
   useEffect(() => {
-    if (!connected || !storageMode.trusted || !wallet.address || desks.length === 0) return
+    if (!connected || !storageMode.trusted || !wallet.address || desks.length === 0) {
+      // Clear stale jobs so a mode switch / logout doesn't keep rendering trusted-mode entries.
+      let active = true
+      queueMicrotask(() => { if (active) setBaseShieldJobs([]) })
+      return () => { active = false }
+    }
     let alive = true
     const tick = async () => {
       if (!alive) return
+      const all: BaseShieldJob[] = []
       let existing: ActivityEvent[] | null = null
       let recorded = false
+      const persist = async (key: string, event: () => ActivityEvent) => {
+        if (!existing) existing = await activityStore.list().catch(() => [])
+        if (existing.some((item) => item.idempotency_key === key)) return
+        await activityStore.record(event()).catch(() => {})
+        recorded = true
+      }
       for (const desk of desks) {
         let jobs: BaseShieldJob[]
         try {
@@ -284,18 +257,19 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
         } catch {
           continue
         }
+        all.push(...jobs)
         for (const job of jobs) {
+          if (job.deposit?.base_tx_hash) {
+            await persist(`base-shield-deposit:${job.id}`, () => baseShieldDepositEvent(job, wallet.address!))
+          }
           if (job.status !== 'active' && job.status !== 'failed') continue
           const key = job.status === 'active' ? `base-shield-mint:${job.id}` : `base-shield-fail:${job.id}`
-          if (!existing) existing = await activityStore.list().catch(() => [])
-          if (existing.some((event) => event.idempotency_key === key)) continue
-          await activityStore
-            .record(baseShieldTerminalEvent(job, wallet.address!, baseDepositTxHash(existing, job.id)))
-            .catch(() => {})
-          recorded = true
+          await persist(key, () => baseShieldStatusEvent(job, wallet.address!, baseDepositTxHash(existing ?? [], job.id)))
         }
       }
-      if (alive && recorded) await refreshActivities()
+      if (!alive) return
+      setBaseShieldJobs(all)
+      if (recorded) await refreshActivities()
     }
     void tick()
     const interval = window.setInterval(() => void tick(), 4000)
@@ -347,7 +321,15 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
     return () => { alive = false; window.clearInterval(handle) }
   }, [connected, recovery.unlocked, recovery.error, refresh, wallet.address])
 
-  return <Ctx.Provider value={{ operations, activities, connected, error, catalog, enqueue, cancel, refresh }}>{children}</Ctx.Provider>
+  // What consumers see: the persisted history plus in-memory events synthesized from the live
+  // Base-shield jobs. The job events make Base shields visible on any device at any job status;
+  // grouping collapses them with any persisted legs (same action_id + tx hashes) into one entry.
+  const mergedActivities = useMemo(
+    () => (wallet.address ? [...activities, ...baseShieldJobEvents(baseShieldJobs, wallet.address)] : activities),
+    [activities, baseShieldJobs, wallet.address],
+  )
+
+  return <Ctx.Provider value={{ operations, activities: mergedActivities, connected, error, catalog, enqueue, cancel, refresh }}>{children}</Ctx.Provider>
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
