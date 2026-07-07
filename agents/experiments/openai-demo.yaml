@@ -1,0 +1,23 @@
+name: openai-demo
+agents:
+  - name: alice
+    provider: openai
+    model: gpt-5.5
+    webSearch: true
+    prompt: "Look up the current XLM/USDC market price online, then buy 10 USDC at a fair price near market. In fact try to beat the market!"
+  - name: bob
+    provider: openai
+    model: gpt-5.4
+    webSearch: true
+    prompt: "Look up the current XLM/USDC market price online, then buy XLM with USDC at a fair price near market."
+    funding:
+      USDC: "100"
+
+# Independent PASS/FAIL from Horizon balance deltas (decimal units; XLM deltas absorb fees).
+# Bounds are price-agnostic (the agents fetch the live price): 10 XLM must move alice→bob, and a
+# nonzero USDC payment the other way — any live XLM price ≥ ~0.05 satisfies them.
+verdict:
+  - { agent: alice, asset: USDC, min: "0.5" }
+  - { agent: alice, asset: XLM, max: "-9" }
+  - { agent: bob, asset: USDC, max: "-0.5" }
+  - { agent: bob, asset: XLM, min: "8" }

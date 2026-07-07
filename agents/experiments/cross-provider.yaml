@@ -1,0 +1,25 @@
+# Cross-provider negotiation: an Anthropic agent trades against an OpenAI agent.
+# Run: ANTHROPIC_API_KEY=… OPENAI_API_KEY=… pnpm --filter @mosaic/agents experiment experiments/cross-provider.yaml
+#
+# apiKey is optional — it defaults to ANTHROPIC_API_KEY / OPENAI_API_KEY from the environment.
+# Shown here with explicit ${VAR} interpolation for documentation.
+
+name: cross-provider
+agents:
+  - name: alice
+    provider: anthropic
+    apiKey: ${ANTHROPIC_API_KEY}
+    model: claude-opus-4-8
+    prompt: "Today spot price for XLM/USDC is 0.18. Sell 10 XLM and get me USDC at the best price."
+  - name: bob
+    provider: openai
+    apiKey: ${OPENAI_API_KEY}
+    model: gpt-5.2
+    prompt: "Today spot price for XLM/USDC is 0.18. Sell about 2 USDC and get me the best price in XLM."
+    funding:
+      USDC: "100"
+
+# XLM bounds leave room for tx fees + the ~1.6 XLM desk-deploy cost (either agent may deploy).
+verdict:
+  - { agent: alice, asset: USDC, min: "1.5" }
+  - { agent: bob, asset: XLM, min: "8" }

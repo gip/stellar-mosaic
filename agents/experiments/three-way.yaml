@@ -1,0 +1,34 @@
+# Illustrative 3-agent experiment: two XLM sellers compete for one USDC buyer's flow. All trades
+# settle on one desk — the agents negotiate among themselves who deploys it. Multi-party
+# negotiation quality depends heavily on models and prompts — treat this as a template to tune,
+# not a benchmark.
+
+name: three-way
+assets:
+  - symbol: XLM # the native lumen
+  - symbol: USDC
+    issuer: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 # Circle USDC, Stellar testnet
+# pairs defaults to XLM/USDC (assets[0]/assets[1])
+agents:
+  - name: alice
+    provider: openai
+    model: gpt-5.5
+    webSearch: true
+    prompt: "You want to buy 0.5 USDC at the best price. Try to get 1% better than the market price with low fee. Explore the internet to identify the best price."
+    stellarSecret: ${ALICE_STELLAR_SECRET}
+  - name: bob
+    provider: openai
+    model: gpt-5.5
+    webSearch: true
+    prompt: "You are a market maker and sell / buy USDC at the best price. Explore the internet to identify the best price if needed."
+    stellarSecret: ${BOB_STELLAR_SECRET}
+    funding:
+      USDC: "0.5" # preflight: bob's account must already hold >= 2 USDC
+  - name: charlie
+    provider: openai
+    model: gpt-5.5
+    webSearch: true
+    prompt: "You are a market maker and sell / buy USDC at the best price. Explore the internet to identify the best price if needed."
+    stellarSecret: ${CHARLIE_STELLAR_SECRET}
+    funding:
+      USDC: "0.5" # preflight: bob's account must already hold >= 2 USDC

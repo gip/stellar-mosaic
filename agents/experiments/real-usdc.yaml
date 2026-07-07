@@ -1,0 +1,30 @@
+# Same trade as demo.yaml but on real (Circle) testnet USDC instead of a per-run demo asset.
+# Declaring an asset with an `issuer` means it already exists on the network and cannot be minted,
+# so both agents bring their own Stellar accounts, already holding XLM and USDC (get testnet USDC
+# from https://faucet.circle.com — select Stellar testnet). `funding` for an external asset is a
+# preflight minimum-balance check, not a mint.
+#
+# Run: ANTHROPIC_API_KEY=… ALICE_STELLAR_SECRET=S… BOB_STELLAR_SECRET=S… \
+#        pnpm --filter @mosaic/agents experiment experiments/real-usdc.yaml
+
+name: real-usdc
+assets:
+  - symbol: XLM # the native lumen
+  - symbol: USDC
+    issuer: GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5 # Circle USDC, Stellar testnet
+# pairs defaults to XLM/USDC (assets[0]/assets[1])
+agents:
+  - name: alice
+    provider: openai
+    model: gpt-5.5
+    webSearch: true
+    prompt: "You want to buy 0.5 USDC at the best price. Try to get 1% better than the market price with low fee. Explore the internet to identify the best price."
+    stellarSecret: ${ALICE_STELLAR_SECRET}
+  - name: bob
+    provider: openai
+    model: gpt-5.5
+    webSearch: true
+    prompt: "You are a market maker and sell / buy USDC at the best price. Explore the internet to identify the best price if needed."
+    stellarSecret: ${BOB_STELLAR_SECRET}
+    funding:
+      USDC: "0.5" # preflight: bob's account must already hold >= 2 USDC

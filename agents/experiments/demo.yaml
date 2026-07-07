@@ -1,0 +1,28 @@
+# The classic two-agent demo: alice sells XLM, bob buys with USDC, both on Anthropic models.
+# Run: ANTHROPIC_API_KEY=… pnpm --filter @mosaic/agents demo
+#
+# Both agents' Stellar/Ethereum keys are omitted, so the runner generates fresh ones and funds the
+# Stellar accounts via friendbot; bob additionally starts with 100 demo USDC (issued at provision
+# time). Add stellarSecret/ethKey to bring your own identities.
+
+name: demo
+agents:
+  - name: alice
+    provider: anthropic
+    model: claude-opus-4-8
+    prompt: "Today spot price for XLM/USDC is 0.18. Sell 10 XLM and get me USDC at the best price."
+  - name: bob
+    provider: anthropic
+    model: claude-opus-4-8
+    prompt: "Today spot price for XLM/USDC is 0.18. Sell about 2 USDC and get me the best price in XLM."
+    funding:
+      USDC: "100"
+
+# Independent PASS/FAIL from Horizon balance deltas (decimal units). XLM deltas absorb tx fees
+# AND the ~1.6 XLM desk-deploy cost, which lands on whichever agent wins the desk-creator
+# negotiation — hence the slack on both XLM bounds.
+verdict:
+  - { agent: alice, asset: USDC, min: "1.5" }
+  - { agent: alice, asset: XLM, max: "-9" }
+  - { agent: bob, asset: USDC, max: "-1.5" }
+  - { agent: bob, asset: XLM, min: "8" }
