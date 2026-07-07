@@ -227,9 +227,23 @@ export default function ShieldFromBaseForm({
       setJob(created)
       // Persist the Base deposit leg in Activity immediately: a Shield "from Base Sepolia" with the
       // Base Sepolia tx. Its `action_id` (the job id) groups it with the Stellar mint tx recorded
-      // once the worker finishes — so the entry links both legs of the bridge. (Display does not
-      // depend on this write: ActivityContext also synthesizes both legs from the job itself.)
-      await recordBaseShieldActivity(baseShieldDepositEvent(created, userPubkey ?? undefined))
+      // once the worker finishes — so the entry links both legs of the bridge. Build it from what
+      // this form just did (asset, amount, tx hash) rather than the enqueue echo: an MCP deployment
+      // that predates `deposit` support returns the job without it, and this device is the one place
+      // the Base tx is known first-hand.
+      await recordBaseShieldActivity(baseShieldDepositEvent(
+        {
+          ...created,
+          deposit: {
+            asset_id: selectedAssetId,
+            symbol: asset.symbol,
+            decimals: asset.decimals,
+            amount: rawAmount,
+            base_tx_hash: baseTxHash,
+          },
+        },
+        userPubkey ?? undefined,
+      ))
       onDone()
     } catch (e) {
       setError(errorMessage(e))
