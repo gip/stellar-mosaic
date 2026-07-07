@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Settings } from 'lucide-react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useWallet } from './WalletContext'
 import { RecoveryNotice } from './components/RecoveryPanel'
@@ -7,7 +8,7 @@ import StatusDot from './components/ui/StatusDot'
 import ThemeToggle from './components/ui/ThemeToggle'
 import { useEthereumWallet } from './EthereumWalletContext'
 import { useMosaicServer } from './MosaicServerContext'
-import { useStorageMode } from './StorageModeContext'
+import { useStorageMode, type StorageMode } from './StorageModeContext'
 
 function short(addr: string): string {
   return addr.length > 12 ? `${addr.slice(0, 5)}…${addr.slice(-4)}` : addr
@@ -18,7 +19,7 @@ function navClass({ isActive }: { isActive: boolean }): string {
 }
 
 export default function App() {
-  const { address, connect, disconnect, connecting, error } = useWallet()
+  const { address, ready, connect, disconnect, connecting, error } = useWallet()
   const ethereum = useEthereumWallet()
   const mosaicServer = useMosaicServer()
   const storageMode = useStorageMode()
@@ -26,8 +27,8 @@ export default function App() {
   const navigate = useNavigate()
   const location = useLocation()
 
-  // A desk only exists in one data mode, so leaving that mode should not keep us
-  // on its now-stale desk page — send the user back home instead.
+  // A desk only exists in one data mode, so leaving that mode should not keep us on its
+  // now-stale desk page — send the user back home instead.
   useEffect(() => {
     function onModeChanged() {
       if (location.pathname.startsWith('/desk/')) navigate('/')
@@ -35,6 +36,51 @@ export default function App() {
     window.addEventListener('mosaic-storage-mode-changed', onModeChanged)
     return () => window.removeEventListener('mosaic-storage-mode-changed', onModeChanged)
   }, [location.pathname, navigate])
+
+  // The URL decides the mode: /agents runs the console in Agent mode, the trading pages restore
+  // the last-used trading mode, /overview and /settings are neutral. The ref makes this fire only
+  // when the pathname changes — router navigations are transitions, so a mode change can commit
+  // one render before the URL it belongs to, and reacting to that stale pair here would switch
+  // the mode right back (the "stuck Connecting… on /" bug). Restoring Trusted can fail (backend
+  // session), so it falls back to Trustless instead of retrying forever. Logged out there is no
+  // mode (see the /agents → / redirect below).
+  const agentMode = !!address && storageMode.mode === 'agent'
+  const syncedPathRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!ready || !address || storageMode.connecting) return
+    const path = location.pathname
+    if (syncedPathRef.current === path) return
+    syncedPathRef.current = path
+    if (path === '/agents') {
+      if (storageMode.mode !== 'agent') void storageMode.setMode('agent').catch(() => {})
+    } else if (path === '/' || path === '/activity' || path === '/assets' || path.startsWith('/desk/')) {
+      if (storageMode.mode === 'agent') {
+        void storageMode
+          .setMode(storageMode.lastTradingMode)
+          .catch(() => storageMode.setMode('trustless').catch(() => {}))
+      }
+    }
+  }, [ready, address, location.pathname, storageMode])
+
+  // The mode toggles express intent through the URL: Agent is entered by navigating to the
+  // console (the sync above switches the mode), and picking a trading mode while on the console
+  // navigates home.
+  function switchMode(next: StorageMode) {
+    if (next === 'agent') {
+      if (location.pathname !== '/agents') navigate('/agents')
+      return
+    }
+    if (location.pathname === '/agents') navigate('/')
+    void storageMode.setMode(next).catch(() => {})
+  }
+
+  // The agents console needs a wallet; logged out it is just a connect prompt, so go home.
+  // Gated on `ready` so a logged-in reload of /agents is not bounced before the address restores.
+  useEffect(() => {
+    if (ready && !address && location.pathname === '/agents') {
+      navigate('/', { replace: true })
+    }
+  }, [ready, address, location.pathname, navigate])
 
   // Storage mode is not touched here: StorageModeContext watches wallet.address and falls
   // back to Trustless in-memory only, so logging out never persists a mode "choice".
@@ -53,7 +99,7 @@ export default function App() {
     <>
       <header className="topbar">
         <h1 className="brand">
-          <Link to="/">
+          <Link to={agentMode ? '/agents' : '/'}>
             <span className="brand-word">MOSAIC</span>
             <span className="brand-logo" role="img" aria-label="Mosaic logo" />
           </Link>
@@ -62,69 +108,50 @@ export default function App() {
           <NavLink to="/" end className={navClass}>
             Desks
           </NavLink>
-          <NavLink to="/overview" className={navClass}>
-            Overview
+          <NavLink to="/activity" className={navClass}>
+            Activity
+          </NavLink>
+          <NavLink to="/agents" className={navClass}>
+            Agents
           </NavLink>
           <NavLink to="/assets" className={navClass}>
             Assets
           </NavLink>
-          {address && (
-            <NavLink to="/activity" className={navClass}>
-              Activity
-            </NavLink>
-          )}
-          {address && (
-            <NavLink to="/agents" className={navClass}>
-              Agents
-            </NavLink>
-          )}
+          <NavLink to="/overview" className={navClass}>
+            Overview
+          </NavLink>
         </nav>
         <div className="topbar-spacer" />
         <div className="wallet-stack">
           <div className="wallet-chain">
-            <span className="chain-label">Stellar Testnet</span>
-            {address ? (
-              <div className="wallet-controls">
-                <StatusDot tone="ok" title="Connected">
-                  <button
-                    className="address-button mono"
-                    type="button"
-                    title={`Copy ${address}`}
-                    onClick={() => void navigator.clipboard.writeText(address)}
-                  >
-                    {short(address)}
-                  </button>
-                </StatusDot>
-                <button type="button" onClick={() => void logOutStellar()}>
-                  Log out
-                </button>
-              </div>
-            ) : (
-              <button type="button" onClick={() => void connect()} disabled={connecting}>
-                {connecting ? 'Connecting…' : 'Connect Stellar'}
-              </button>
-            )}
-          </div>
-          <div className="wallet-chain">
-            <span className="chain-label">Trust mode</span>
+            <span className="chain-label">Mode</span>
             <div className="wallet-controls segmented">
               <button
                 type="button"
-                aria-pressed={storageMode.mode === 'trustless'}
+                aria-pressed={!!address && storageMode.mode === 'trustless'}
                 disabled={!address || storageMode.connecting}
                 title={address ? 'Use browser-local desk data and self-submitted workflows' : 'Connect Stellar first'}
-                onClick={() => void storageMode.setMode('trustless')}
+                onClick={() => switchMode('trustless')}
               >
                 Trustless
               </button>
               <button
                 type="button"
-                aria-pressed={storageMode.mode === 'trusted'}
+                aria-pressed={!!address && storageMode.mode === 'trusted'}
                 disabled={!address || mosaicServer.connecting}
                 title={address ? 'Use Mosaic Server SQLite-backed data and sponsored workflows' : 'Connect Stellar first'}
-                onClick={() => void mosaicServer.trust()}
+                onClick={() => switchMode('trusted')}
               >
                 {mosaicServer.connecting && storageMode.mode !== 'trusted' ? 'Connecting…' : 'Trusted'}
+              </button>
+              <button
+                type="button"
+                aria-pressed={!!address && storageMode.mode === 'agent'}
+                disabled={!address || storageMode.connecting}
+                title={address ? 'Agent console only: control your agents; trading pages are hidden' : 'Connect Stellar first'}
+                onClick={() => switchMode('agent')}
+              >
+                Agent
               </button>
             </div>
           </div>
@@ -153,6 +180,30 @@ export default function App() {
               </button>
             )}
           </div>
+          <div className="wallet-chain">
+            <span className="chain-label">Stellar Testnet</span>
+            {address ? (
+              <div className="wallet-controls">
+                <StatusDot tone="ok" title="Connected">
+                  <button
+                    className="address-button mono"
+                    type="button"
+                    title={`Copy ${address}`}
+                    onClick={() => void navigator.clipboard.writeText(address)}
+                  >
+                    {short(address)}
+                  </button>
+                </StatusDot>
+                <button type="button" onClick={() => void logOutStellar()}>
+                  Log out
+                </button>
+              </div>
+            ) : (
+              <button type="button" onClick={() => void connect()} disabled={connecting}>
+                {connecting ? 'Connecting…' : 'Connect Stellar'}
+              </button>
+            )}
+          </div>
         </div>
         <div className="topbar-actions">
           <ThemeToggle />
@@ -164,10 +215,7 @@ export default function App() {
             title={address ? 'Settings' : 'Connect Stellar to open settings'}
             aria-label="Settings"
           >
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
+              <Settings size={16} strokeWidth={1.75} aria-hidden="true" />
           </button>
         </div>
       </header>
@@ -177,7 +225,9 @@ export default function App() {
             <div className="banner-body">
               {storageMode.mode === 'trusted'
                 ? 'Trusted mode: your private notes are synced to the Mosaic Server backup. This demo keeps no other copy — export your own backup, because losing that server data means losing the funds.'
-                : 'Trustless mode: your private notes live only in this browser and are never backed up. Clearing storage or losing this device means losing the funds.'}
+                : storageMode.mode === 'agent'
+                  ? 'Agent mode: this app is a control panel for your agents. Trading pages are hidden; agent keys are derived in this browser and never leave it.'
+                  : 'Trustless mode: your private notes live only in this browser and are never backed up. Clearing storage or losing this device means losing the funds.'}
             </div>
           </div>
         )}
@@ -198,10 +248,10 @@ export default function App() {
             </button>
           </div>
         )}
-        <RecoveryNotice />
+        {!agentMode && <RecoveryNotice />}
         <Outlet />
       </main>
-      {address && <ActivityDrawer />}
+      {address && !agentMode && <ActivityDrawer />}
     </>
   )
 }

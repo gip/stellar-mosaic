@@ -2,7 +2,7 @@
 // once at creation), register/configure agent identities, toggle running/stopped, and read
 // session logs. All key derivation happens client-side; the backend never sees a private key.
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentConfig, AgentRecord } from '@mosaic/agent-sdk/derive'
 import { useWallet } from '../WalletContext'
 import { useAgentConsole } from '../agents/console'
@@ -31,6 +31,16 @@ export default function AgentsPage() {
   const [configLoaded, setConfigLoaded] = useState(false)
 
   const selected: AgentRecord | null = console_.agents.find((a) => a.id === selectedId) ?? null
+
+  // Landing here logs into the console automatically; the session cache in useAgentConsole means
+  // this only prompts Freighter when a fresh session is actually needed. One attempt per visit —
+  // a rejected signature leaves the manual unlock button as the retry path.
+  const attemptedRef = useRef(false)
+  useEffect(() => {
+    if (!address || console_.unlocked || console_.busy || console_.error || attemptedRef.current) return
+    attemptedRef.current = true
+    void console_.unlock().catch(() => {})
+  }, [address, console_])
 
   const selectAgent = useCallback(
     (agent: AgentRecord) => {
@@ -123,7 +133,7 @@ export default function AgentsPage() {
         </p>
         {console_.runners.length === 0 && <p className="muted">No runners yet.</p>}
         {console_.runners.map((runner) => (
-          <div key={runner.id} className="form-row" style={{ alignItems: 'center', gap: '0.6rem' }}>
+          <div key={runner.id} className="form-row">
             <StatusDot tone={runner.revoked ? 'err' : runner.last_seen ? 'ok' : 'warn'}
               title={runner.revoked ? 'Revoked' : runner.last_seen ? `Last seen ${new Date(runner.last_seen).toLocaleString()}` : 'Never connected'}>
               <span>
@@ -169,7 +179,7 @@ export default function AgentsPage() {
       >
         {console_.agents.length === 0 && <p className="muted">No agents yet — create one, configure it, then start it.</p>}
         {console_.agents.map((agent) => (
-          <div key={agent.id} className="form-row" style={{ alignItems: 'center', gap: '0.6rem' }}>
+          <div key={agent.id} className="form-row">
             <StatusDot tone={agent.revoked ? 'err' : agent.desired_state === 'running' ? 'ok' : 'warn'} title={agent.revoked ? 'Revoked' : agent.desired_state}>
               <button type="button" className="address-button" onClick={() => selectAgent(agent)}>
                 #{agent.index} {agent.name ?? 'unnamed'}

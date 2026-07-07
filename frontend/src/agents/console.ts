@@ -3,7 +3,7 @@
 // challenge. Everything else — registry, runner credentials, sealing, config, logs — goes through
 // the browser-safe @mosaic/agent-sdk/derive surface against the agent backend.
 
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Buffer } from 'buffer'
 import {
   AgentBackendClient,
@@ -24,6 +24,17 @@ import {
 } from '@mosaic/agent-sdk/derive'
 import { AGENT_BACKEND_URL } from '../config'
 import { signRecoveryMessage } from '../wallet'
+
+// An unlocked session survives navigation (module scope, keyed by wallet address) so returning
+// to the console never re-prompts; a reload starts locked by design — the derivation root only
+// ever lives in memory.
+interface CachedSession {
+  address: string
+  root: AgentRoot
+  client: AgentBackendClient
+  info: BackendInfo | null
+}
+let cachedSession: CachedSession | null = null
 
 function signatureBytes(value: string | Uint8Array | null): Uint8Array {
   if (!value) throw new Error('Freighter returned no signature.')
@@ -62,12 +73,13 @@ export interface AgentConsole {
 }
 
 export function useAgentConsole(address: string | null, networkPassphrase: string | null): AgentConsole {
-  const rootRef = useRef<AgentRoot | null>(null)
-  const clientRef = useRef<AgentBackendClient | null>(null)
-  const [unlocked, setUnlocked] = useState(false)
+  const cached = cachedSession && address && cachedSession.address === address ? cachedSession : null
+  const rootRef = useRef<AgentRoot | null>(cached?.root ?? null)
+  const clientRef = useRef<AgentBackendClient | null>(cached?.client ?? null)
+  const [unlocked, setUnlocked] = useState(!!cached)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [info, setInfo] = useState<BackendInfo | null>(null)
+  const [info, setInfo] = useState<BackendInfo | null>(cached?.info ?? null)
   const [agents, setAgents] = useState<AgentRecord[]>([])
   const [runners, setRunners] = useState<RunnerRecord[]>([])
 
@@ -98,6 +110,20 @@ export function useAgentConsole(address: string | null, networkPassphrase: strin
     setRunners(nextRunners)
   }, [requireSession])
 
+  // A session restored from the cache still has to fetch the lists; if the backend session
+  // expired in the meantime, drop it so the caller unlocks afresh.
+  const restoredRef = useRef(!!cached)
+  useEffect(() => {
+    if (!restoredRef.current) return
+    restoredRef.current = false
+    refresh().catch(() => {
+      cachedSession = null
+      rootRef.current = null
+      clientRef.current = null
+      setUnlocked(false)
+    })
+  }, [refresh])
+
   const unlock = useCallback(async () => {
     if (!address || !networkPassphrase) throw new Error('Connect the Stellar wallet first.')
     await run('Unlocking…', async () => {
@@ -114,7 +140,9 @@ export function useAgentConsole(address: string | null, networkPassphrase: strin
       })
       rootRef.current = root
       clientRef.current = client
-      setInfo(await client.info())
+      const nextInfo = await client.info()
+      cachedSession = { address, root, client, info: nextInfo }
+      setInfo(nextInfo)
       const [nextAgents, nextRunners] = await Promise.all([client.listAgents(), client.listRunners()])
       setAgents(nextAgents)
       setRunners(nextRunners)

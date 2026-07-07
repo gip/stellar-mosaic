@@ -315,6 +315,24 @@ label {
   align-items: center;
   flex-wrap: wrap;
 }
+.form-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+/* Rows of labelled fields align to their tops so the labels line up. */
+.form-row:has(> .field) {
+  align-items: flex-start;
+}
+.form-row > .field {
+  flex: 1 1 10rem;
+}
+/* Pane-header quick actions pair an input with a .btn-sm — give the input the same box. */
+.pane-header .form-row input {
+  padding: 3px 8px;
+  font-size: var(--fs-sm);
+}
 .field-help {
   font-size: var(--fs-sm);
   color: var(--fg-dim);

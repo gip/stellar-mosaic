@@ -1,11 +1,12 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { errorMessage } from '@mosaic/sdk'
 import { ensureBackendSession } from './auth'
 import { useWallet } from './WalletContext'
 import { api, resetApiCaches } from './api'
 import { setRecoveryBackendEnabled, setRecoveryMode, syncRecoveryNow } from './recovery'
 
-export type StorageMode = 'trusted' | 'trustless'
+export type StorageMode = 'trusted' | 'trustless' | 'agent'
+export type TradingMode = 'trusted' | 'trustless'
 
 const STORAGE_MODE_KEY = 'mosaic.storageMode'
 
@@ -14,14 +15,17 @@ interface StorageModeState {
   trusted: boolean
   connecting: boolean
   error: string | null
+  /** The trading mode the nav restores when leaving the agent console. */
+  lastTradingMode: TradingMode
   setMode: (mode: StorageMode) => Promise<void>
 }
 
 const Ctx = createContext<StorageModeState | null>(null)
 
-// The explicit preference the user picked with the toggle, or null if they never chose one.
-// Forced fallbacks (logged out, session failure) must not masquerade as a choice here.
-function storedMode(): StorageMode | null {
+// The trading mode the user last picked with the toggle, or null if they never chose one.
+// Agent mode is never persisted (it is derived from being on /agents), and forced fallbacks
+// (logged out, session failure) must not masquerade as a choice here.
+function storedMode(): TradingMode | null {
   try {
     const raw = localStorage.getItem(STORAGE_MODE_KEY)
     return raw === 'trusted' || raw === 'trustless' ? raw : null
@@ -34,7 +38,7 @@ function initialMode(): StorageMode {
   return storedMode() ?? 'trusted'
 }
 
-function persistMode(mode: StorageMode) {
+function persistMode(mode: TradingMode) {
   try {
     localStorage.setItem(STORAGE_MODE_KEY, mode)
   } catch {
@@ -52,6 +56,14 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
   })
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [lastTradingMode, setLastTradingMode] = useState<TradingMode>(() => storedMode() ?? 'trusted')
+
+  // Every mode change goes through here so "last used" tracks whatever trading mode is active,
+  // forced fallbacks included.
+  const applyMode = useCallback((next: StorageMode) => {
+    setModeState(next)
+    if (next !== 'agent') setLastTradingMode(next)
+  }, [])
 
   useEffect(() => {
     setRecoveryMode(mode)
@@ -70,29 +82,40 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
       resetApiCaches()
       // In-memory only: logging out is not a mode choice, so the trusted default (or an
       // explicit stored preference) still applies at the next login.
-      setModeState('trustless')
+      applyMode('trustless')
       void api.deleteAuthSession().catch(() => {})
     })
     return () => {
       active = false
     }
-  }, [mode, wallet.address, wallet.ready])
+  }, [applyMode, mode, wallet.address, wallet.ready])
 
-  // Logging in lands in Trusted mode unless the user explicitly chose Trustless.
+  // Logging in always lands in Trusted mode first (for now), regardless of the stored
+  // preference — that preference only decides which trading mode the nav restores after a
+  // visit to the agent console. The ref makes this fire once per login, not on every
+  // later mode switch. Landing directly on the agent console is the exception: there the
+  // URL decides the mode (App's route→mode sync), so forcing Trusted would fight it.
+  const lastLoginRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!wallet.ready || !wallet.address) return
+    if (!wallet.ready) return
+    if (!wallet.address) {
+      lastLoginRef.current = null
+      return
+    }
+    if (lastLoginRef.current === wallet.address) return
+    lastLoginRef.current = wallet.address
     if (mode === 'trusted') return
-    if (storedMode() === 'trustless') return
+    if (window.location.pathname === '/agents') return
     let active = true
     queueMicrotask(() => {
       if (!active) return
       resetApiCaches()
-      setModeState('trusted')
+      applyMode('trusted')
     })
     return () => {
       active = false
     }
-  }, [mode, wallet.address, wallet.ready])
+  }, [applyMode, mode, wallet.address, wallet.ready])
 
   useEffect(() => {
     if (mode !== 'trusted' || !wallet.ready || !wallet.address || !wallet.networkPassphrase) return
@@ -115,7 +138,7 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
           resetApiCaches()
           // In-memory only: a session failure is a forced fallback, not a user choice, so the
           // trusted default still applies at the next login.
-          setModeState('trustless')
+          applyMode('trustless')
           setError(errorMessage(e))
         })
         .finally(() => {
@@ -125,7 +148,7 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
     return () => {
       active = false
     }
-  }, [mode, wallet.address, wallet.networkPassphrase, wallet.ready])
+  }, [applyMode, mode, wallet.address, wallet.networkPassphrase, wallet.ready])
 
   const setMode = useCallback(async (next: StorageMode) => {
     if (next === mode) return
@@ -145,8 +168,8 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
         setRecoveryBackendEnabled(false)
       }
       resetApiCaches()
-      setModeState(next)
-      persistMode(next)
+      applyMode(next)
+      if (next !== 'agent') persistMode(next)
       window.dispatchEvent(new CustomEvent('mosaic-storage-mode-changed', { detail: { mode: next } }))
     } catch (e) {
       if (next === 'trusted') setRecoveryBackendEnabled(false)
@@ -155,15 +178,16 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
     } finally {
       setConnecting(false)
     }
-  }, [mode, wallet.address, wallet.networkPassphrase])
+  }, [applyMode, mode, wallet.address, wallet.networkPassphrase])
 
   const value = useMemo<StorageModeState>(() => ({
     mode,
     trusted: mode === 'trusted',
     connecting,
     error,
+    lastTradingMode,
     setMode,
-  }), [mode, connecting, error, setMode])
+  }), [mode, connecting, error, lastTradingMode, setMode])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }
