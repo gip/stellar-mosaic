@@ -668,7 +668,7 @@ function NotesTable({
       <table className="notes-table">
         <thead>
           <tr>
-            <th>Type</th>
+            <th className="col-type">Type</th>
             <th>Pair</th>
             <th>Amount</th>
             <th className="col-status">Status</th>
@@ -685,7 +685,7 @@ function NotesTable({
                 onClick={() => setSelected(n)}
                 title="Click for details"
               >
-                <td>{noteType(n)}</td>
+                <td className="col-type">{noteType(n)}</td>
                 <td>{notePair(n, desk)}</td>
                 <td>
                   {formatAmount(n.amount, dec(n.asset_id))} {n.symbol}
