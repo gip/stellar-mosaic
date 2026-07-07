@@ -58,6 +58,9 @@ importers:
       '@aztec/bb.js':
         specifier: 0.87.0
         version: 0.87.0
+      '@mosaic/agent-sdk':
+        specifier: workspace:*
+        version: link:../packages/agent-sdk
       '@mosaic/sdk':
         specifier: workspace:*
         version: link:../packages/sdk
@@ -131,6 +134,74 @@ importers:
       vite:
         specifier: ^8.0.12
         version: 8.1.0(@types/node@24.13.2)(yaml@2.9.0)
+
+  packages/agent-backend:
+    dependencies:
+      '@mosaic/agent-sdk':
+        specifier: workspace:*
+        version: link:../agent-sdk
+      '@mosaic/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      '@stellar/stellar-sdk':
+        specifier: ^16.0.1
+        version: 16.0.1
+      '@xmtp/node-sdk':
+        specifier: ^6.0.0
+        version: 6.0.0
+      viem:
+        specifier: ^2.53.1
+        version: 2.53.1(typescript@6.0.3)(zod@4.4.3)
+    devDependencies:
+      '@types/node':
+        specifier: ^24.12.3
+        version: 24.13.2
+      typescript:
+        specifier: ~6.0.2
+        version: 6.0.3
+
+  packages/agent-sdk:
+    dependencies:
+      '@ai-sdk/anthropic':
+        specifier: ^2.0.0
+        version: 2.0.85(zod@4.4.3)
+      '@ai-sdk/openai':
+        specifier: ^2.0.0
+        version: 2.0.110(zod@4.4.3)
+      '@mosaic/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      '@noble/curves':
+        specifier: ^1.6.0
+        version: 1.9.1
+      '@stellar/stellar-sdk':
+        specifier: ^16.0.1
+        version: 16.0.1
+      '@xmtp/node-sdk':
+        specifier: ^6.0.0
+        version: 6.0.0
+      ai:
+        specifier: ^5.0.0
+        version: 5.0.210(zod@4.4.3)
+      buffer:
+        specifier: ^6.0.3
+        version: 6.0.3
+      viem:
+        specifier: ^2.53.1
+        version: 2.53.1(typescript@6.0.3)(zod@4.4.3)
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
+    devDependencies:
+      '@mosaic/agent-backend':
+        specifier: workspace:*
+        version: link:../agent-backend
+      '@types/node':
+        specifier: ^24.12.3
+        version: 24.13.2
+      typescript:
+        specifier: ~6.0.2
+        version: 6.0.3
 
   packages/cli:
     dependencies:

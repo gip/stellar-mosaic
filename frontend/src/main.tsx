@@ -13,6 +13,7 @@ import OverviewPage from './pages/OverviewPage'
 import DeskPage from './pages/DeskPage'
 import AssetsPage from './pages/AssetsPage'
 import ActivityPage from './pages/ActivityPage'
+import AgentsPage from './pages/AgentsPage'
 import SettingsPage from './pages/SettingsPage'
 import { ThemeProvider } from './ThemeContext'
 import { WalletProvider } from './WalletContext'
@@ -52,6 +53,7 @@ const router = createBrowserRouter([
       { path: 'overview', element: <OverviewPage /> },
       { path: 'assets', element: <AssetsPage /> },
       { path: 'activity', element: <ActivityPage /> },
+      { path: 'agents', element: <AgentsPage /> },
       { path: 'settings', element: <SettingsPage /> },
       { path: 'desk/:deskId', element: <DeskPage /> },
     ],

@@ -26,6 +26,13 @@ export const SOROBAN_RPC_URL = absoluteHttpUrl(
 
 export const MCP_URL = mcpUrl(import.meta.env.VITE_MCP_URL, DEFAULT_MCP_URL)
 
+/** The agent backend (agent registry, runner credentials, session logs). */
+export const AGENT_BACKEND_URL = absoluteHttpUrl(
+  import.meta.env.VITE_AGENT_BACKEND_URL,
+  'http://127.0.0.1:8791',
+  'VITE_AGENT_BACKEND_URL',
+)
+
 /** Optional Base Sepolia RPC for read-only custody totals. When unset, viem's built-in transport is
  * used (no wallet required). */
 export const BASE_RPC_URL = typeof import.meta.env.VITE_BASE_RPC === 'string' && import.meta.env.VITE_BASE_RPC.trim()

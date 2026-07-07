@@ -73,6 +73,11 @@ export default function App() {
               Activity
             </NavLink>
           )}
+          {address && (
+            <NavLink to="/agents" className={navClass}>
+              Agents
+            </NavLink>
+          )}
         </nav>
         <div className="topbar-spacer" />
         <div className="wallet-stack">

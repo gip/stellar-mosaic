@@ -1,0 +1,51 @@
+{
+  "name": "@mosaic/agent-sdk",
+  "version": "0.0.0",
+  "description": "Stellar Mosaic agent SDK: deterministic wallet-derived agent identities, runner credentials, backend client, XMTP session logging, and the npx-runnable agent daemon.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "mosaic-agent": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./derive": {
+      "types": "./dist/portable.d.ts",
+      "import": "./dist/portable.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "scripts"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "postinstall": "node scripts/fix-xmtp.mjs",
+    "test": "tsc -b && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^2.0.0",
+    "@ai-sdk/openai": "^2.0.0",
+    "@mosaic/sdk": "workspace:*",
+    "@noble/curves": "^1.6.0",
+    "@stellar/stellar-sdk": "^16.0.1",
+    "@xmtp/node-sdk": "^6.0.0",
+    "ai": "^5.0.0",
+    "buffer": "^6.0.3",
+    "viem": "^2.53.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@mosaic/agent-backend": "workspace:*",
+    "@types/node": "^24.12.3",
+    "typescript": "~6.0.2"
+  }
+}
