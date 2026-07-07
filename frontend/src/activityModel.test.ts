@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { ActivityEvent } from '@mosaic/sdk'
+import type { ActivityEvent, BaseShieldJob } from '@mosaic/sdk'
 import type { Operation } from './api.ts'
 import { activityGroups, txNetworkLabel, txUrl } from './components/activityModel.ts'
+import { baseShieldJobEvents } from './components/baseShieldActivity.ts'
 
 test('shield action and transaction activity collapse into one formatted group', () => {
   const actionId = 'action-shield-1'
@@ -444,4 +445,83 @@ test('base shield mint leg alone renders a complete entry from job deposit metad
   assert.equal(groups[0].summary, '1 ETH from Base Sepolia')
   assert.equal(groups[0].status, 'succeeded')
   assert.deepEqual(new Set(groups[0].lines.map((line) => line.tx)), new Set([stellarTx, baseTx]))
+})
+
+function baseShieldJob(overrides: Partial<BaseShieldJob> = {}): BaseShieldJob {
+  return {
+    id: 'job-live-1',
+    desk_id: 'desk-3',
+    bridge: `0x${'1'.repeat(40)}`,
+    deposit_id: 7,
+    status: 'proving',
+    deposit: {
+      asset_id: 3,
+      symbol: 'ETH',
+      decimals: 18,
+      amount: '1000000000000000000',
+      base_tx_hash: `0x${'c'.repeat(64)}`,
+    },
+    ...overrides,
+  }
+}
+
+test('in-flight base shield job renders a running entry with the Base deposit tx', () => {
+  // No persisted Activity events at all (shield started on another device / write lost): the job
+  // alone must produce a visible entry for the whole ~10-15 min prove + finality window.
+  const job = baseShieldJob({ status: 'awaiting_finality' })
+  const groups = activityGroups(baseShieldJobEvents([job], 'GWALLET'), [])
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].action, 'Shield')
+  assert.equal(groups[0].summary, '1 ETH from Base Sepolia')
+  assert.equal(groups[0].status, 'running')
+  assert.deepEqual(groups[0].lines.map((line) => line.tx), [job.deposit!.base_tx_hash])
+})
+
+test('completed base shield job renders succeeded with both tx links', () => {
+  const stellarTx = 'd'.repeat(64)
+  const job = baseShieldJob({ status: 'active', stellar_tx_hash: stellarTx })
+  const groups = activityGroups(baseShieldJobEvents([job], 'GWALLET'), [])
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].summary, '1 ETH from Base Sepolia')
+  assert.equal(groups[0].status, 'succeeded')
+  const byTx = new Map(groups[0].lines.map((line) => [line.tx, line]))
+  assert.deepEqual(new Set(byTx.keys()), new Set([job.deposit!.base_tx_hash, stellarTx]))
+  assert.equal(txNetworkLabel(job.deposit!.base_tx_hash!, byTx.get(job.deposit!.base_tx_hash)!.activity!), 'Base Sepolia')
+  assert.equal(txNetworkLabel(stellarTx, byTx.get(stellarTx)!.activity!), 'Stellar Testnet')
+  // The mint leg re-asserts the Base deposit tx, so both lines read as succeeded.
+  assert.equal(byTx.get(job.deposit!.base_tx_hash)!.status, 'succeeded')
+})
+
+test('failed base shield job renders failed with the job error', () => {
+  const job = baseShieldJob({ status: 'failed', error: 'proof rejected' })
+  const groups = activityGroups(baseShieldJobEvents([job], 'GWALLET'), [])
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].status, 'failed')
+  assert.equal(groups[0].error, 'proof rejected')
+})
+
+test('job events merge with persisted legs into one group without duplicate lines', () => {
+  const stellarTx = 'a'.repeat(64)
+  const job = baseShieldJob({ status: 'active', stellar_tx_hash: stellarTx })
+  const persisted: ActivityEvent[] = [
+    // The deposit leg the form wrote at submit time: same idempotency key/action_id/tx as the
+    // synthesized one, but with a real timestamp. The persisted `running` must not drag the group
+    // back from the job's `succeeded`.
+    {
+      kind: 'transaction',
+      method: 'shield_from_base',
+      status: 'running',
+      desk_id: job.desk_id,
+      tx_hash: job.deposit!.base_tx_hash,
+      idempotency_key: `base-shield-deposit:${job.id}`,
+      metadata: { action_id: job.id, source: 'base', asset_id: 3, symbol: 'ETH', decimals: 18, amount: '1000000000000000000', base_tx_hash: job.deposit!.base_tx_hash },
+      created_at: 10,
+    },
+  ]
+  const groups = activityGroups([...persisted, ...baseShieldJobEvents([job], 'GWALLET')], [])
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].status, 'succeeded')
+  assert.equal(groups[0].createdAt, 10)
+  assert.deepEqual(new Set(groups[0].lines.map((line) => line.tx)), new Set([job.deposit!.base_tx_hash, stellarTx]))
+  assert.equal(groups[0].lines.length, 2)
 })

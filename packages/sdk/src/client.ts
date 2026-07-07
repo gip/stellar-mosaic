@@ -1204,6 +1204,15 @@ export class MosaicClient {
       const job = await this.p.mcp.enqueueBaseShield(params.deskId, {
         expected_bridge: config.bridge,
         deposit_id: params.deposit_id,
+        // Display metadata for Activity: lets any browser render the job's entry with the amount
+        // even though this path never writes a local deposit event. (No Base tx hash here — the
+        // caller made the deposit before calling in, and only passes its deposit_id.)
+        deposit: {
+          asset_id: params.asset_id,
+          symbol: asset?.symbol,
+          decimals: asset?.decimals,
+          amount: params.amount,
+        },
       });
       const final = await this.pollBaseShield(params.deskId, job.id, params.pollIntervalMs, params.timeoutMs);
       if (final.status === "failed") throw new Error(final.error ?? "base shield failed on the server");

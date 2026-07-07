@@ -95,7 +95,7 @@ export function activityGroups(activities: ActivityEvent[], operations: Operatio
     const operation = operationId ? operationById.get(operationId) : undefined
     const groupActivities = activityByGroup.get(group.id) ?? []
     group.status = displayStatus(operation?.status ?? latestStatus(groupActivities))
-    group.error = operation?.error ?? undefined
+    group.error = operation?.error ?? (statusTone(group.status) === 'err' ? latestErrorMessage(groupActivities) : undefined)
     const deskId = operation?.desk_id ?? firstDeskId(groupActivities)
     group.summary ||= operation ? summaryForOperation(operation, groupActivities, catalog) : summaryForActivities(group.action, groupActivities, catalog, deskId)
     group.createdAt = Math.max(
@@ -303,21 +303,38 @@ function txStatus(activity: ActivityEvent) {
   return displayStatus(activity.status)
 }
 
-// The status of the temporally-latest activity in the group (by created_at, tie-broken by cursor), so
-// a multi-leg group reflects its most recent leg. This is what turns a Base shield green: the group
-// holds a `running` deposit leg plus a later `succeeded` mint leg — the mint, recorded last, wins.
-// (First-defined order would leave it pinned to the deposit's `running` forever.)
+// The status of the most-advanced activity in the group: highest statusRank first (a terminal
+// succeeded/failed leg beats an earlier leg still marked `running`, even when the terminal event
+// carries no timestamp — e.g. one synthesized live from a Base-shield job), then temporally latest
+// (by created_at, tie-broken by cursor) among equals, so a failed-then-retried group reflects the
+// newest terminal leg. This is what turns a Base shield green: the group holds a `running` deposit
+// leg plus a `succeeded` mint leg — the mint outranks it.
 function latestStatus(activities: ActivityEvent[]) {
   let best: ActivityEvent | undefined
   for (const activity of activities) {
     if (activity.status === undefined) continue
-    if (!best || activityOrder(activity) >= activityOrder(best)) best = activity
+    if (
+      !best ||
+      statusRank(activity.status) > statusRank(best.status) ||
+      (statusRank(activity.status) === statusRank(best.status) && activityOrder(activity) >= activityOrder(best))
+    ) best = activity
   }
   return best?.status
 }
 
 function activityOrder(activity: ActivityEvent): number {
   return (activity.created_at ?? 0) * 1e6 + (activity.cursor ?? 0)
+}
+
+// The message of the temporally-latest error event in the group (operation-less groups — e.g. a
+// failed Base shield — have no other channel for their failure reason).
+function latestErrorMessage(activities: ActivityEvent[]) {
+  let best: ActivityEvent | undefined
+  for (const activity of activities) {
+    if (activity.kind !== 'error' || !activity.message) continue
+    if (!best || activityOrder(activity) >= activityOrder(best)) best = activity
+  }
+  return best?.message
 }
 
 function statusRank(status?: string) {
