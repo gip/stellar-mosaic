@@ -155,9 +155,11 @@ async function getDesk(mode: StorageMode, id: string): Promise<Desk> {
   const cache = deskCache(mode)
   const cached = cache.get(id)
   if (cached) return cached
-  if (mode === 'trustless') {
+  // Anything that is not explicitly trusted stays browser-local — agent mode must never reach the
+  // Mosaic Server.
+  if (mode !== 'trusted') {
     const local = await getLocalDesk(mode, id)
-    if (!local) throw new ApiError(404, `desk ${id} not found in trustless mode`)
+    if (!local) throw new ApiError(404, `desk ${id} not found in ${mode} mode`)
     const desk = local as Desk
     cache.set(id, desk)
     return desk

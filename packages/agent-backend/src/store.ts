@@ -70,6 +70,11 @@ export interface AgentDataValue {
 
 export type AgentDataKind = "attached" | "scratch";
 
+/** Look up a data kind by name (used by the inbox worker's tests). */
+export function isAgentDataKind(value: string): value is AgentDataKind {
+  return value === "attached" || value === "scratch";
+}
+
 export interface NewLogEntry {
   session_id: string;
   agent_id: string;

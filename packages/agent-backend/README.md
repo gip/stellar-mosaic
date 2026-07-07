@@ -1,10 +1,11 @@
 # @mosaic/agent-backend
 
-Standalone HTTP service behind the Mosaic agents feature: master/runner/agent auth, the
+Standalone MCP service behind the Mosaic agents feature: master/runner/agent auth, the
 agent-identity registry, sealed key bundles, per-agent data (`attached` / `scratch`), and XMTP
 session-log ingest + serving. It copies the MCP server's patterns (`node:sqlite` store with a
-memory twin, SEP-0053 challenge auth, bare `node:http`) but shares no runtime or database with it.
-The backend stores **public keys and ciphertext only** — it can never run or impersonate an agent.
+memory twin, SEP-0053 challenge auth, Streamable-HTTP MCP transport at `/mcp`) but shares no
+runtime or database with it. The backend stores **public keys and ciphertext only** — it can never
+run or impersonate an agent.
 
 ## Run
 
@@ -14,23 +15,33 @@ MOSAIC_AGENT_XMTP_KEY=0x... MOSAIC_AGENT_XMTP_DB_KEY=0x... pnpm --filter @mosaic
 
 Env (all optional unless noted): `MOSAIC_AGENT_BIND` (default `127.0.0.1:8791`),
 `MOSAIC_AGENT_DATABASE_URL` (`sqlite://./mosaic-agent-backend.db`), `MOSAIC_NETWORK_PASSPHRASE`
-(testnet default), `MOSAIC_AGENT_CORS_ORIGIN`, and the XMTP identity: `MOSAIC_AGENT_XMTP_KEY`
-(0x eth key = the backend's **known XMTP address**), `MOSAIC_AGENT_XMTP_DB_KEY` (0x 32-byte hex),
-`MOSAIC_AGENT_XMTP_ENV` (`dev`), `MOSAIC_AGENT_XMTP_DB`. Without the XMTP vars the HTTP API still
-runs; only log ingest is disabled (`/v1/info.xmtp_address` = null).
+(testnet default), `MOSAIC_AGENT_CORS_ORIGIN`, transport knobs (`MOSAIC_AGENT_MAX_BODY_BYTES`,
+`MOSAIC_AGENT_MCP_TRANSPORT_TTL_MS`, `MOSAIC_AGENT_MCP_TOOL_TIMEOUT_MS`,
+`MOSAIC_AGENT_MCP_SLOW_TOOL_MS`), and the XMTP identity: `MOSAIC_AGENT_XMTP_KEY` (0x eth key = the
+backend's **known XMTP address**), `MOSAIC_AGENT_XMTP_DB_KEY` (0x 32-byte hex),
+`MOSAIC_AGENT_XMTP_ENV` (`dev`), `MOSAIC_AGENT_XMTP_DB`. Without the XMTP vars the MCP API still
+runs; only log ingest is disabled (the `info` tool reports `xmtp_address: null`).
 
 ## API sketch
 
-- `GET /v1/info` — known XMTP address, network, derivation version (open).
-- `POST /v1/auth/{challenge,verify}` — master auth: Stellar SEP-0053 or Ethereum EIP-191.
-- Master scope: `/v1/agents` CRUD (register descriptors, revoke, desired-state), attached data
-  (`/v1/agents/:id/data/:key`, incl. the reserved `agent-config`), `/v1/runners` (register/revoke
-  runner credentials), `/v1/agents/:id/sealed-keys/:runnerId`, `/v1/logs`, `/v1/sessions/:id/logs`.
-- Runner scope: `/v1/runner/auth/*`, `/v1/runner/state` (agents + configs + sealed bundles),
-  `/v1/runner/heartbeat` (detects two daemons on one credential).
-- Agent scope: `/v1/agent/auth/*` (creates the session whose id keys XMTP log envelopes),
-  `/v1/agent/data`, `/v1/agent/scratch/:key`, `/v1/agent/session/end`.
-- Public: `GET /v1/logs/public` — the unauthenticated feed of public log entries.
+Everything is an MCP tool on `POST /mcp` (Streamable HTTP; clients use `AgentBackendClient` from
+`@mosaic/agent-sdk`). Auth is a `session` token argument on every authenticated tool, minted by the
+per-principal challenge/verify pairs; failures carry a typed error body whose `status` mirrors the
+old REST codes (401/403/404/409/400).
+
+- `info` — known XMTP address, network, derivation version (open).
+- `master_auth_challenge` / `master_auth_verify` — master auth: Stellar SEP-0053 or Ethereum
+  EIP-191; `logout` for any principal.
+- Master scope: `register_agent`, `list_agents`, `get_agent`, `revoke_agent`, `set_desired_state`,
+  attached data (`put_attached_data` / `delete_attached_data` / `agent_data_of`, incl. the reserved
+  `agent-config` key), `agent_sessions`, runners (`register_runner`, `list_runners`,
+  `update_runner`, `revoke_runner`), `put_sealed_root`, `master_logs`, `session_logs`.
+- Runner scope: `runner_auth_challenge` / `runner_auth_verify`, `runner_state` (agents + configs +
+  sealed bundles), `runner_heartbeat` (detects two daemons on one credential).
+- Agent scope: `agent_auth_challenge` / `agent_auth_verify` (creates the session whose id keys XMTP
+  log envelopes), `agent_data`, `put_scratch`, `delete_scratch`, `end_agent_session`.
+- Public: `public_logs`, also served as plain REST `GET /v1/logs/public` — the unauthenticated,
+  browser-linkable feed of public log entries. `GET /healthz` stays REST too.
 
 Log ingest: agents DM `agent-log/v1` JSON envelopes to the known XMTP address; the inbox worker
 validates the sender's eth identity against the registry, checks the session belongs to that
