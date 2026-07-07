@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm --filter @mosaic/sdk build && tsc -b && vite build",
+    "build": "pnpm --filter @mosaic/sdk build && pnpm --filter @mosaic/agent-sdk build && tsc -b && vite build",
     "lint": "eslint .",
     "test": "node --test src/*.test.ts",
     "preview": "vite preview"
