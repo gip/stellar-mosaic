@@ -15,6 +15,7 @@ import Tabs from '../components/ui/Tabs'
 import StatusDot, { type StatusTone } from '../components/ui/StatusDot'
 import Modal from '../components/ui/Modal'
 import ScrollTable from '../components/ui/ScrollTable'
+import ExplorerLink from '../components/ui/ExplorerLink'
 import Toasts, { type ToastItem } from '../components/Toasts'
 import { notesForDesk, reconcile, type Note } from '../notes'
 import { formatAmount } from '../amount'
@@ -65,13 +66,13 @@ function DeskDetailsTable({
       <tbody>
         <tr>
           <th>Stellar contract</th>
-          <td className="mono">{desk.contract_id}</td>
+          <td className="mono"><ExplorerLink address={desk.contract_id} /></td>
         </tr>
         <tr>
           <th>Base bridge</th>
           <td className="mono">
             {desk.base_deployment?.bridge_address ? (
-              desk.base_deployment.bridge_address
+              <ExplorerLink address={desk.base_deployment.bridge_address} />
             ) : (
               <span className="muted">
                 {desk.base_deployment ? `not deployed (${desk.base_deployment.status})` : 'not deployed'}

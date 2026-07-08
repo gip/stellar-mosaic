@@ -9,6 +9,7 @@ import CreateDeskForm from '../components/CreateDeskForm'
 import ImportDeskForm from '../components/ImportDeskForm'
 import BaseDeploymentPanel from '../components/BaseDeploymentPanel'
 import DeskShareButton from '../components/DeskShareButton'
+import ExplorerLink from '../components/ui/ExplorerLink'
 
 const HIDDEN_DESKS_KEY = 'mosaic.hiddenDesks'
 type DeskAction = 'create' | 'import'
@@ -235,7 +236,7 @@ export default function Home() {
                   </button>
                 </div>
               </div>
-              <div className="mono muted">{d.contract_id}</div>
+              <div className="mono muted"><ExplorerLink address={d.contract_id} /></div>
               <div className="balances" style={{ marginTop: 'var(--sp-2)' }}>
                 {d.pairs.length === 0 && <span className="muted">no pairs</span>}
                 {d.pairs.map((p) => {
@@ -267,7 +268,7 @@ export default function Home() {
             <div className="hidden-desk-row" key={d.id}>
               <div>
                 <Link to={`/desk/${d.id}`}>{d.name}</Link>
-                <div className="mono muted">{d.contract_id}</div>
+                <div className="mono muted"><ExplorerLink address={d.contract_id} /></div>
               </div>
               <button type="button" onClick={() => showDesk(d.id)}>
                 Show

@@ -13,6 +13,7 @@ import { useRecovery } from '../RecoveryContext'
 import { useEthereumWallet } from '../EthereumWalletContext'
 import Field from './ui/Field'
 import ProgressSteps from './ui/ProgressSteps'
+import ExplorerLink from './ui/ExplorerLink'
 
 const STATUS_LABEL: Record<string, string> = {
   proving: 'Proving the deposit (Groth16)…',
@@ -291,7 +292,7 @@ export default function ShieldFromBaseForm({
         Network: <strong>Base Sepolia</strong>
         {config?.bridge && (
           <>
-            {' '}· Verified bridge: <span className="mono">{config.bridge}</span>
+            {' '}· Verified bridge: <ExplorerLink className="mono" address={config.bridge} />
           </>
         )}
       </div>

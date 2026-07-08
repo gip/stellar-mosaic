@@ -7,6 +7,7 @@ import { useWallet } from '../WalletContext'
 import { useStorageMode } from '../StorageModeContext'
 import { hasEnoughEth, pendingDeploymentKey, readPendingDeployment } from '../baseDeployment'
 import { newActionId, recordDeployActivity } from '../deployActivity'
+import ExplorerLink from './ui/ExplorerLink'
 
 export default function BaseDeploymentPanel({
   desk,
@@ -172,7 +173,7 @@ export default function BaseDeploymentPanel({
         <strong>Base Sepolia bridge</strong>
         <div className="muted">
           {active
-            ? <>Active · <span className="mono">{setup.bridge_address}</span></>
+            ? <>Active · <ExplorerLink className="mono" address={setup.bridge_address ?? ''} /></>
             : `Setup ${setup.status.replace('_', ' ')} · deployed by the server`}
         </div>
         <div className="muted">Assets: {setup.assets.map((asset) => `${asset.symbol} (#${asset.asset_id})`).join(', ')}</div>
@@ -196,7 +197,7 @@ export default function BaseDeploymentPanel({
       <strong>Base Sepolia bridge</strong>
       <div className="muted">
         {active
-          ? <>Active · <span className="mono">{setup.bridge_address}</span></>
+          ? <>Active · <ExplorerLink className="mono" address={setup.bridge_address ?? ''} /></>
           : `Setup ${setup.status.replace('_', ' ')} · paid by ${setup.deployer_address}`}
       </div>
       <div className="muted">Assets: {setup.assets.map((asset) => `${asset.symbol} (#${asset.asset_id})`).join(', ')}</div>
