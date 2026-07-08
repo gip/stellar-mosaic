@@ -8,6 +8,7 @@ import OrderBook from '../components/OrderBook'
 import OrderForm from '../components/OrderForm'
 import RecentTrades from '../components/RecentTrades'
 import ShieldUnshieldPanel from '../components/ShieldUnshieldPanel'
+import AllowlistPanel from '../components/AllowlistPanel'
 import CancelOrderButton from '../components/CancelOrderButton'
 import Pane from '../components/ui/Pane'
 import Tabs from '../components/ui/Tabs'
@@ -373,16 +374,28 @@ export default function DeskPage() {
   if (!desk) return <p className="muted">Loading…</p>
 
   const verifiedDesk = currentVerifiedDesk ?? lastVerifiedDesk ?? desk
-  const fundActionsDisabled =
+  const verificationDisabled =
     bookIndex.status === 'synced'
-      ? walletAllowed === false
-        ? `This desk is permissioned and your wallet is not on its allowlist. Ask the desk owner to add ${address ? `${address.slice(0, 4)}…${address.slice(-4)}` : 'your address'}.`
-        : null
+      ? null
       : bookIndex.status === 'error'
         ? `Contract verification failed: ${bookIndex.error ?? 'unknown integrity error'}`
         : bookIndex.error
           ? `Contract verification is retrying: ${bookIndex.error}`
           : 'Contract verification and event replay are still in progress.'
+  // The Stellar allowlist gates shield (depositor) and unshield (recipient) only. The Base deposit
+  // route is gated by the bridge's own 0x… allowlist (checked inside ShieldFromBaseForm), so a
+  // Stellar-side miss must not lock that tab — the two lists are independent.
+  const stellarNotAllowed =
+    walletAllowed === false
+      ? `This desk is permissioned and your wallet is not on its allowlist. Ask the desk owner to add ${address ? `${address.slice(0, 4)}…${address.slice(-4)}` : 'your address'}.`
+      : null
+  const fundActionsDisabled = verificationDisabled ?? stellarNotAllowed
+  // The desk owner manages the allowlist: trustless desks are admin'd by the creating wallet;
+  // trusted desks by the server on behalf of the recorded creator session.
+  const managesAllowlist =
+    desk.permissioned === true &&
+    !!address &&
+    (trustlessDesk ? desk.sponsor_pubkey === address : desk.creator_address === address)
   const displayDesk = currentVerifiedDesk ?? desk
   const orderDesk = currentVerifiedDesk ?? lastVerifiedDesk ?? desk
   const orderDisabledReason =
@@ -579,6 +592,12 @@ export default function DeskPage() {
               </ScrollTable>
             </details>
           </Pane>
+
+          {managesAllowlist && address && (
+            <Pane title="Allowlist">
+              <AllowlistPanel desk={desk} walletAddress={address} trustless={trustlessDesk} />
+            </Pane>
+          )}
         </div>
 
         {/* Center — order book + trade tape */}
@@ -666,6 +685,7 @@ export default function DeskPage() {
                   notes={notes}
                   userPubkey={address}
                   disabledReason={fundActionsDisabled}
+                  baseDisabledReason={verificationDisabled}
                   trustless={trustlessDesk}
                   onRecheck={bookIndex.status === 'error' ? bookIndex.recheck : undefined}
                   onDone={reloadNotes}

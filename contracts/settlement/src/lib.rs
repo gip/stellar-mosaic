@@ -245,7 +245,8 @@ pub enum Error {
     AssetNotBridgeable = 29, // shield_from_base of a Stellar-only asset (no Base route)
     AssetNotUnshieldable = 30, // unshield of a BaseRepresented asset (trade-only; no Stellar payout)
     AssetConfigInvalid = 31,   // constructor asset entry malformed (dup id, or token/kind mismatch)
-    NotAllowed = 32, // permissioned desk: address is not on the allowlist (or add_allowed on an open desk)
+    NotAllowed = 32, // permissioned desk: address is not on the allowlist
+    NotPermissioned = 33, // allowlist management on an open desk (there is no allowlist to manage)
 }
 
 /// Depth of the on-chain append-only Merkle note tree (matches the circuits' TREE_DEPTH).
@@ -1587,7 +1588,7 @@ impl Settlement {
     pub fn add_allowed(env: Env, member: Address) -> Result<(), Error> {
         Self::require_admin(&env)?;
         if !is_permissioned(&env) {
-            return Err(Error::NotAllowed);
+            return Err(Error::NotPermissioned);
         }
         add_allowed_inner(&env, &member);
         Ok(())

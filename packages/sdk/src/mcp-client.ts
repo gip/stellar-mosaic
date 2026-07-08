@@ -258,7 +258,7 @@ class HttpMcpClient implements McpClient {
   addDeskAllowed(
     deskId: string,
     body: { stellar_members?: string[]; evm_members?: string[] },
-  ): Promise<{ ok: boolean }> {
+  ): Promise<{ ok: boolean; stellar_tx_hashes: string[]; evm_tx_hashes: string[] }> {
     return this.call("add_desk_allowed", this.auth({ desk_id: deskId, ...body }));
   }
 

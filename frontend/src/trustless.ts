@@ -90,6 +90,15 @@ export async function unshieldTrustless(
   await syncRecoveryNow()
 }
 
+/** Add a member to a permissioned desk's Stellar allowlist. Trustless desks only: the connected
+ * wallet is the desk admin, so it signs `add_allowed` directly. */
+export async function addAllowedTrustless(
+  desk: Desk,
+  params: { address: string; member: string },
+): Promise<{ txHash: string }> {
+  return trustlessClient(desk, params.address).addAllowed({ deskId: desk.id, member: params.member })
+}
+
 export async function cancelOrderTrustless(
   desk: Desk,
   params: { address: string; noteId: string },

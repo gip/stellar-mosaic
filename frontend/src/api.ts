@@ -284,11 +284,12 @@ async function verifyImportedDesk(desk: Desk, networkPassphrase: string): Promis
   }
   const server = new rpc.Server(SOROBAN_RPC_URL)
   await simulateContractView(server, desk, networkPassphrase, 'root')
-  // Pre-permissioning contracts have no `permissioned` view; only enforce the match when the
-  // imported share claims the desk is permissioned (an open share on an old contract stays valid).
-  if (desk.permissioned === true) {
-    const permissioned = await simulateContractView(server, desk, networkPassphrase, 'permissioned')
-    if (permissioned !== true) throw new Error('desk permissioned flag does not match the contract')
+  // Two-sided cross-check so a share can neither hide a desk's permissioning (imports as open,
+  // user hits NotAllowed later) nor claim it falsely. Pre-permissioning contracts have no
+  // `permissioned` view — a failed simulation means an old (inherently open) desk.
+  const livePermissioned = await simulateContractView(server, desk, networkPassphrase, 'permissioned').catch(() => false)
+  if ((livePermissioned === true) !== (desk.permissioned === true)) {
+    throw new Error('desk permissioned flag does not match the contract')
   }
   const pairCount = await simulateContractView(server, desk, networkPassphrase, 'pair_count')
   if (typeof pairCount !== 'number' && typeof pairCount !== 'bigint') throw new Error('pair_count simulation returned an invalid value')
@@ -387,6 +388,10 @@ export const api = {
   /** May `address` shield / receive an unshield on this desk? Always true on open desks. */
   isAllowed: (mode: StorageMode, id: string, address: string) =>
     wrap(async () => isAllowedOnDesk(await getDesk(mode, id), address)),
+  /** Trusted mode: ask the server (which holds the desk admin + bridge owner keys) to add members
+   * to a permissioned desk's allowlists. Creator-only; add-only. */
+  addDeskAllowed: (deskId: string, body: { stellar_members?: string[]; evm_members?: string[] }) =>
+    wrap(() => mcp.addDeskAllowed!(deskId, body)),
   importDeskShare: (share: string) => wrap(async () => {
     const { desk, networkPassphrase } = await parseDeskShare(share)
     await verifyImportedDesk(desk, networkPassphrase)

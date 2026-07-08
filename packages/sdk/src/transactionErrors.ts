@@ -29,11 +29,17 @@ export function contractErrorCode(error: unknown): number | null {
 
 /** Settlement `Error::NotAllowed` — the desk is permissioned and the address is not allowlisted. */
 const NOT_ALLOWED_CODE = 32;
+/** Settlement `Error::NotPermissioned` — allowlist management attempted on an open desk. */
+const NOT_PERMISSIONED_CODE = 33;
 
 export function transactionErrorMessage(error: unknown, call?: ContractCall): string {
   const text = normalizedText(error);
-  if (contractErrorCode(error) === NOT_ALLOWED_CODE) {
+  const code = contractErrorCode(error);
+  if (code === NOT_ALLOWED_CODE) {
     return "This desk is permissioned and the address is not on its allowlist. Ask the desk owner to add it.";
+  }
+  if (code === NOT_PERMISSIONED_CODE) {
+    return "This desk is open (not permissioned), so it has no allowlist to manage.";
   }
   if (
     text.includes("trustline entry is missing") ||

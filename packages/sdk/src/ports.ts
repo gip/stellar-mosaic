@@ -240,7 +240,7 @@ export interface McpClient {
   addDeskAllowed?(
     deskId: string,
     body: { stellar_members?: string[]; evm_members?: string[] },
-  ): Promise<{ ok: boolean }>;
+  ): Promise<{ ok: boolean; stellar_tx_hashes: string[]; evm_tx_hashes: string[] }>;
   baseDeploymentConfig(): Promise<BaseDeploymentConfig>;
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk>;
   retryBaseDeployment(id: string): Promise<Desk>;

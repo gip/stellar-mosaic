@@ -111,10 +111,14 @@ path is unchanged). On a permissioned desk only allowlisted addresses may `shiel
 receive an `unshield`; the paired `MosaicBridge` gates `msg.sender` with its own 0x… allowlist. The
 mode is immutable; membership is add-only via the admin-signed `add_allowed` (no removal — a removed
 member's notes would be stranded behind the unshield gate). Trusted mode: `create_desk` accepts
-`permissioned` + `allowlist` (G…) + `base_allowlist` (0x…), and the `add_desk_allowed` MCP tool
-(desk-creator session only) adds members later via the sponsor/deployer keys. Trustless mode: the
-creator's own wallet is the Stellar admin and bridge owner (`client.addAllowed` / `desk allow` in
-the CLI, `addAllowed(address)` on the bridge). See `architecture.md` for the gate placement.
+`permissioned` + `allowlist` (G…) + `base_allowlist` (0x…) and always seeds the creator's own wallet
+onto the Stellar allowlist (the on-chain admin is the server sponsor, so the creator would otherwise
+deploy a desk they cannot use); the `add_desk_allowed` MCP tool (desk-creator session only) adds
+members later via the sponsor/deployer keys — surfaced as the desk page's "Allowlist" pane and
+`desk allow --mcp <url>` in the CLI. Trustless mode: the creator's own wallet is the Stellar admin
+and bridge owner (`client.addAllowed` / `desk allow` in the CLI, `addAllowed(address)` on the
+bridge; the same "Allowlist" pane signs with the connected wallets). See `architecture.md` for the
+gate placement.
 
 **Dual-wallet and Base deployment.** Freighter on Stellar Testnet remains the login identity;
 MetaMask is an optional Base Sepolia transaction wallet and cannot connect in the app until Stellar

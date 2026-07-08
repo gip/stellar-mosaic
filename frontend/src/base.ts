@@ -63,6 +63,13 @@ const bridgeAbi = [
     outputs: [{ name: 'depositId', type: 'uint64' }],
   },
   {
+    type: 'function',
+    name: 'addAllowed',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'member', type: 'address' }],
+    outputs: [],
+  },
+  {
     type: 'event',
     name: 'Shielded',
     inputs: [
@@ -435,6 +442,23 @@ export async function baseBridgeAllowed(bridge: Address, account: Address): Prom
   } catch {
     return true
   }
+}
+
+/** Owner-signed `addAllowed` on a permissioned bridge (trustless desks: the connected EVM wallet
+ * is the bridge owner). Add-only, mirroring the Stellar allowlist. */
+export async function baseBridgeAddAllowed(bridge: Address, member: Address, account: Address): Promise<Hex> {
+  const transport = custom(eth())
+  const wallet = createWalletClient({ account, chain: baseSepolia, transport })
+  const pub = createPublicClient({ chain: baseSepolia, transport })
+  const txHash = await wallet.writeContract({
+    address: bridge,
+    abi: bridgeAbi,
+    functionName: 'addAllowed',
+    args: [member],
+  })
+  const receipt = await pub.waitForTransactionReceipt({ hash: txHash })
+  if (receipt.status !== 'success') throw new Error(`addAllowed reverted (tx ${txHash}).`)
+  return txHash
 }
 
 /** approve(bridge, amount) then shield(assetId, amount, ownerTag); returns the deposit id. */

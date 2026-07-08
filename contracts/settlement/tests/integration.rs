@@ -750,7 +750,7 @@ fn add_allowed_rejects_open_desk() {
     let err = env
         .as_contract(&id, || Settlement::add_allowed(env.clone(), member.clone()))
         .expect_err("open desk has no allowlist");
-    assert_eq!(err as u32, Error::NotAllowed as u32);
+    assert_eq!(err as u32, Error::NotPermissioned as u32);
 }
 
 #[test]

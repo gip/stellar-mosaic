@@ -94,7 +94,8 @@ The gate covers exactly the custody entry/exit routes, per chain:
 Orders, settlement, cancel, and join are **not** gated — they move value inside the shielded pool.
 Privacy is unaffected: shield/unshield entry and exit addresses were never anonymous (the depositor
 signs the tx; the payout recipient is public). Views: `permissioned()`, `is_allowed(addr)` (always
-true on an open desk); event `allowadd`; error `NotAllowed = 32`. Allowlist entries are persistent,
+true on an open desk); event `allowadd`; errors `NotAllowed = 32` (gate miss) and
+`NotPermissioned = 33` (allowlist management on an open desk). Allowlist entries are persistent,
 fund-critical storage — bumped on write and on every successful gate pass, with a permissionless
 `keep_alive_allowed` heartbeat. This ships the plaintext-address variant of the WS5.2 "KYC desk"
 (`shared-merkle-tree.md`); the in-circuit credential variants remain future work.
