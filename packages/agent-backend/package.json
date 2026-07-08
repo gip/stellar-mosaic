@@ -1,0 +1,44 @@
+{
+  "name": "@mosaic/agent-backend",
+  "version": "0.0.0",
+  "description": "Stellar Mosaic agent backend: master/runner/agent auth, agent-identity registry, sealed key bundles, per-agent data, and XMTP session-log ingest + serving.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "mosaic-agent-backend": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "scripts"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "postinstall": "node scripts/fix-xmtp.mjs",
+    "start": "node dist/bin.js",
+    "test": "tsc -b && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@mosaic/agent-sdk": "workspace:*",
+    "@mosaic/sdk": "workspace:*",
+    "@stellar/stellar-sdk": "^16.0.1",
+    "@xmtp/node-sdk": "^6.0.0",
+    "viem": "^2.53.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.3",
+    "typescript": "~6.0.2"
+  }
+}

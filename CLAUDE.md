@@ -51,7 +51,23 @@ does, the committed image ID and the on-chain config must be regenerated togethe
   owns finality + `shield_from_base`. `backend/vks/` + `backend/artifacts/` remain the canonical VK
   and wasm/ABI outputs consumed by scripts, the SDK, and the frontend.
 - `frontend/` — Vite/React/TypeScript web client. Wallet login (Freighter), shield, order book,
-  in-browser Noir proving (`@noir-lang/noir_js` + `@aztec/bb.js`).
+  in-browser Noir proving (`@noir-lang/noir_js` + `@aztec/bb.js`), and the **Agents** console
+  (derive/configure/start-stop agents, runner credentials, session-log viewer). The trust-mode
+  selector is three-way: Trusted (Mosaic Server-backed), Trustless (browser-local), and Agent
+  (console-only — trading pages hidden, talks only to the agent backend, never the Mosaic MCP).
+- `packages/agent-sdk/` (`@mosaic/agent-sdk`) — deterministic wallet-derived agent identities
+  (wallet signature → HKDF tree; golden-vector tests freeze the scheme) + the npx-runnable daemon:
+  `OPENAI_API_KEY=... MOSAIC_IDENTITY=... npx @mosaic/agent-sdk start` reconciles web-toggled
+  agents into child processes running the generic trading runtime (adapted from `agents/`). The
+  `./derive` subpath is the browser-safe surface the frontend uses.
+- `packages/agent-backend/` (`@mosaic/agent-backend`) — standalone agent-backend **MCP** service
+  (Streamable HTTP at `/mcp`, default `127.0.0.1:8791`): master/runner/agent challenge auth
+  (session token as a tool argument), agent registry (public keys only), X25519-sealed key bundles
+  per runner, per-agent data, and the XMTP inbox worker that ingests `agent-log/v1` session-log
+  DMs. Plain-REST carve-outs: `GET /healthz` and the browser-linkable `GET /v1/logs/public` feed.
+  Copies MCP store/auth/transport patterns; shares no runtime/db with the MCP or the Rust
+  `backend/`. All clients go through `AgentBackendClient` (`@mosaic/agent-sdk`), whose typed error
+  body preserves REST-era status codes (the runner daemon re-auths on 401).
 - `evm/` — Foundry project. `MosaicBridge.sol`: the Base-side one-way peg that emits a `Shielded`
   event a RISC Zero/Steel proof later attests so Stellar mints the note.
 - `bridge-prover/` — RISC Zero zkVM workspace (`host` + `methods`) that proves a Base deposit
@@ -94,7 +110,9 @@ pnpm --filter frontend dev     # vite dev server
 pnpm --filter frontend build   # tsc -b && vite build
 pnpm --filter frontend lint    # eslint
 ```
-The TypeScript packages (`@mosaic/sdk`, `@mosaic/cli`, `@mosaic/mcp`) build with `pnpm -r build`.
+The TypeScript packages (`@mosaic/sdk`, `@mosaic/cli`, `@mosaic/mcp`, `@mosaic/agent-sdk`,
+`@mosaic/agent-backend`) build with `pnpm -r build`; the two agent packages have offline test
+suites (`pnpm --filter @mosaic/agent-sdk test`, `pnpm --filter @mosaic/agent-backend test`).
 
 **EVM (Foundry):** `cd evm && forge build && forge test`. Needs `BASE_SEPOLIA_RPC_URL` /
 `BASESCAN_API_KEY` env for `base_sepolia` RPC/etherscan.

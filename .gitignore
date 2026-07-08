@@ -34,6 +34,12 @@ packages/mcp/*.db
 packages/mcp/*.db-shm
 packages/mcp/*.db-wal
 
+# Agent-backend / agent-daemon local runtime state (SQLite stores + encrypted XMTP dbs)
+packages/agent-backend/*.db*
+mosaic-agent-backend.db*
+mosaic-agent-xmtp.db3*
+.mosaic-agent/
+
 # bridge-prover proof artifacts (seal.hex / journal.hex emitted by `host --prove`)
 bridge-prover/out/
 
