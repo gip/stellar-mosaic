@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { errorMessage } from '@mosaic/sdk'
 import { ensureBackendSession } from './auth'
 import { useWallet } from './WalletContext'
@@ -52,6 +52,13 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
   })
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Wallet address whose trusted-session attempt failed (MCP unreachable, auth error). While set,
+  // the login auto-promotion below must not push this wallet back into Trusted mode — with the
+  // server down the forced trustless fallback and the promotion would otherwise oscillate the mode
+  // forever, re-rendering the app and hammering the dead server on every flip. Cleared on a
+  // successful session; a different address never matches, so a new login retries Trusted, and the
+  // explicit toggle (`setMode('trusted')`) always retries.
+  const sessionFailedFor = useRef<string | null>(null)
 
   useEffect(() => {
     setRecoveryMode(mode)
@@ -83,6 +90,7 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
     if (!wallet.ready || !wallet.address) return
     if (mode === 'trusted') return
     if (storedMode() === 'trustless') return
+    if (sessionFailedFor.current === wallet.address) return
     let active = true
     queueMicrotask(() => {
       if (!active) return
@@ -104,19 +112,21 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
       ensureBackendSession(wallet.address!, wallet.networkPassphrase!)
         .then(async () => {
           if (!active) return
+          sessionFailedFor.current = null
           setRecoveryMode('trusted')
           setRecoveryBackendEnabled(true)
           await syncRecoveryNow().catch(() => {})
         })
         .catch((e) => {
           if (!active) return
+          sessionFailedFor.current = wallet.address
           setRecoveryMode('trustless')
           setRecoveryBackendEnabled(false)
           resetApiCaches()
           // In-memory only: a session failure is a forced fallback, not a user choice, so the
           // trusted default still applies at the next login.
           setModeState('trustless')
-          setError(errorMessage(e))
+          setError(`Mosaic server is unreachable — staying in Trustless mode. (${errorMessage(e)})`)
         })
         .finally(() => {
           if (active) setConnecting(false)
@@ -137,6 +147,7 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
           throw new Error('Connect Freighter on Stellar Testnet first.')
         }
         await ensureBackendSession(wallet.address, wallet.networkPassphrase)
+        sessionFailedFor.current = null
         setRecoveryMode(next)
         setRecoveryBackendEnabled(true)
         await syncRecoveryNow().catch(() => {})
@@ -149,7 +160,10 @@ export function StorageModeProvider({ children }: { children: ReactNode }) {
       persistMode(next)
       window.dispatchEvent(new CustomEvent('mosaic-storage-mode-changed', { detail: { mode: next } }))
     } catch (e) {
-      if (next === 'trusted') setRecoveryBackendEnabled(false)
+      if (next === 'trusted') {
+        sessionFailedFor.current = wallet.address
+        setRecoveryBackendEnabled(false)
+      }
       setError(errorMessage(e))
       throw e
     } finally {
