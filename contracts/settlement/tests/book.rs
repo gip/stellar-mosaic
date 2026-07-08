@@ -63,6 +63,7 @@ fn deploy(env: &Env, assets: Vec<AssetInit>, pairs: Vec<PairDef>) -> Address {
             admin,
             assets,
             pairs,
+            None::<Vec<Address>>,
         ),
     )
 }

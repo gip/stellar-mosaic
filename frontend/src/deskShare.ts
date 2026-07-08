@@ -16,6 +16,8 @@ type DeskSharePayload = {
   assets: Desk['assets']
   pairs: Desk['pairs']
   base_deployment: Desk['base_deployment']
+  /** Optional for backwards compatibility: shares minted before desk permissioning omit it. */
+  permissioned?: boolean
 }
 
 export class DeskShareError extends Error {}
@@ -121,6 +123,9 @@ function decodePayload(value: unknown): DeskSharePayload {
   }
   const record = value as Record<string, unknown>
   if (record.version !== 1) throw new DeskShareError('Unsupported desk share version.')
+  if (record.permissioned !== undefined && typeof record.permissioned !== 'boolean') {
+    throw new DeskShareError('Desk share has an invalid permissioned flag.')
+  }
   if (!Array.isArray(record.assets) || record.assets.length === 0) {
     throw new DeskShareError('Desk share must include at least one asset.')
   }
@@ -136,6 +141,7 @@ function decodePayload(value: unknown): DeskSharePayload {
     assets: record.assets.map(assertAsset),
     pairs: record.pairs.map(assertPair),
     base_deployment: (record.base_deployment ?? null) as Desk['base_deployment'],
+    permissioned: record.permissioned === true,
   }
 }
 
@@ -151,6 +157,7 @@ export async function encodeDeskShare(desk: Desk, networkPassphrase: string): Pr
     assets: desk.assets,
     pairs: desk.pairs,
     base_deployment: desk.base_deployment,
+    permissioned: desk.permissioned === true,
   }
   const json = JSON.stringify(payload)
   const body = bytesToBase64Url(new TextEncoder().encode(json))
@@ -184,6 +191,7 @@ export async function parseDeskShare(input: string): Promise<{ desk: Desk; netwo
       assets: payload.assets,
       pairs: payload.pairs,
       base_deployment: payload.base_deployment,
+      permissioned: payload.permissioned === true,
     },
   }
 }

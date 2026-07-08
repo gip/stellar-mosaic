@@ -62,8 +62,19 @@ fn deploy(env: &Env) -> (Address, Address) {
     deploy_cfg(env, Vec::new(env), Vec::new(env))
 }
 
-/// Deploy with an explicit, immutable asset/pair config supplied to the constructor.
+/// Deploy with an explicit, immutable asset/pair config supplied to the constructor (open desk).
 fn deploy_cfg(env: &Env, assets: Vec<AssetInit>, pairs: Vec<PairDef>) -> (Address, Address) {
+    deploy_cfg_allow(env, assets, pairs, None)
+}
+
+/// Like `deploy_cfg` but with the optional constructor allowlist: `None` = open desk,
+/// `Some(members)` = permissioned desk seeded with `members`.
+fn deploy_cfg_allow(
+    env: &Env,
+    assets: Vec<AssetInit>,
+    pairs: Vec<PairDef>,
+    allowlist: Option<Vec<Address>>,
+) -> (Address, Address) {
     let admin = Address::generate(env);
     let id = env.register(
         Settlement,
@@ -75,6 +86,7 @@ fn deploy_cfg(env: &Env, assets: Vec<AssetInit>, pairs: Vec<PairDef>) -> (Addres
             admin.clone(),
             assets,
             pairs,
+            allowlist,
         ),
     );
     (id, admin)
@@ -617,6 +629,143 @@ fn unshield_rejects_unknown_root() {
         })
         .expect_err("unknown root");
     assert_eq!(err as u32, Error::UnknownRoot as u32);
+}
+
+// ===========================================================================
+// Optional desk permissioning: a desk constructed with an allowlist gates shield (depositor)
+// and unshield (recipient); open desks (allowlist = None) are unaffected. Add-only membership.
+// ===========================================================================
+
+#[test]
+fn open_desk_is_unpermissioned_and_allows_anyone() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let client = SettlementClient::new(&env, &id);
+    assert!(!client.permissioned());
+    assert!(client.is_allowed(&Address::generate(&env)));
+}
+
+#[test]
+fn permissioned_shield_gates_on_allowlist() {
+    let env = test_env();
+    let (a1, token, holder) = funded_asset(&env, ASSET_1, AMOUNT_A);
+    let stranger = Address::generate(&env);
+    let (id, _admin) = deploy_cfg_allow(
+        &env,
+        vec![&env, a1],
+        Vec::new(&env),
+        Some(vec![&env, holder.clone()]),
+    );
+    let client = SettlementClient::new(&env, &id);
+    assert!(client.permissioned());
+    assert!(client.is_allowed(&holder));
+    assert!(!client.is_allowed(&stranger));
+
+    // The stranger is rejected before any token movement.
+    let err = env
+        .as_contract(&id, || {
+            Settlement::shield(
+                env.clone(),
+                stranger.clone(),
+                ASSET_1,
+                AMOUNT_A,
+                tag(&env, OTAG_A),
+            )
+        })
+        .expect_err("stranger shield");
+    assert_eq!(err as u32, Error::NotAllowed as u32);
+
+    // The seeded member shields normally.
+    client.shield(&holder, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
+    assert_eq!(TokenClient::new(&env, &token).balance(&id), AMOUNT_A);
+}
+
+#[test]
+fn permissioned_unshield_pays_allowlisted_recipient() {
+    // Same flow as `unshield_pays_bound_recipient`, on a desk whose allowlist holds the depositor
+    // and the proof-bound recipient: the existing fixture proof must verify unchanged.
+    let env = test_env();
+    let (a1, token, holder) = funded_asset(&env, ASSET_1, AMOUNT_U);
+    let to = Address::from_string(&String::from_str(&env, UNSHIELD_TO));
+    let (id, _admin) = deploy_cfg_allow(
+        &env,
+        vec![&env, a1],
+        Vec::new(&env),
+        Some(vec![&env, holder.clone(), to.clone()]),
+    );
+    let client = SettlementClient::new(&env, &id);
+    client.shield(&holder, &ASSET_1, &AMOUNT_U, &tag(&env, OTAG_U));
+    client.unshield(&to, &bytes(&env, UNSHIELD_PROOF), &bytes(&env, UNSHIELD_PI));
+    assert_eq!(TokenClient::new(&env, &token).balance(&to), AMOUNT_U);
+}
+
+#[test]
+fn permissioned_unshield_rejects_disallowed_recipient_before_verifying() {
+    let env = test_env();
+    // Permissioned desk with an empty allowlist: every recipient is disallowed. The gate runs
+    // before proof verification, so a garbage proof suffices to exercise the reject path.
+    let (id, _admin) =
+        deploy_cfg_allow(&env, Vec::new(&env), Vec::new(&env), Some(Vec::new(&env)));
+    let to = Address::from_string(&String::from_str(&env, UNSHIELD_TO));
+    let err = env
+        .as_contract(&id, || {
+            Settlement::unshield(env.clone(), to.clone(), Bytes::new(&env), Bytes::new(&env))
+        })
+        .expect_err("disallowed recipient");
+    assert_eq!(err as u32, Error::NotAllowed as u32);
+}
+
+#[test]
+fn add_allowed_unlocks_member_and_requires_admin() {
+    let env = test_env();
+    let (a1, _token, holder) = funded_asset(&env, ASSET_1, AMOUNT_A);
+    let (id, admin) = deploy_cfg_allow(&env, vec![&env, a1], Vec::new(&env), Some(Vec::new(&env)));
+    let client = SettlementClient::new(&env, &id);
+    assert!(!client.is_allowed(&holder));
+    let err = env
+        .as_contract(&id, || {
+            Settlement::shield(
+                env.clone(),
+                holder.clone(),
+                ASSET_1,
+                AMOUNT_A,
+                tag(&env, OTAG_A),
+            )
+        })
+        .expect_err("not yet allowed");
+    assert_eq!(err as u32, Error::NotAllowed as u32);
+
+    client.add_allowed(&holder);
+    // The call demanded the stored admin's authorization (mock_all_auths recorded it).
+    assert_eq!(env.auths()[0].0, admin);
+    assert!(client.is_allowed(&holder));
+    client.shield(&holder, &ASSET_1, &AMOUNT_A, &tag(&env, OTAG_A));
+}
+
+#[test]
+fn add_allowed_rejects_open_desk() {
+    let env = test_env();
+    let (id, _admin) = deploy(&env);
+    let member = Address::generate(&env);
+    let err = env
+        .as_contract(&id, || Settlement::add_allowed(env.clone(), member.clone()))
+        .expect_err("open desk has no allowlist");
+    assert_eq!(err as u32, Error::NotPermissioned as u32);
+}
+
+#[test]
+fn keep_alive_allowed_bumps_members_and_skips_missing() {
+    let env = test_env();
+    let member = Address::generate(&env);
+    let (id, _admin) = deploy_cfg_allow(
+        &env,
+        Vec::new(&env),
+        Vec::new(&env),
+        Some(vec![&env, member.clone()]),
+    );
+    // Bumping an existing member and a never-added address must both be no-panic.
+    SettlementClient::new(&env, &id)
+        .keep_alive_allowed(&vec![&env, member, Address::generate(&env)]);
 }
 
 #[test]

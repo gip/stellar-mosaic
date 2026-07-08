@@ -33,6 +33,11 @@ contract MosaicBridgeTest is Test {
         address from
     );
     event AssetRegistered(uint32 indexed assetId, address indexed token);
+    event AllowedAdded(address indexed member);
+
+    function _none() internal pure returns (address[] memory) {
+        return new address[](0);
+    }
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -40,7 +45,7 @@ contract MosaicBridgeTest is Test {
         address[] memory tokens = new address[](1);
         assetIds[0] = USDC_ASSET_ID;
         tokens[0] = address(usdc);
-        bridge = new MosaicBridge(admin, assetIds, tokens);
+        bridge = new MosaicBridge(admin, assetIds, tokens, false, _none());
 
         usdc.mint(alice, 1_000_000_000); // 1,000 USDC (6 dp)
         vm.prank(alice);
@@ -81,7 +86,7 @@ contract MosaicBridgeTest is Test {
         tokens[0] = address(usdc);
         tokens[1] = address(second);
 
-        MosaicBridge deployed = new MosaicBridge(admin, assetIds, tokens);
+        MosaicBridge deployed = new MosaicBridge(admin, assetIds, tokens, false, _none());
         assertEq(deployed.owner(), admin);
         assertEq(deployed.assetToken(7), address(usdc));
         assertEq(deployed.assetToken(8), address(second));
@@ -91,7 +96,7 @@ contract MosaicBridgeTest is Test {
         uint32[] memory assetIds = new uint32[](1);
         address[] memory tokens = new address[](0);
         vm.expectRevert(MosaicBridge.InvalidAssetArrays.selector);
-        new MosaicBridge(admin, assetIds, tokens);
+        new MosaicBridge(admin, assetIds, tokens, false, _none());
     }
 
     function test_constructor_rejectsDuplicateAssetIds() public {
@@ -102,7 +107,7 @@ contract MosaicBridgeTest is Test {
         tokens[0] = address(usdc);
         tokens[1] = address(0xBEEF);
         vm.expectRevert(abi.encodeWithSelector(MosaicBridge.AssetAlreadyRegistered.selector, uint32(7)));
-        new MosaicBridge(admin, assetIds, tokens);
+        new MosaicBridge(admin, assetIds, tokens, false, _none());
     }
 
     function test_constructor_rejectsZeroToken() public {
@@ -110,7 +115,7 @@ contract MosaicBridgeTest is Test {
         address[] memory tokens = new address[](1);
         assetIds[0] = 7;
         vm.expectRevert(MosaicBridge.ZeroToken.selector);
-        new MosaicBridge(admin, assetIds, tokens);
+        new MosaicBridge(admin, assetIds, tokens, false, _none());
     }
 
     // ---- shield happy path ----
@@ -287,5 +292,107 @@ contract MosaicBridgeTest is Test {
         bridge.shield(7, requested, OWNER_TAG);
 
         assertEq(fee.balanceOf(address(bridge)), expectedReceived);
+    }
+
+    // ---- optional permissioning: owner-managed, add-only deposit allowlist ----
+
+    address bob = makeAddr("bob");
+
+    function _permissionedBridge(address[] memory members) internal returns (MosaicBridge) {
+        uint32[] memory assetIds = new uint32[](1);
+        address[] memory tokens = new address[](1);
+        assetIds[0] = USDC_ASSET_ID;
+        tokens[0] = address(usdc);
+        MosaicBridge p = new MosaicBridge(admin, assetIds, tokens, true, members);
+        usdc.mint(alice, 1_000_000_000);
+        vm.prank(alice);
+        usdc.approve(address(p), type(uint256).max);
+        return p;
+    }
+
+    function test_constructor_seedsAllowlistAndEmits() public {
+        address[] memory members = new address[](1);
+        members[0] = alice;
+        vm.expectEmit(true, false, false, false);
+        emit AllowedAdded(alice);
+        MosaicBridge p = _permissionedBridge(members);
+        assertTrue(p.permissioned());
+        assertTrue(p.allowed(alice));
+        assertFalse(p.allowed(bob));
+    }
+
+    function test_constructor_rejectsMembersOnOpenBridge() public {
+        uint32[] memory assetIds = new uint32[](0);
+        address[] memory tokens = new address[](0);
+        address[] memory members = new address[](1);
+        members[0] = alice;
+        vm.expectRevert(MosaicBridge.NotPermissioned.selector);
+        new MosaicBridge(admin, assetIds, tokens, false, members);
+    }
+
+    function test_permissioned_shield_gatesOnAllowlist() public {
+        address[] memory members = new address[](1);
+        members[0] = alice;
+        MosaicBridge p = _permissionedBridge(members);
+
+        // Member deposits normally.
+        vm.prank(alice);
+        uint64 id = p.shield(USDC_ASSET_ID, 1_000_000, OWNER_TAG);
+        assertEq(id, 0);
+
+        // A stranger is rejected before any token movement.
+        usdc.mint(bob, 1_000_000);
+        vm.startPrank(bob);
+        usdc.approve(address(p), type(uint256).max);
+        vm.expectRevert(abi.encodeWithSelector(MosaicBridge.NotAllowed.selector, bob));
+        p.shield(USDC_ASSET_ID, 1_000_000, OWNER_TAG);
+        vm.stopPrank();
+    }
+
+    function test_permissioned_shieldNative_gatesOnAllowlist() public {
+        MosaicBridge p = _permissionedBridge(_none());
+        vm.prank(admin);
+        p.registerAsset(ETH_ASSET_ID, NATIVE);
+        vm.deal(bob, 1 ether);
+        vm.expectRevert(abi.encodeWithSelector(MosaicBridge.NotAllowed.selector, bob));
+        vm.prank(bob);
+        p.shieldNative{value: 1 ether}(ETH_ASSET_ID, OWNER_TAG);
+    }
+
+    function test_addAllowed_unlocksMember_onlyOwner() public {
+        MosaicBridge p = _permissionedBridge(_none());
+        assertFalse(p.allowed(alice));
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        vm.prank(alice);
+        p.addAllowed(alice);
+
+        vm.expectEmit(true, false, false, false);
+        emit AllowedAdded(alice);
+        vm.prank(admin);
+        p.addAllowed(alice);
+        assertTrue(p.allowed(alice));
+
+        vm.prank(alice);
+        uint64 id = p.shield(USDC_ASSET_ID, 1_000_000, OWNER_TAG);
+        assertEq(id, 0);
+    }
+
+    function test_addAllowed_rejectsOpenBridge() public {
+        vm.expectRevert(MosaicBridge.NotPermissioned.selector);
+        vm.prank(admin);
+        bridge.addAllowed(alice);
+    }
+
+    function test_addAllowed_rejectsZeroAddress() public {
+        MosaicBridge p = _permissionedBridge(_none());
+        vm.expectRevert(abi.encodeWithSelector(MosaicBridge.NotAllowed.selector, address(0)));
+        vm.prank(admin);
+        p.addAllowed(address(0));
+    }
+
+    function test_openBridge_isUnaffectedByPermissioning() public view {
+        assertFalse(bridge.permissioned());
+        assertFalse(bridge.allowed(alice)); // mapping unused on an open bridge; shield tests prove deposits work
     }
 }

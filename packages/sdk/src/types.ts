@@ -62,6 +62,9 @@ export interface DeskConfig {
   assets: AssetDef[];
   pairs: PairDef[];
   baseDeployment?: BaseDeployment | null;
+  /** Desk gates shield/unshield behind an admin-managed, add-only allowlist. Immutable, chosen at
+   * deploy time; absent = open desk. Membership lives on-chain (`is_allowed`), not in the registry. */
+  permissioned?: boolean;
 }
 
 export type NoteRole = "asset" | "order-output" | "order-cancel";
@@ -197,6 +200,9 @@ export interface BaseDeployment {
   /** When true, the base-shield worker waits for Base L1 finality before minting. Default false
    * (absent is treated as false): mint as soon as the deposit is proven, accepting Base reorg risk. */
   require_finality?: boolean;
+  /** Initial Base (0x…) allowlist seeded into a permissioned desk's bridge constructor. Kept so a
+   * failed deploy can be retried with the same seed; live membership is on-chain (`allowed`). */
+  allowlist?: string[];
 }
 
 export interface Desk {
@@ -208,6 +214,12 @@ export interface Desk {
   assets: AssetDef[];
   pairs: PairDef[];
   base_deployment: BaseDeployment | null;
+  /** Desk gates shield/unshield behind an admin-managed, add-only allowlist. Immutable, chosen at
+   * deploy time; absent = open desk (pre-feature desk records have no flag). Membership lives
+   * on-chain (`is_allowed` on Stellar, `allowed` on the Base bridge), not in the registry. */
+  permissioned?: boolean;
+  /** Session address that created the desk (Trusted mode). Authorizes `add_desk_allowed`. */
+  creator_address?: string | null;
 }
 
 export interface BaseDeploymentConfig {

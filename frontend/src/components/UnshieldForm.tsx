@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { errorMessage } from '@mosaic/sdk'
 import { StrKey } from '@stellar/stellar-sdk'
-import type { Desk } from '../api'
+import { api, type Desk } from '../api'
+import { useStorageMode } from '../StorageModeContext'
 import { toRaw, formatAmount } from '../amount'
 import { maxIn, planAssembly } from '../orderPlan'
 import type { Note } from '../notes'
@@ -45,6 +46,7 @@ export default function UnshieldForm({
   const [error, setError] = useState<string | null>(null)
   const recovery = useRecovery()
   const activity = useActivity()
+  const storageMode = useStorageMode()
   const recoveryReady = recovery.unlocked && !recovery.error
 
   const asset = desk.assets.find((a) => a.asset_id === assetId)
@@ -97,6 +99,18 @@ export default function UnshieldForm({
     setError(null)
     setStatus(null)
     try {
+      // On a permissioned desk the contract gates the recipient before verifying the proof, so a
+      // disallowed recipient is safe — but the full in-browser UltraHonk prove (and any assembly
+      // steps before it) would be wasted. Reject with the same message for free instead.
+      if (desk.permissioned === true) {
+        setStatus('Checking the recipient against the desk allowlist…')
+        const allowed = await api.isAllowed(storageMode.mode, desk.id, recipient.trim()).catch(() => true)
+        if (!allowed) {
+          throw new Error(
+            'This desk is permissioned and the recipient is not on its allowlist. Ask the desk owner to add it.',
+          )
+        }
+      }
       if (trustless) {
         setStatus('Proving & submitting in browser…')
         await unshieldTrustless(desk, {

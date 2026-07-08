@@ -91,6 +91,7 @@ fn deploy_cfg(env: &Env, assets: Vec<AssetInit>) -> (Address, Address) {
             admin.clone(),
             assets,
             Vec::<settlement::PairDef>::new(env),
+            None::<soroban_sdk::Vec<Address>>,
         ),
     );
     (id, admin)

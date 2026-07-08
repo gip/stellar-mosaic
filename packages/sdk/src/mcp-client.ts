@@ -248,8 +248,18 @@ class HttpMcpClient implements McpClient {
     base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] };
     /** Wait for Base L1 finality before minting shielded notes. Default false. */
     require_finality?: boolean;
+    permissioned?: boolean;
+    allowlist?: string[];
+    base_allowlist?: string[];
   }): Promise<Desk> {
     return this.call("create_desk", this.auth({ body }));
+  }
+
+  addDeskAllowed(
+    deskId: string,
+    body: { stellar_members?: string[]; evm_members?: string[] },
+  ): Promise<{ ok: boolean; stellar_tx_hashes: string[]; evm_tx_hashes: string[] }> {
+    return this.call("add_desk_allowed", this.auth({ desk_id: deskId, ...body }));
   }
 
   baseDeploymentConfig(): Promise<BaseDeploymentConfig> {

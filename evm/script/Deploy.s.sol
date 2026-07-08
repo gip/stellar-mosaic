@@ -47,7 +47,8 @@ contract Deploy is Script {
         }
 
         vm.startBroadcast(pk);
-        bridge = new MosaicBridge(admin, assetIds, tokens);
+        // Open bridge (no allowlist). Permissioned bridges are deployed via the desk-creation flow.
+        bridge = new MosaicBridge(admin, assetIds, tokens, false, new address[](0));
         vm.stopBroadcast();
 
         console2.log("MosaicBridge:", address(bridge));

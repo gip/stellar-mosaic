@@ -120,6 +120,12 @@ pub struct PairRegistered {
     pub quote_asset: u32,
 }
 
+/// A member was added to a permissioned desk's allowlist (constructor seeding or `add_allowed`).
+#[contractevent(topics = ["allowadd"], data_format = "vec")]
+pub struct AllowedAdded {
+    pub member: Address,
+}
+
 /// Full current value of a newly-rested or partially-filled order.
 #[contractevent(topics = ["ordupsert"], data_format = "vec")]
 pub struct OrderUpserted {
@@ -239,6 +245,8 @@ pub enum Error {
     AssetNotBridgeable = 29, // shield_from_base of a Stellar-only asset (no Base route)
     AssetNotUnshieldable = 30, // unshield of a BaseRepresented asset (trade-only; no Stellar payout)
     AssetConfigInvalid = 31,   // constructor asset entry malformed (dup id, or token/kind mismatch)
+    NotAllowed = 32, // permissioned desk: address is not on the allowlist
+    NotPermissioned = 33, // allowlist management on an open desk (there is no allowlist to manage)
 }
 
 /// Depth of the on-chain append-only Merkle note tree (matches the circuits' TREE_DEPTH).
@@ -431,6 +439,9 @@ pub enum DataKey {
     BaseBridgeAddr, // BytesN<20>: expected Base MosaicBridge address bound in the journal
     BaseBlock(u64), // block number -> attested Base block hash (relayer-attested registry)
     BaseDeposit(u64), // Base depositId -> true (single-use; prevents double-mint)
+    // --- Optional desk permissioning (see docs/architecture.md) ---
+    Permissioned,     // bool: desk gates shield/unshield behind the allowlist (set at construction)
+    Allowed(Address), // set membership: address may shield / receive unshield on this desk
 }
 
 /// A resting order in the on-chain book. Order *terms* are public (the privacy model only hides
@@ -559,6 +570,12 @@ impl Settlement {
     /// (rebinding a live asset/pair would orphan custodied balances or resting orders). `assets`
     /// declares every supported asset id with its `AssetKind`; `pairs` declares the canonical
     /// markets. Both are validated here (see `register_asset_inner`/`register_pair_inner`).
+    ///
+    /// `allowlist` makes the desk optionally permissioned: `None` = open desk (anyone may
+    /// shield/unshield, the default); `Some(members)` = permissioned — only allowlisted addresses may
+    /// shield or receive an unshield, seeded here with `members` (an empty vec is a permissioned desk
+    /// with no members yet). The mode itself is immutable (flipping an open desk to permissioned
+    /// would strand existing users' funds behind the gate); membership is add-only via `add_allowed`.
     pub fn __constructor(
         env: Env,
         lift_vk: Bytes,
@@ -568,6 +585,7 @@ impl Settlement {
         admin: Address,
         assets: Vec<AssetInit>,
         pairs: Vec<PairDef>,
+        allowlist: Option<Vec<Address>>,
     ) -> Result<(), Error> {
         let vks = [
             (LIFT_OP, lift_vk),
@@ -586,6 +604,9 @@ impl Settlement {
             hashes.push_back(hash);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::Permissioned, &allowlist.is_some());
         env.storage().persistent().set(&DataKey::BookSeq, &0u64);
         env.storage().persistent().set(&DataKey::PairCount, &0u32);
         tree_init(&env, &Hasher::new(&env));
@@ -609,6 +630,11 @@ impl Settlement {
         }
         for p in pairs.iter() {
             register_pair_inner(&env, &p)?;
+        }
+        if let Some(members) = allowlist {
+            for m in members.iter() {
+                add_allowed_inner(&env, &m);
+            }
         }
         Ok(())
     }
@@ -706,6 +732,7 @@ impl Settlement {
         owner_tag: BytesN<32>,
     ) -> Result<(), Error> {
         from.require_auth();
+        require_allowed(&env, &from)?;
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -1074,6 +1101,11 @@ impl Settlement {
     /// so a relayer can submit this without being able to redirect the funds. No caller auth is
     /// needed: the proof is the spend authority and the recipient is fixed by the proof.
     ///
+    /// On a permissioned desk the recipient must be on the allowlist. The gate runs before proof
+    /// verification (a disallowed recipient is rejected without paying the ~80M-instruction Honk
+    /// verify) and before the nullifier is recorded, so a proof bound to a disallowed recipient is
+    /// not consumed — the note owner simply re-proves to an allowed recipient.
+    ///
     /// Public inputs: [0] domain [1] root [2] nullifier [3] asset [4] amount [5] recipient.
     pub fn unshield(
         env: Env,
@@ -1081,6 +1113,7 @@ impl Settlement {
         proof_bytes: Bytes,
         public_inputs: Bytes,
     ) -> Result<(), Error> {
+        require_allowed(&env, &to)?;
         Self::verify_proof(
             &env,
             UNSHIELD_OP,
@@ -1548,6 +1581,42 @@ impl Settlement {
             }
         }
     }
+
+    /// Admin: add a member to a permissioned desk's allowlist. Membership is deliberately add-only —
+    /// there is no removal, because a removed member's shielded notes would be stranded behind the
+    /// `unshield` recipient gate. Idempotent; errors on an open desk (the gate never applies there).
+    pub fn add_allowed(env: Env, member: Address) -> Result<(), Error> {
+        Self::require_admin(&env)?;
+        if !is_permissioned(&env) {
+            return Err(Error::NotPermissioned);
+        }
+        add_allowed_inner(&env, &member);
+        Ok(())
+    }
+
+    /// Effective permission for `addr`: always true on an open desk, allowlist membership on a
+    /// permissioned one. This is what `shield` (depositor) and `unshield` (recipient) enforce.
+    pub fn is_allowed(env: Env, addr: Address) -> bool {
+        !is_permissioned(&env) || env.storage().persistent().has(&DataKey::Allowed(addr))
+    }
+
+    /// Was this desk created permissioned? Immutable after construction.
+    pub fn permissioned(env: Env) -> bool {
+        is_permissioned(&env)
+    }
+
+    /// Permissionless targeted heartbeat for the unbounded allowlist set (the companion of
+    /// `keep_alive_keys` for `Allowed` entries, which are fund-critical: they gate `unshield`).
+    /// Entries are also bumped on write and on every successful gate pass, and archived entries stay
+    /// restorable by anyone, so membership can never be lost. Missing entries are skipped.
+    pub fn keep_alive_allowed(env: Env, members: Vec<Address>) {
+        for m in members.iter() {
+            let k = DataKey::Allowed(m);
+            if env.storage().persistent().has(&k) {
+                bump(&env, &k);
+            }
+        }
+    }
 }
 
 impl Settlement {
@@ -1606,6 +1675,39 @@ fn storage_ttl(env: &Env) -> u32 {
 fn bump(env: &Env, key: &DataKey) {
     let ttl = storage_ttl(env);
     env.storage().persistent().extend_ttl(key, ttl, ttl);
+}
+
+fn is_permissioned(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Permissioned)
+        // Desks deployed before the permissioning feature have no flag stored: they are open.
+        .unwrap_or(false)
+}
+
+/// Gate a deposit-route address on a permissioned desk. Open desks pass unconditionally. On a
+/// successful pass the entry's TTL is refreshed (fund-critical: `Allowed` gates `unshield`).
+fn require_allowed(env: &Env, addr: &Address) -> Result<(), Error> {
+    if !is_permissioned(env) {
+        return Ok(());
+    }
+    let key = DataKey::Allowed(addr.clone());
+    if !env.storage().persistent().has(&key) {
+        return Err(Error::NotAllowed);
+    }
+    bump(env, &key);
+    Ok(())
+}
+
+/// Record an allowlist member (constructor seeding + `add_allowed`). Idempotent.
+fn add_allowed_inner(env: &Env, member: &Address) {
+    let key = DataKey::Allowed(member.clone());
+    env.storage().persistent().set(&key, &true);
+    bump(env, &key);
+    AllowedAdded {
+        member: member.clone(),
+    }
+    .publish(env);
 }
 
 fn kind_to_u32(k: &AssetKind) -> u32 {

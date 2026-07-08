@@ -40,6 +40,10 @@ export default function CreateDeskForm({
   // Off by default: mint Base deposits as soon as they are proven. On makes the worker wait for
   // Base L1 finality before minting (safer against a Base reorg, but adds several minutes).
   const [waitForFinality, setWaitForFinality] = useState(false)
+  // Optional permissioning: immutable at deploy; the allowlist is add-only afterwards.
+  const [permissioned, setPermissioned] = useState(false)
+  const [allowlistText, setAllowlistText] = useState('')
+  const [baseAllowlistText, setBaseAllowlistText] = useState('')
   const ethereum = useEthereumWallet()
   const canSelfFund = mode === 'trustless'
   const effectiveStellarDeployment: 'sponsored' | 'self-funded' = canSelfFund ? 'self-funded' : 'sponsored'
@@ -83,8 +87,13 @@ export default function CreateDeskForm({
       account: ethereum.address,
       assetIds: baseAssets.map((asset) => assetIdOf(asset.id)),
       tokens: baseAssets.map((asset) => baseTokenAddress(asset) as Address),
+      permissioned,
+      // Tolerant parse for the estimate only — submit() validates strictly.
+      initialAllowed: permissioned
+        ? (baseAllowlistText.split(/[\s,]+/).filter((m) => /^0x[0-9a-fA-F]{40}$/.test(m)) as Address[])
+        : [],
     }).then((value) => setEstimatedFee(value.maxFee)).catch(() => setEstimatedFee(null))
-  }, [canSelfFund, ethereum.address, ethereum.connectedToBase, effectiveDeploymentConfig, baseAssets, assetIdOf])
+  }, [canSelfFund, ethereum.address, ethereum.connectedToBase, effectiveDeploymentConfig, baseAssets, assetIdOf, permissioned, baseAllowlistText])
 
   function toggleAsset(id: string) {
     const removing = selected.includes(id)
@@ -103,6 +112,18 @@ export default function CreateDeskForm({
     setName('')
     setSelected([])
     setPairs([])
+    setPermissioned(false)
+    setAllowlistText('')
+    setBaseAllowlistText('')
+  }
+
+  /** One address per line (commas/whitespace also accepted); validated against `pattern`. */
+  function parseMembers(text: string, pattern: RegExp, label: string): string[] {
+    const members = text.split(/[\s,]+/).map((entry) => entry.trim()).filter(Boolean)
+    for (const member of members) {
+      if (!pattern.test(member)) throw new Error(`Invalid ${label} address: ${member}`)
+    }
+    return members
   }
 
   async function submit(e: React.FormEvent) {
@@ -130,6 +151,10 @@ export default function CreateDeskForm({
         symbol: asset.symbol,
         token: baseTokenAddress(asset),
       }))
+      const allowlist = permissioned ? parseMembers(allowlistText, /^G[A-Z2-7]{55}$/, 'Stellar') : undefined
+      const baseAllowlist =
+        permissioned && deployBase ? parseMembers(baseAllowlistText, /^0x[0-9a-fA-F]{40}$/, 'Base') : undefined
+      const permissioning = { permissioned: permissioned || undefined, allowlist, base_allowlist: baseAllowlist }
 
       if (effectiveStellarDeployment === 'self-funded') {
         // Trustless: the browser wallet pays, so it deploys the Stellar contract *and* the Base
@@ -140,7 +165,7 @@ export default function CreateDeskForm({
         if (deployBase && estimatedFee !== null && !hasEnoughEth(ethereum.balance, estimatedFee)) {
           throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(estimatedFee)} ETH.`)
         }
-        await api.createDeskSelfFunded({ name, assets, pairs: deskPairs, base_assets: deployBase ? baseMappings : undefined, require_finality: deployBase ? waitForFinality : undefined })
+        await api.createDeskSelfFunded({ name, assets, pairs: deskPairs, base_assets: deployBase ? baseMappings : undefined, require_finality: deployBase ? waitForFinality : undefined, ...permissioning })
         resetForm()
         onDone()
         return
@@ -149,7 +174,7 @@ export default function CreateDeskForm({
       // Trusted/sponsored: the MCP server deploys everything — the Stellar contract and the Base
       // bridge (paid by the operator sponsor key) — and records the deploy activity itself, so there
       // is nothing to sign in the browser. The returned desk already reflects the bridge status.
-      await api.createDesk({ name, assets, pairs: deskPairs, base_assets: deployBase ? baseMappings : undefined, require_finality: deployBase ? waitForFinality : undefined })
+      await api.createDesk({ name, assets, pairs: deskPairs, base_assets: deployBase ? baseMappings : undefined, require_finality: deployBase ? waitForFinality : undefined, ...permissioning })
       resetForm()
       onDone()
     } catch (e) {
@@ -297,6 +322,46 @@ export default function CreateDeskForm({
           )}
         </div>
       )}
+
+      <div className="desk-permissioning">
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0' }}>
+          <input
+            type="checkbox"
+            checked={permissioned}
+            onChange={(e) => setPermissioned(e.target.checked)}
+          />
+          Permissioned desk — only allowlisted addresses can shield and unshield
+        </label>
+        {permissioned && (
+          <>
+            <p className="muted">
+              This choice is permanent: an open desk can never become permissioned (and vice versa).
+              The allowlist is add-only — members can be added later but never removed, so a member's
+              shielded funds can always exit.
+            </p>
+            <label>Initial Stellar members — one G… address per line (can be added later)</label>
+            <textarea
+              value={allowlistText}
+              onChange={(e) => setAllowlistText(e.target.value)}
+              rows={3}
+              placeholder={'GABC…\nGDEF…'}
+              style={{ width: '100%', fontFamily: 'monospace' }}
+            />
+            {wantsBaseBridge && (
+              <>
+                <label>Initial Base members — one 0x… address per line (gates bridge deposits)</label>
+                <textarea
+                  value={baseAllowlistText}
+                  onChange={(e) => setBaseAllowlistText(e.target.value)}
+                  rows={3}
+                  placeholder={'0x1234…\n0xabcd…'}
+                  style={{ width: '100%', fontFamily: 'monospace' }}
+                />
+              </>
+            )}
+          </>
+        )}
+      </div>
 
       {error && <p className="err">{error}</p>}
       <p>

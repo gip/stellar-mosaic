@@ -169,6 +169,8 @@ function initialMeta(scope: string): BookMeta {
 interface ReleaseManifest {
   schema_version: number
   wasm_hash: string
+  /** Every released wasm hash — desks deployed from earlier releases stay verifiable. */
+  wasm_hashes?: string[]
   vk_hashes: { lift: string; unshield: string; cancel: string; join: string }
 }
 
@@ -189,6 +191,12 @@ function manifest(): Promise<ReleaseManifest> {
 
 function normalizedHash(value: string): string {
   return value.replace(/^0x/i, '').toLowerCase()
+}
+
+/** A desk's wasm is immutable, so any hash we ever released is a legitimate desk build. */
+function isReleasedWasm(release: ReleaseManifest, wasmHash: string): boolean {
+  const accepted = (release.wasm_hashes ?? [release.wasm_hash]).map(normalizedHash)
+  return accepted.includes(normalizedHash(wasmHash))
 }
 
 async function verifyRelease(
@@ -213,8 +221,8 @@ async function verifyRelease(
   const executable = data.instance().executable()
   if (executable.switch().name !== 'contractExecutableWasm') throw new BookIntegrityError('desk is not a WASM contract')
   const wasmHash = Buffer.from(executable.wasmHash()).toString('hex')
-  if (normalizedHash(wasmHash) !== normalizedHash(release.wasm_hash)) {
-    throw new BookIntegrityError('contract WASM hash does not match release manifest')
+  if (!isReleasedWasm(release, wasmHash)) {
+    throw new BookIntegrityError('contract WASM hash does not match any released build')
   }
 }
 
@@ -305,8 +313,8 @@ async function verifyLiveRelease(
   const executable = data.instance().executable()
   if (executable.switch().name !== 'contractExecutableWasm') throw new BookIntegrityError('desk is not a WASM contract')
   const wasmHash = Buffer.from(executable.wasmHash()).toString('hex')
-  if (normalizedHash(wasmHash) !== normalizedHash(release.wasm_hash)) {
-    throw new BookIntegrityError('contract WASM hash does not match release manifest')
+  if (!isReleasedWasm(release, wasmHash)) {
+    throw new BookIntegrityError('contract WASM hash does not match any released build')
   }
   return meta
 }

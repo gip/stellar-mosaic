@@ -72,6 +72,34 @@ tree note and is moved by trading, never by a Stellar transfer). The deposit-pat
 a native-ETH asset is deposited via `MosaicBridge.shieldNative` (the `NATIVE` sentinel); ERC-20s use
 `shield`. See `base-bridge.md`.
 
+### Optional desk permissioning
+
+A desk may be created **permissioned**: only allowlisted addresses can move value across the desk's
+custody boundary. The constructor takes a trailing `allowlist: Option<Vec<Address>>` — `None` = open
+desk (the default; nothing changes), `Some(members)` = permissioned, seeded with `members`. The mode
+itself is **immutable** (flipping an open desk to permissioned would strand existing users' funds
+behind the gate, the same reason assets/pairs are constructor-fixed), and membership is **add-only**
+via the admin-gated `add_allowed` — there is deliberately no removal, because a removed member's
+shielded notes would be stranded behind the unshield recipient gate.
+
+The gate covers exactly the custody entry/exit routes, per chain:
+
+- Stellar `shield`: the depositor `from` must be allowed (checked right after `from.require_auth()`).
+- Stellar `unshield`: the proof-bound recipient `to` must be allowed (checked before the proof is
+  verified, so a disallowed recipient costs no Honk verify and does not consume the nullifier).
+- Base `MosaicBridge.shield`/`shieldNative`: `msg.sender` must be on the bridge's own owner-managed
+  allowlist (a separate 0x… list — the ZK journal carries no depositor identity, so the Base leg is
+  enforced on Base; `shield_from_base` is unchanged). See `base-bridge.md`.
+
+Orders, settlement, cancel, and join are **not** gated — they move value inside the shielded pool.
+Privacy is unaffected: shield/unshield entry and exit addresses were never anonymous (the depositor
+signs the tx; the payout recipient is public). Views: `permissioned()`, `is_allowed(addr)` (always
+true on an open desk); event `allowadd`; errors `NotAllowed = 32` (gate miss) and
+`NotPermissioned = 33` (allowlist management on an open desk). Allowlist entries are persistent,
+fund-critical storage — bumped on write and on every successful gate pass, with a permissionless
+`keep_alive_allowed` heartbeat. This ships the plaintext-address variant of the WS5.2 "KYC desk"
+(`shared-merkle-tree.md`); the in-circuit credential variants remain future work.
+
 **Trading pairs** are constructor-registered in a canonical orientation (`PairDef { base, quote }`,
 e.g. `XLM/USDC`, never `USDC/XLM`). The orientation is fixed by the pair definition, so an order's
 side is well-defined regardless of how the user phrased its assets: SELL = give base / want quote, BUY

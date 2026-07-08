@@ -156,5 +156,12 @@ deployed contracts/addresses to `.e2e/state.env`. See `docs/e2e-testing.md`.
 - **Immutable config from the constructor:** the per-operation VKs (order, unshield, cancel, join)
   *and* the asset/pair set are all installed by `__constructor` and cannot be changed afterward —
   there is no `register_asset`/`register_pair` mutator.
+- **Optionally permissioned desks:** the constructor's trailing `allowlist: Option<Vec<Address>>`
+  makes a desk permissioned (`Some`) or open (`None`/omitted). The mode is immutable; membership is
+  **add-only** via the admin-gated `add_allowed` — never add a removal path (a removed member's
+  shielded notes would be stranded behind the `unshield` recipient gate). Gates: `shield`'s `from`,
+  `unshield`'s `to`, and `MosaicBridge.shield`/`shieldNative`'s `msg.sender` (a separate 0x…
+  allowlist on Base — the ZK journal carries no depositor, so the Base leg is gated on Base only;
+  `shield_from_base` is untouched). Orders/settle/cancel/join are not gated.
 - **Partial fills** exist only in the on-chain order book (exact integer "lots" of the maker's price
   ratio — no change note); `settle`/`settle_exact` are full-fill.

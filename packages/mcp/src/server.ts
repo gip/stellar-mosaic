@@ -32,6 +32,12 @@ export interface DeployHandlers {
   completeBaseDeployment(id: string, body: Record<string, unknown>, address: string): Promise<Desk>;
   retryBaseDeployment(id: string, address?: string, network?: string): Promise<Desk>;
   baseDeploymentConfig(): Promise<unknown>;
+  /** Add members to a permissioned desk's on-chain allowlists (desk creator only; add-only). */
+  addDeskAllowed?(
+    id: string,
+    body: { stellar_members?: string[]; evm_members?: string[] },
+    address: string,
+  ): Promise<{ ok: boolean; stellar_tx_hashes: string[]; evm_tx_hashes: string[] }>;
 }
 
 export interface BookHandlers {
@@ -257,6 +263,35 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
       const s = await session(auth, args);
       validateNetwork(s.network);
       return ok(await deploy.retryBaseDeployment(String(args.id), s.address, s.network));
+    },
+  );
+  reg(
+    "add_desk_allowed",
+    {
+      description:
+        "Add members to a permissioned desk's allowlists (desk creator only; add-only — there is no removal). " +
+        "`stellar_members` are G… addresses added on the settlement contract; `evm_members` are 0x… addresses added on the Base bridge.",
+      inputSchema: {
+        session: z.string(),
+        desk_id: z.string(),
+        stellar_members: z.array(z.string()).optional(),
+        evm_members: z.array(z.string()).optional(),
+      },
+    },
+    async (args) => {
+      if (!deploy.addDeskAllowed) throw new Error("allowlist management is not configured on this MCP server");
+      const s = await session(auth, args);
+      validateNetwork(s.network);
+      return ok(
+        await deploy.addDeskAllowed(
+          String(args.desk_id),
+          {
+            stellar_members: args.stellar_members as string[] | undefined,
+            evm_members: args.evm_members as string[] | undefined,
+          },
+          s.address,
+        ),
+      );
     },
   );
 

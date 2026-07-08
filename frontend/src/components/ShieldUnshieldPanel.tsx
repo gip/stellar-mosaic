@@ -12,6 +12,7 @@ export default function ShieldUnshieldPanel({
   notes,
   userPubkey,
   disabledReason,
+  baseDisabledReason,
   trustless = false,
   onRecheck,
   onDone,
@@ -20,12 +21,17 @@ export default function ShieldUnshieldPanel({
   notes: Note[]
   userPubkey: string | null
   disabledReason: string | null
+  /** Reason applying to the Base deposit tab. Defaults to `disabledReason`; pass a narrower value
+   * when a Stellar-only gate (the desk's G… allowlist) must not lock the Base route, which the
+   * bridge gates with its own 0x… allowlist. */
+  baseDisabledReason?: string | null
   trustless?: boolean
   onRecheck?: () => Promise<void>
   onDone: () => void
 }) {
   const [mode, setMode] = useState<TransferMode>('shield')
   const activeMode = trustless && mode === 'base' ? 'shield' : mode
+  const activeDisabledReason = activeMode === 'base' ? (baseDisabledReason ?? disabledReason) : disabledReason
 
   return (
     <>
@@ -34,9 +40,9 @@ export default function ShieldUnshieldPanel({
         Choose where funds come from. Every shield creates a private note in this desk’s Stellar
         settlement contract.
       </p>
-      {disabledReason && (
+      {activeDisabledReason && (
         <div className="card" role="alert">
-          <strong>Fund actions unavailable.</strong> <span className="muted">{disabledReason}</span>
+          <strong>Fund actions unavailable.</strong> <span className="muted">{activeDisabledReason}</span>
           {onRecheck && (
             <button type="button" style={{ marginLeft: 10 }} onClick={() => void onRecheck()}>
               Recheck contract
@@ -92,7 +98,7 @@ export default function ShieldUnshieldPanel({
           <ShieldFromBaseForm
             desk={desk}
             userPubkey={userPubkey}
-            disabledReason={disabledReason}
+            disabledReason={baseDisabledReason ?? disabledReason}
             onDone={onDone}
           />
         ) : userPubkey ? (
