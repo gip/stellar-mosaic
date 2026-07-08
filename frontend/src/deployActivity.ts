@@ -9,11 +9,11 @@ export function newActionId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `action-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-/** Record a public-safe deploy activity event to the browser store for `mode`. Best-effort: a
- * deploy must never fail because activity logging did (the on-chain state is authoritative). Trusted
- * mode has no backend-emitted deploy activity, so the browser records it here — using the same
- * `create_desk` / `deploy_base_bridge` / `configure_base_bridge` action names the SDK emits in
- * trustless mode, so both modes group and label identically in the Activity tab. */
+/** Record a public-safe activity event to the browser store for `mode`, for browser-signed actions
+ * that bypass the SDK client (deploys, Base-bridge allowlist adds). Best-effort: an on-chain action
+ * must never fail because activity logging did (the on-chain state is authoritative). Uses the same
+ * action names the SDK emits (`create_desk` / `deploy_base_bridge` / `add_allowed` / …), so both
+ * modes group and label identically in the Activity tab. */
 export async function recordDeployActivity(mode: StorageMode, event: ActivityEvent): Promise<void> {
   try {
     await browserActivityStore(mode).record(event)
