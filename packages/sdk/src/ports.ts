@@ -156,6 +156,9 @@ export interface Deployer {
     assets: AssetDef[];
     pairs: Omit<PairDef, "pair_id">[];
     admin: string;
+    /** Stellar (G…) allowlist for an optionally permissioned desk: undefined/null = open desk,
+     * an array (may be empty) = permissioned, seeded with these members. */
+    allowlist?: string[] | null;
   }): Promise<DeploySettlementResult>;
 }
 
@@ -185,8 +188,22 @@ export interface BaseBridgeVerifyResult {
 }
 
 export interface BaseBridgeDeployer {
-  estimate(params: { assetIds: number[]; tokens: string[]; account?: string }): Promise<BaseBridgeEstimate>;
-  deploy(params: { assetIds: number[]; tokens: string[]; account?: string }): Promise<BaseBridgeDeployResult>;
+  estimate(params: {
+    assetIds: number[];
+    tokens: string[];
+    account?: string;
+    permissioned?: boolean;
+    initialAllowed?: string[];
+  }): Promise<BaseBridgeEstimate>;
+  deploy(params: {
+    assetIds: number[];
+    tokens: string[];
+    account?: string;
+    /** Gate bridge deposits behind an owner-managed, add-only allowlist (mirrors the Stellar desk). */
+    permissioned?: boolean;
+    /** Initial Base (0x…) allowlist members; only valid with `permissioned`. */
+    initialAllowed?: string[];
+  }): Promise<BaseBridgeDeployResult>;
   verify(params: BaseBridgeVerifyParams): Promise<BaseBridgeVerifyResult>;
 }
 
@@ -212,7 +229,18 @@ export interface McpClient {
     base_deployment?: { deployer_address: string; assets?: { asset_id: number; symbol: string; token: string }[] };
     /** Wait for Base L1 finality before minting shielded notes. Default false. */
     require_finality?: boolean;
+    /** Optionally permissioned desk: gate shield/unshield behind an add-only allowlist. */
+    permissioned?: boolean;
+    /** Initial Stellar (G…) allowlist members (permissioned only). */
+    allowlist?: string[];
+    /** Initial Base (0x…) bridge allowlist members (permissioned + Base only). */
+    base_allowlist?: string[];
   }): Promise<Desk>;
+  /** Add members to a permissioned desk's allowlists (desk creator only; add-only). */
+  addDeskAllowed?(
+    deskId: string,
+    body: { stellar_members?: string[]; evm_members?: string[] },
+  ): Promise<{ ok: boolean }>;
   baseDeploymentConfig(): Promise<BaseDeploymentConfig>;
   completeBaseDeployment(id: string, body: { tx_hash: string; bridge_address: string }): Promise<Desk>;
   retryBaseDeployment(id: string): Promise<Desk>;

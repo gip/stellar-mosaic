@@ -103,6 +103,7 @@ fn setup(env: &Env) -> Address {
                     quote_asset: A2,
                 },
             ],
+            None::<Vec<Address>>,
         ),
     );
     let client = SettlementClient::new(env, &id);

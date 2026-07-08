@@ -87,6 +87,7 @@ fn full_lifecycle_shield_order_settle_unshield() {
             admin.clone(),
             vec![&env, a1, a2],
             Vec::<settlement::PairDef>::new(&env),
+            None::<Vec<Address>>,
         ),
     );
     let client = SettlementClient::new(&env, &id);

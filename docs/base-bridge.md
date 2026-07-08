@@ -91,6 +91,17 @@ Desk creation deploys this bridge in one of two ways, by mode:
 Both paths deploy through the canonical CREATE2 proxy (`buildBridgeDeployment` in the SDK), so the
 init-code and resulting address derivation are byte-identical across browser and server.
 
+**Permissioned desks gate the Base leg on Base, not on Stellar.** The journal proves only
+`(assetId, amount, ownerTag, depositId, bridge, block)` — the depositor's address never reaches the
+Stellar contract, and extending the guest to commit it would rotate the pinned image ID and leak the
+address on-chain. So a permissioned desk's bridge is deployed with two extra constructor args
+(`bool permissioned, address[] initialAllowed`) and `shield`/`shieldNative` require `msg.sender` to
+be on the owner-managed, add-only allowlist (`addAllowed`, `NotAllowed`/`NotPermissioned` errors,
+`AllowedAdded` event). A disallowed deposit simply never happens, so the guest, journal, image ID,
+and `shield_from_base` are all unchanged. The flag is a regular storage bool — **not** `immutable` —
+because trustless verification compares the deployed runtime bytecode against the vendored artifact,
+and immutables are embedded in runtime code.
+
 ## Server automation (WS6): a prove service + an MCP worker
 
 Proving can't run in a browser (Steel/Groth16), and a single proof takes ~10 minutes — too long to

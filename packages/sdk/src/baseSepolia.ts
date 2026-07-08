@@ -70,11 +70,18 @@ function randomSalt(): Hex {
   return `0x${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function initCode(artifact: MosaicBridgeArtifact, account: Address, assetIds: number[], tokens: Address[]): Hex {
+function initCode(
+  artifact: MosaicBridgeArtifact,
+  account: Address,
+  assetIds: number[],
+  tokens: Address[],
+  permissioned: boolean,
+  initialAllowed: Address[],
+): Hex {
   return encodeDeployData({
     abi: artifact.abi,
     bytecode: bytecodeOf(artifact),
-    args: [account, assetIds, tokens],
+    args: [account, assetIds, tokens, permissioned, initialAllowed],
   });
 }
 
@@ -99,11 +106,19 @@ export function buildBridgeDeployment(
   account: string,
   assetIds: number[],
   tokens: string[],
+  permissioned = false,
+  initialAllowed: string[] = [],
 ): BridgeDeploymentCall {
   const deployer = normalizeAddress(account, "EVM account");
   const normalizedTokens = validateMappings(assetIds, tokens);
+  if (!permissioned && initialAllowed.length > 0) {
+    throw new Error("An initial Base allowlist requires a permissioned desk.");
+  }
+  const members = initialAllowed.map((member, index) =>
+    normalizeAddress(member, `Base allowlist member ${index + 1}`),
+  );
   const salt = randomSalt();
-  const creation = initCode(artifact, deployer, assetIds, normalizedTokens);
+  const creation = initCode(artifact, deployer, assetIds, normalizedTokens, permissioned, members);
   const data = concat([salt, creation]);
   return { account: deployer, tokens: normalizedTokens, data, bridgeAddress: getCreate2Address({ from: CREATE2_PROXY, salt, bytecode: creation }) };
 }
@@ -146,10 +161,20 @@ export class BaseSepoliaBridgeDeployer implements BaseBridgeDeployer {
     return normalizeAddress(accounts[0], "EVM account");
   }
 
-  private async deploymentCall(assetIds: number[], tokens: string[], account?: string) {
+  private async deploymentCall(
+    assetIds: number[],
+    tokens: string[],
+    account?: string,
+    permissioned?: boolean,
+    initialAllowed?: string[],
+  ) {
     const artifact = await this.loadMosaicBridge();
     const deployer = account ?? (await this.account());
-    return { artifact, assetIds, ...buildBridgeDeployment(artifact, deployer, assetIds, tokens) };
+    return {
+      artifact,
+      assetIds,
+      ...buildBridgeDeployment(artifact, deployer, assetIds, tokens, permissioned ?? false, initialAllowed ?? []),
+    };
   }
 
   private async estimateCall(call: { account: Address; data: Hex }): Promise<BaseBridgeEstimate> {
@@ -165,13 +190,37 @@ export class BaseSepoliaBridgeDeployer implements BaseBridgeDeployer {
     return { gas, maxFee: gas * maxFeePerGas, maxFeePerGas, maxPriorityFeePerGas };
   }
 
-  async estimate(params: { assetIds: number[]; tokens: string[]; account?: string }): Promise<BaseBridgeEstimate> {
-    const call = await this.deploymentCall(params.assetIds, params.tokens, params.account);
+  async estimate(params: {
+    assetIds: number[];
+    tokens: string[];
+    account?: string;
+    permissioned?: boolean;
+    initialAllowed?: string[];
+  }): Promise<BaseBridgeEstimate> {
+    const call = await this.deploymentCall(
+      params.assetIds,
+      params.tokens,
+      params.account,
+      params.permissioned,
+      params.initialAllowed,
+    );
     return this.estimateCall(call);
   }
 
-  async deploy(params: { assetIds: number[]; tokens: string[]; account?: string }): Promise<BaseBridgeDeployResult> {
-    const call = await this.deploymentCall(params.assetIds, params.tokens, params.account);
+  async deploy(params: {
+    assetIds: number[];
+    tokens: string[];
+    account?: string;
+    permissioned?: boolean;
+    initialAllowed?: string[];
+  }): Promise<BaseBridgeDeployResult> {
+    const call = await this.deploymentCall(
+      params.assetIds,
+      params.tokens,
+      params.account,
+      params.permissioned,
+      params.initialAllowed,
+    );
     const client = this.client();
     const proxyCode = await client.getCode({ address: CREATE2_PROXY });
     if (!proxyCode || proxyCode === "0x") throw new Error("The CREATE2 deployment proxy is not present on Base Sepolia.");

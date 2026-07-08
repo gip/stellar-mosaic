@@ -46,6 +46,7 @@ export class StellarRpcDeployer implements Deployer {
     assets: AssetDef[];
     pairs: { base_asset: number; quote_asset: number }[];
     admin: string;
+    allowlist?: string[] | null;
   }): Promise<DeploySettlementResult> {
     const wasm = await this.loadSettlementWasm();
     const wasmHash = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", Buffer.from(wasm)));
@@ -58,6 +59,10 @@ export class StellarRpcDeployer implements Deployer {
       new Address(params.admin).toScVal(),
       xdr.ScVal.scvVec(params.assets.map((asset) => this.assetInit(asset))),
       xdr.ScVal.scvVec(params.pairs.map((pair) => this.pairDef(pair))),
+      // Option<Vec<Address>>: Void = None (open desk), Vec = Some (permissioned, seeded members).
+      params.allowlist == null
+        ? xdr.ScVal.scvVoid()
+        : xdr.ScVal.scvVec(params.allowlist.map((member) => new Address(member).toScVal())),
     ];
     const result = await this.submitOperation(
       StellarOperation.createCustomContract({

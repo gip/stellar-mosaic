@@ -33,3 +33,14 @@ test("transactionErrorMessage hides unknown transaction diagnostics behind a gen
     "Transaction could not be completed.",
   );
 });
+
+test("transactionErrorMessage maps the permissioned-desk NotAllowed error (code 32)", () => {
+  assert.equal(
+    transactionErrorMessage("Simulation failed: HostError: Error(Contract, #32)", {
+      contractId: "C",
+      method: "shield",
+      args: [],
+    }),
+    "This desk is permissioned and the address is not on its allowlist. Ask the desk owner to add it.",
+  );
+});

@@ -6,7 +6,7 @@ import { toRaw } from '../amount'
 import { randomField, fieldToBytes32 } from '../crypto'
 import { noteTag } from '../noir'
 import { addNote } from '../notes'
-import { baseShield } from '../base'
+import { baseBridgeAllowed, baseShield } from '../base'
 import { baseShieldDepositEvent } from './baseShieldActivity'
 import { browserActivityStore } from '../sdk/indexedDbStore'
 import { useRecovery } from '../RecoveryContext'
@@ -64,6 +64,33 @@ export default function ShieldFromBaseForm({
   const recovery = useRecovery()
   const ethereum = useEthereumWallet()
   const recoveryReady = recovery.unlocked && !recovery.error
+  // On a permissioned desk: is the connected Base account on the bridge's allowlist? `null` =
+  // unknown / open desk; only a definitive `false` blocks the form. Membership is add-only, so a
+  // periodic re-read flips `false` to `true` after the desk owner adds the account.
+  // Keyed by (bridge, account) so a result for a previous bridge/account is ignored, not reset.
+  const [baseAllowedState, setBaseAllowedState] = useState<{ key: string; value: boolean } | null>(null)
+  const baseAllowedKey = `${config?.bridge}:${ethereum.address}`
+  const baseAllowed =
+    desk.permissioned === true && baseAllowedState?.key === baseAllowedKey ? baseAllowedState.value : null
+  useEffect(() => {
+    if (desk.permissioned !== true || !config?.bridge || !ethereum.address || !ethereum.connectedToBase) return
+    let active = true
+    const key = `${config.bridge}:${ethereum.address}`
+    const tick = () =>
+      baseBridgeAllowed(config.bridge as `0x${string}`, ethereum.address as `0x${string}`)
+        .then((allowed) => active && setBaseAllowedState({ key, value: allowed }))
+        .catch(() => {})
+    tick()
+    const h = setInterval(tick, 30_000)
+    return () => {
+      active = false
+      clearInterval(h)
+    }
+  }, [desk.permissioned, config?.bridge, ethereum.address, ethereum.connectedToBase])
+  const notAllowedReason =
+    baseAllowed === false
+      ? `This desk is permissioned and your Base account is not on the bridge allowlist. Ask the desk owner to add ${ethereum.address ? `${ethereum.address.slice(0, 6)}…${ethereum.address.slice(-4)}` : 'your address'}.`
+      : null
 
   useEffect(() => {
     if (disabledReason) {
@@ -163,6 +190,7 @@ export default function ShieldFromBaseForm({
     setJobId(null)
     try {
       if (disabledReason) throw new Error(disabledReason)
+      if (notAllowedReason) throw new Error(notAllowedReason)
       if (!config?.available || !config.bridge) {
         throw new Error('Base shielding is not available for this desk.')
       }
@@ -274,6 +302,7 @@ export default function ShieldFromBaseForm({
         <span className="err">The Base proving service is not available.</span>
       )}
       {configError && <span className="err">Could not verify Base configuration: {configError}</span>}
+      {notAllowedReason && <span className="err">{notAllowedReason}</span>}
       {baseSymbols && baseAssets.length === 0 ? (
         <span className="muted">None of this desk’s assets are available on Base.</span>
       ) : (
@@ -298,6 +327,7 @@ export default function ShieldFromBaseForm({
               !recoveryReady ||
               !baseSymbols ||
               !!disabledReason ||
+              !!notAllowedReason ||
               !ethereum.connectedToBase ||
               !config?.available ||
               !!amountError
@@ -309,6 +339,8 @@ export default function ShieldFromBaseForm({
                 ? 'Connect Base Sepolia wallet first'
               : disabledReason
                 ? 'Waiting for contract verification'
+                : notAllowedReason
+                  ? 'Not on this desk’s allowlist'
                 : !config?.available
                   ? 'Base shielding unavailable'
                   : recoveryReady

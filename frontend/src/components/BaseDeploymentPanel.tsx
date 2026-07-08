@@ -58,8 +58,10 @@ export default function BaseDeploymentPanel({
       account: ethereum.address,
       assetIds,
       tokens,
+      permissioned: desk.permissioned === true,
+      initialAllowed: (setup.allowlist ?? []) as Address[],
     }).then((value) => setEstimate(value.maxFee)).catch(() => setEstimate(null))
-  }, [setup, config, ethereum.address, ethereum.connectedToBase, assetIds, tokens])
+  }, [setup, config, ethereum.address, ethereum.connectedToBase, assetIds, tokens, desk.permissioned])
 
   const run = useCallback(async () => {
     if (!setup) return
@@ -88,6 +90,8 @@ export default function BaseDeploymentPanel({
           account: ethereum.address,
           assetIds,
           tokens,
+          permissioned: desk.permissioned === true,
+          initialAllowed: (setup.allowlist ?? []) as Address[],
         })
         if (ethereum.balance === null || ethereum.balance < freshEstimate.maxFee) {
           throw new Error(`Insufficient Base Sepolia ETH. Estimated maximum fee: ${displayEth(freshEstimate.maxFee)} ETH.`)
@@ -103,6 +107,8 @@ export default function BaseDeploymentPanel({
           account: ethereum.address,
           assetIds,
           tokens,
+          permissioned: desk.permissioned === true,
+          initialAllowed: (setup.allowlist ?? []) as Address[],
         })
         completed = { tx_hash: deployed.txHash, bridge_address: deployed.bridgeAddress }
         localStorage.setItem(pendingDeploymentKey(desk.id), JSON.stringify(completed))
@@ -135,7 +141,7 @@ export default function BaseDeploymentPanel({
     } finally {
       setBusy(false)
     }
-  }, [setup, config, ethereum, assetIds, tokens, desk.id, desk.name, desk.contract_id, groupActionId, wallet.address, wallet.networkPassphrase, onUpdated])
+  }, [setup, config, ethereum, assetIds, tokens, desk.id, desk.name, desk.contract_id, desk.permissioned, groupActionId, wallet.address, wallet.networkPassphrase, onUpdated])
 
   // Trusted mode deploys the bridge on the server (operator sponsor key); a failed attempt is retried
   // there too, so the browser never signs.

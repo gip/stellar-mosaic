@@ -164,7 +164,7 @@ echo "==> 1. deploy MockUSDC + MosaicBridge on Base Sepolia, mint (nonce base $N
 USDC_JSON=$(base_create test/mocks/MockUSDC.sol:MockUSDC --nonce "$NONCE")
 USDC=$(printf '%s\n' "$USDC_JSON" | jq -r .deployedTo); NONCE=$((NONCE+1))
 BRIDGE_JSON=$(base_create src/MosaicBridge.sol:MosaicBridge \
-  --nonce "$NONCE" --constructor-args "$ADMIN_EVM" "[$ASSET_ID]" "[$USDC]")
+  --nonce "$NONCE" --constructor-args "$ADMIN_EVM" "[$ASSET_ID]" "[$USDC]" false "[]")
 BRIDGE=$(printf '%s\n' "$BRIDGE_JSON" | jq -r .deployedTo); NONCE=$((NONCE+1))   # --constructor-args last
 echo "    usdc = $USDC   bridge = $BRIDGE"
 state_set BASE_DEPOSITOR "$ADMIN_EVM"

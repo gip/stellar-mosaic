@@ -157,6 +157,29 @@ export default function DeskPage() {
   const [activePairId, setActivePairId] = useState<number | null>(null)
   const [tradeTab, setTradeTab] = useState<'trade' | 'fund'>('trade')
   const bookIndex = useBookIndex(effectiveMode, desk, networkPassphrase)
+  // On a permissioned desk: is the connected wallet on the allowlist (`is_allowed` view)? `null` =
+  // open desk / not yet known — fund actions only lock on a definitive `false`. Polled because
+  // membership is add-only: a `false` can flip to `true` when the desk owner adds the wallet.
+  // Keyed by (desk, wallet) so a result for a previous desk/wallet is ignored, not reset.
+  const [allowedState, setAllowedState] = useState<{ key: string; value: boolean } | null>(null)
+  const allowedKey = `${deskId}:${address}`
+  const walletAllowed = desk?.permissioned === true && allowedState?.key === allowedKey ? allowedState.value : null
+  useEffect(() => {
+    if (!deskId || !address || desk?.permissioned !== true) return
+    let alive = true
+    const key = `${deskId}:${address}`
+    const tick = () =>
+      api
+        .isAllowed(effectiveMode, deskId, address)
+        .then((allowed) => alive && setAllowedState({ key, value: allowed }))
+        .catch(() => {})
+    tick()
+    const h = setInterval(tick, 30_000)
+    return () => {
+      alive = false
+      clearInterval(h)
+    }
+  }, [effectiveMode, deskId, address, desk?.permissioned])
 
   const currentVerifiedDesk = useMemo<Desk | null>(() => {
     if (!desk || bookIndex.status !== 'synced') return null
@@ -352,7 +375,9 @@ export default function DeskPage() {
   const verifiedDesk = currentVerifiedDesk ?? lastVerifiedDesk ?? desk
   const fundActionsDisabled =
     bookIndex.status === 'synced'
-      ? null
+      ? walletAllowed === false
+        ? `This desk is permissioned and your wallet is not on its allowlist. Ask the desk owner to add ${address ? `${address.slice(0, 4)}…${address.slice(-4)}` : 'your address'}.`
+        : null
       : bookIndex.status === 'error'
         ? `Contract verification failed: ${bookIndex.error ?? 'unknown integrity error'}`
         : bookIndex.error
@@ -382,6 +407,11 @@ export default function DeskPage() {
       <>
         <div className="desk-head">
           <h1 className="desk-title">{desk.name}</h1>
+          {desk.permissioned === true && (
+            <span className="pill accent" title="Only allowlisted addresses can shield and unshield on this desk.">
+              Permissioned
+            </span>
+          )}
           <StatusDot tone={bookTone} title={bookIndex.error ?? undefined}>
             Book {bookIndex.status}
             {bookIndex.status === 'syncing' &&
@@ -451,6 +481,18 @@ export default function DeskPage() {
       <Toasts items={toasts} onDismiss={dismissToast} />
       <div className="desk-head">
         <h1 className="desk-title">{desk.name}</h1>
+        {desk.permissioned === true && (
+          <span
+            className="pill accent"
+            title={
+              walletAllowed === false
+                ? 'Only allowlisted addresses can shield and unshield — your wallet is not on the allowlist.'
+                : 'Only allowlisted addresses can shield and unshield on this desk.'
+            }
+          >
+            Permissioned{walletAllowed === true ? ' · allowed' : walletAllowed === false ? ' · not allowed' : ''}
+          </span>
+        )}
         <StatusDot tone={bookTone} title={bookIndex.error ?? undefined}>
           Book {bookIndex.status}
           {bookIndex.status === 'syncing' &&

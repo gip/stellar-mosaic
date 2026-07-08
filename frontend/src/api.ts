@@ -258,12 +258,38 @@ async function verifyImportedAsset(
   }
 }
 
+/** Effective shield/unshield permission for `address` on this desk (`is_allowed` view: always true
+ * on an open desk). Cached per (desk, address) — membership is add-only, so a stale `false` after
+ * the owner adds the wallet only lasts until `TTL_MS` and a `true` can never become wrong. */
+const allowedCache = new Map<string, { value: boolean; at: number }>()
+const ALLOWED_TTL_MS = 30_000
+
+async function isAllowedOnDesk(desk: Desk, address: string): Promise<boolean> {
+  if (desk.permissioned !== true) return true
+  const key = `${desk.contract_id}:${address}`
+  const cached = allowedCache.get(key)
+  if (cached && (cached.value || Date.now() - cached.at < ALLOWED_TTL_MS)) return cached.value
+  const server = new rpc.Server(SOROBAN_RPC_URL)
+  const value = await simulateContractView(server, desk, Networks.TESTNET, 'is_allowed', [
+    nativeToScVal(address, { type: 'address' }),
+  ])
+  const allowed = value === true
+  allowedCache.set(key, { value: allowed, at: Date.now() })
+  return allowed
+}
+
 async function verifyImportedDesk(desk: Desk, networkPassphrase: string): Promise<void> {
   if (networkPassphrase !== Networks.TESTNET) {
     throw new Error('Desk share is for a different Stellar network.')
   }
   const server = new rpc.Server(SOROBAN_RPC_URL)
   await simulateContractView(server, desk, networkPassphrase, 'root')
+  // Pre-permissioning contracts have no `permissioned` view; only enforce the match when the
+  // imported share claims the desk is permissioned (an open share on an old contract stays valid).
+  if (desk.permissioned === true) {
+    const permissioned = await simulateContractView(server, desk, networkPassphrase, 'permissioned')
+    if (permissioned !== true) throw new Error('desk permissioned flag does not match the contract')
+  }
   const pairCount = await simulateContractView(server, desk, networkPassphrase, 'pair_count')
   if (typeof pairCount !== 'number' && typeof pairCount !== 'bigint') throw new Error('pair_count simulation returned an invalid value')
   if (Number(pairCount) !== desk.pairs.length) throw new Error('desk pair count does not match the contract')
@@ -358,6 +384,9 @@ export const api = {
   ),
   getDesk: (mode: StorageMode, id: string) => wrap(() => getDesk(mode, id)),
   getRoot: (mode: StorageMode, id: string) => wrap(async () => ({ root: await readContractRoot(await getDesk(mode, id)) })),
+  /** May `address` shield / receive an unshield on this desk? Always true on open desks. */
+  isAllowed: (mode: StorageMode, id: string, address: string) =>
+    wrap(async () => isAllowedOnDesk(await getDesk(mode, id), address)),
   importDeskShare: (share: string) => wrap(async () => {
     const { desk, networkPassphrase } = await parseDeskShare(share)
     await verifyImportedDesk(desk, networkPassphrase)
@@ -371,6 +400,9 @@ export const api = {
     pairs: { base_asset: number; quote_asset: number }[]
     base_assets?: { asset_id: number; symbol: string; token: string }[]
     require_finality?: boolean
+    permissioned?: boolean
+    allowlist?: string[]
+    base_allowlist?: string[]
   }) => wrap(async () => {
     const desk = (await mcp.createDesk(body)) as Desk
     deskCache('trusted').set(desk.id, desk)
@@ -382,6 +414,9 @@ export const api = {
     pairs: { base_asset: number; quote_asset: number }[]
     base_assets?: { asset_id: number; symbol: string; token: string }[]
     require_finality?: boolean
+    permissioned?: boolean
+    allowlist?: string[]
+    base_allowlist?: string[]
   }) => wrap(async () => {
     const address = await currentAddress()
     if (!address) throw new ApiError(401, 'Connect Freighter before deploying a trustless desk.')
@@ -408,6 +443,8 @@ export const api = {
         kind: asset.kind,
       })),
       pairs: body.pairs,
+      permissioned: body.permissioned === true,
+      allowlist: body.allowlist,
       ...(body.base_assets?.length
         ? {
             base: {
@@ -416,6 +453,7 @@ export const api = {
               image_id: release?.bridge_image_id ?? '',
               config_id: BASE_SEPOLIA_CONFIG_ID,
               require_finality: body.require_finality === true,
+              initial_allowed: body.base_allowlist,
             },
           }
         : {}),
@@ -434,6 +472,7 @@ export const api = {
           pairs: cause.partialDesk.pairs,
           event_start_ledger: startLedger,
           base_deployment: cause.partialDesk.baseDeployment ?? null,
+          permissioned: cause.partialDesk.permissioned === true,
         } as Desk
         await putLocalDesk('trustless', partial)
         deskCache('trustless').set(partial.id, partial)
@@ -449,6 +488,7 @@ export const api = {
       pairs: deployed.pairs,
       event_start_ledger: startLedger,
       base_deployment: deployed.baseDeployment ?? null,
+      permissioned: deployed.permissioned === true,
     } as Desk
     await putLocalDesk('trustless', desk)
     deskCache('trustless').set(desk.id, desk)

@@ -92,11 +92,21 @@ desk
   .action(() => {
     for (const d of load().desks) console.log(`${d.id}\t${d.contractId}\t${d.name ?? ""}`);
   });
+desk
+  .command("allow")
+  .argument("<deskId>")
+  .argument("<address>", "Stellar address (G...) to add to the desk's allowlist")
+  .description("Add a member to a permissioned desk's allowlist (signing key must be the desk admin; add-only)")
+  .action(async (deskId: string, address: string) => {
+    const { client } = build(load());
+    const { txHash } = await client.addAllowed({ deskId, member: address });
+    console.log(`Allowed ${address} on desk ${deskId} (tx ${txHash})`);
+  });
 
 // --- deploy ---------------------------------------------------------------------------------------
 program
   .command("deploy")
-  .argument("<spec>", "path to a deploy spec JSON ({ name?, assets, pairs })")
+  .argument("<spec>", "path to a deploy spec JSON ({ name?, assets, pairs, permissioned?, allowlist? })")
   .description("Deploy a fresh desk via the stellar CLI and register it")
   .action(async (spec: string) => {
     const cfg = load();
