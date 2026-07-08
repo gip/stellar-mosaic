@@ -235,6 +235,8 @@ export interface McpClient {
     allowlist?: string[];
     /** Initial Base (0x…) bridge allowlist members (permissioned + Base only). */
     base_allowlist?: string[];
+    /** Seed the creator (session address) on a permissioned desk's allowlist. Default true. */
+    include_creator?: boolean;
   }): Promise<Desk>;
   /** Add members to a permissioned desk's allowlists (desk creator only; add-only). */
   addDeskAllowed?(
