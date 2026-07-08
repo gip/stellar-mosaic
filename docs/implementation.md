@@ -105,6 +105,21 @@ generate + fund sponsor → deploy wasm with all immutable VKs + admin + the ass
 pairs, all as constructor args. There is no longer a post-deploy `register_asset`/`register_pair`
 step — a desk is fully configured by its constructor.
 
+**Optionally permissioned desks.** The constructor's trailing `allowlist: Option<Vec<Address>>`
+makes a desk permissioned (`Some`, may be empty) or open (`None`/omitted — every pre-existing deploy
+path is unchanged). On a permissioned desk only allowlisted addresses may `shield` (depositor) or
+receive an `unshield`; the paired `MosaicBridge` gates `msg.sender` with its own 0x… allowlist. The
+mode is immutable; membership is add-only via the admin-signed `add_allowed` (no removal — a removed
+member's notes would be stranded behind the unshield gate). Trusted mode: `create_desk` accepts
+`permissioned` + `allowlist` (G…) + `base_allowlist` (0x…) and always seeds the creator's own wallet
+onto the Stellar allowlist (the on-chain admin is the server sponsor, so the creator would otherwise
+deploy a desk they cannot use); the `add_desk_allowed` MCP tool (desk-creator session only) adds
+members later via the sponsor/deployer keys — surfaced as the desk page's "Allowlist" pane and
+`desk allow --mcp <url>` in the CLI. Trustless mode: the creator's own wallet is the Stellar admin
+and bridge owner (`client.addAllowed` / `desk allow` in the CLI, `addAllowed(address)` on the
+bridge; the same "Allowlist" pane signs with the connected wallets). See `architecture.md` for the
+gate placement.
+
 **Dual-wallet and Base deployment.** Freighter on Stellar Testnet remains the login identity;
 MetaMask is an optional Base Sepolia transaction wallet and cannot connect in the app until Stellar
 is connected. A desk creator can opt into a browser-paid `MosaicBridge` deployment. The bridge

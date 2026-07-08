@@ -912,6 +912,10 @@ export class MosaicClient {
     name?: string;
     assets: AssetDef[];
     pairs: Omit<PairDef, "pair_id">[];
+    /** Gate shield/unshield behind an admin-managed, add-only allowlist. Immutable after deploy. */
+    permissioned?: boolean;
+    /** Initial Stellar (G…) allowlist members (permissioned only). */
+    allowlist?: string[];
     base?: {
       assets: { asset_id: number; symbol: string; token: string }[];
       router_id: string;
@@ -919,6 +923,8 @@ export class MosaicClient {
       config_id: string;
       /** Wait for Base L1 finality before minting shielded notes. Default false. */
       require_finality?: boolean;
+      /** Initial Base (0x…) allowlist members for the bridge (permissioned only). */
+      initial_allowed?: string[];
     };
   }): Promise<DeskConfig> {
     const actionId = this.actionId();
@@ -933,11 +939,15 @@ export class MosaicClient {
     });
     try {
       if (!this.p.deployer) throw new Error("No Deployer configured (Node only).");
+      if (!params.permissioned && (params.allowlist?.length || params.base?.initial_allowed?.length)) {
+        throw new Error("An initial allowlist requires a permissioned desk.");
+      }
       const admin = await this.p.signer.address();
       const deployed = await this.p.deployer.deploySettlement({
         assets: params.assets,
         pairs: params.pairs,
         admin,
+        allowlist: params.permissioned ? (params.allowlist ?? []) : undefined,
       });
       if (deployed.uploadWasmTxHash || deployed.wasmHash) {
         await this.recordActivity({
@@ -975,6 +985,7 @@ export class MosaicClient {
         sponsor: admin,
         assets: params.assets,
         pairs: params.pairs.map((p, i) => ({ ...p, pair_id: i })),
+        permissioned: params.permissioned === true,
       };
       partialDesk = desk;
       const baseAssets = params.base?.assets ?? [];
@@ -990,6 +1001,9 @@ export class MosaicClient {
           error: null,
           assets: baseAssets.map((asset, index) => ({ asset_id: asset.asset_id, symbol: asset.symbol, token: tokens[index] })),
           require_finality: params.base.require_finality === true,
+          ...(params.permissioned && params.base.initial_allowed?.length
+            ? { allowlist: params.base.initial_allowed }
+            : {}),
         };
         partialDesk = desk;
         await this.recordActivity({
@@ -1003,7 +1017,12 @@ export class MosaicClient {
         });
         let base;
         try {
-          base = await this.p.baseBridgeDeployer.deploy({ assetIds, tokens });
+          base = await this.p.baseBridgeDeployer.deploy({
+            assetIds,
+            tokens,
+            permissioned: params.permissioned === true,
+            initialAllowed: params.base.initial_allowed ?? [],
+          });
         } catch (error) {
           desk.baseDeployment = { ...desk.baseDeployment, status: "failed", error: errorMessage(error) };
           throw new DeployDeskError(errorMessage(error), desk, { cause: error });
@@ -1087,6 +1106,45 @@ export class MosaicClient {
       if (partialDesk && !(error instanceof DeployDeskError)) {
         throw new DeployDeskError(errorMessage(error), partialDesk, { cause: error });
       }
+      throw error;
+    }
+  }
+
+  /** Add a member to a permissioned desk's Stellar allowlist (`add_allowed`, admin-signed —
+   * the configured signer must be the desk admin). Add-only: there is no removal, because a
+   * removed member's shielded notes would be stranded behind the unshield recipient gate. */
+  async addAllowed(params: { deskId: string; member: string }): Promise<{ txHash: string }> {
+    const actionId = this.actionId();
+    const wallet = await this.walletAddress();
+    try {
+      const desk = await this.p.desks.get(params.deskId);
+      const res = await this.p.submitter.submit({
+        deskId: desk.id,
+        contractId: desk.contractId,
+        method: "add_allowed",
+        metadata: { action_id: actionId, member: params.member },
+        args: [new Address(params.member).toScVal()],
+      });
+      await this.recordActivity({
+        kind: "user_action",
+        action: "add_allowed",
+        status: "succeeded",
+        wallet_address: wallet,
+        desk_id: desk.id,
+        tx_hash: res.txHash,
+        metadata: { action_id: actionId, member: params.member },
+      });
+      return { txHash: res.txHash };
+    } catch (error) {
+      await this.recordActivity({
+        kind: "error",
+        action: "add_allowed",
+        status: "failed",
+        wallet_address: wallet,
+        desk_id: params.deskId,
+        message: errorMessage(error),
+        metadata: { action_id: actionId, member: params.member, error: serializeError(error) },
+      });
       throw error;
     }
   }

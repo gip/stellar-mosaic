@@ -92,11 +92,32 @@ desk
   .action(() => {
     for (const d of load().desks) console.log(`${d.id}\t${d.contractId}\t${d.name ?? ""}`);
   });
+desk
+  .command("allow")
+  .argument("<deskId>")
+  .argument("<address>", "member to add: Stellar (G...) or, with --mcp, Base (0x...)")
+  .option("--mcp <url>", "route through this MCP server (server-created desks: the server holds the admin key; you must be the desk creator)")
+  .description("Add a member to a permissioned desk's allowlist (add-only). Without --mcp your signing key must be the desk admin.")
+  .action(async (deskId: string, address: string, opts: { mcp?: string }) => {
+    if (opts.mcp) {
+      const cfg = load();
+      const mcp = createMcpClient({ url: opts.mcp });
+      await mcp.authenticate(new SecretKeySigner(requireKey(cfg)));
+      const isEvm = /^0x[0-9a-fA-F]{40}$/.test(address);
+      const res = await mcp.addDeskAllowed!(deskId, isEvm ? { evm_members: [address] } : { stellar_members: [address] });
+      const txs = [...res.stellar_tx_hashes, ...res.evm_tx_hashes];
+      console.log(`Allowed ${address} on desk ${deskId}${txs.length ? ` (tx ${txs.join(", ")})` : ""}`);
+      return;
+    }
+    const { client } = build(load());
+    const { txHash } = await client.addAllowed({ deskId, member: address });
+    console.log(`Allowed ${address} on desk ${deskId} (tx ${txHash})`);
+  });
 
 // --- deploy ---------------------------------------------------------------------------------------
 program
   .command("deploy")
-  .argument("<spec>", "path to a deploy spec JSON ({ name?, assets, pairs })")
+  .argument("<spec>", "path to a deploy spec JSON ({ name?, assets, pairs, permissioned?, allowlist? })")
   .description("Deploy a fresh desk via the stellar CLI and register it")
   .action(async (spec: string) => {
     const cfg = load();

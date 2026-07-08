@@ -109,6 +109,7 @@ export class StellarCliDeployer implements Deployer {
     assets: AssetDef[];
     pairs: Omit<PairDef, "pair_id">[];
     admin: string;
+    allowlist?: string[] | null;
   }): Promise<{ contractId: string; txHash?: string }> {
     const assetsJson = JSON.stringify(
       params.assets.map((a) => ({
@@ -120,6 +121,9 @@ export class StellarCliDeployer implements Deployer {
     const pairsJson = JSON.stringify(
       params.pairs.map((p) => ({ base_asset: p.base_asset, quote_asset: p.quote_asset })),
     );
+    // `allowlist` is an Option<Vec<Address>> constructor arg: omitting the flag = None (open desk).
+    const allowlistFlags =
+      params.allowlist == null ? [] : ["--allowlist", JSON.stringify(params.allowlist)];
     const { stdout, stderr } = this.stellarWithLog([
       "contract",
       "deploy",
@@ -143,6 +147,7 @@ export class StellarCliDeployer implements Deployer {
       assetsJson,
       "--pairs",
       pairsJson,
+      ...allowlistFlags,
     ]);
     const contractId = stdout.split(/\s+/).find((t) => CONTRACT_ID.test(t));
     if (!contractId) throw new Error(`no contract id in deploy output: ${stdout}`);

@@ -47,7 +47,10 @@ UNSHIELD_HASH=$(shasum -a 256 "$ROOT/backend/vks/unshield_vk" | awk '{print $1}'
 CANCEL_HASH=$(shasum -a 256 "$ROOT/backend/vks/cancel_vk" | awk '{print $1}')
 JOIN_HASH=$(shasum -a 256 "$ROOT/backend/vks/join_vk" | awk '{print $1}')
 BRIDGE_IMAGE_ID=$(tr -d '[:space:]' < "$ROOT/bridge-prover/image-id.hex")
-node -e 'const fs=require("fs"); const [wasm,lift,unshield,cancel,join,bridgeImageId,...outs]=process.argv.slice(1); const json=JSON.stringify({schema_version:1,wasm_hash:wasm,vk_hashes:{lift,unshield,cancel,join},bridge_image_id:bridgeImageId},null,2)+"\n"; for(const out of outs) fs.writeFileSync(out, json)' \
+# `wasm_hash` is the current build; `wasm_hashes` accumulates every released hash so desks deployed
+# from earlier releases keep verifying (the wasm is immutable per contract — replacement here never
+# retroactively invalidates a desk). The list is carried forward from the committed manifest.
+node -e 'const fs=require("fs"); const [wasm,lift,unshield,cancel,join,bridgeImageId,...outs]=process.argv.slice(1); let prior=[]; try{const old=JSON.parse(fs.readFileSync(outs[0],"utf8")); prior=old.wasm_hashes??(old.wasm_hash?[old.wasm_hash]:[]);}catch{} const wasm_hashes=[...new Set([...prior,wasm])]; const json=JSON.stringify({schema_version:1,wasm_hash:wasm,wasm_hashes,vk_hashes:{lift,unshield,cancel,join},bridge_image_id:bridgeImageId},null,2)+"\n"; for(const out of outs) fs.writeFileSync(out, json)' \
   "$WASM_HASH" "$LIFT_HASH" "$UNSHIELD_HASH" "$CANCEL_HASH" "$JOIN_HASH" "$BRIDGE_IMAGE_ID" \
   "$ROOT/frontend/public/protocol-release.json" "$SDK_ASSETS/protocol-release.json"
 

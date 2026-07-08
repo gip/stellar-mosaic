@@ -20,6 +20,7 @@ const desk: Desk = {
     { pair_id: 1, base_asset: 3, quote_asset: 2 },
   ],
   base_deployment: null,
+  permissioned: false,
 }
 
 test('desk share round-trips a representative desk', async () => {
@@ -35,6 +36,14 @@ test('desk share accepts line wrapping and header footer block', async () => {
   const wrapped = `-----BEGIN MOSAIC DESK-----\n${compact.slice(0, 20)}\n${compact.slice(20, 85)}\n${compact.slice(85)}\n-----END MOSAIC DESK-----`
   const parsed = await parseDeskShare(wrapped)
   assert.deepEqual(parsed.desk, desk)
+})
+
+test('desk share carries the permissioned flag both ways', async () => {
+  const permissionedShare = await encodeDeskShare({ ...desk, permissioned: true }, Networks.TESTNET)
+  assert.equal((await parseDeskShare(permissionedShare)).desk.permissioned, true)
+  // Shares minted before desk permissioning omit the field entirely — they decode as open.
+  const openShare = await encodeDeskShare(desk, Networks.TESTNET)
+  assert.equal((await parseDeskShare(openShare)).desk.permissioned, false)
 })
 
 test('desk share rejects an unsupported prefix', async () => {

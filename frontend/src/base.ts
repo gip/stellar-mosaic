@@ -39,6 +39,20 @@ const bridgeAbi = [
   },
   {
     type: 'function',
+    name: 'permissioned',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ type: 'bool' }],
+  },
+  {
+    type: 'function',
+    name: 'allowed',
+    stateMutability: 'view',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ type: 'bool' }],
+  },
+  {
+    type: 'function',
     name: 'shield',
     stateMutability: 'nonpayable',
     inputs: [
@@ -47,6 +61,13 @@ const bridgeAbi = [
       { name: 'ownerTag', type: 'bytes32' },
     ],
     outputs: [{ name: 'depositId', type: 'uint64' }],
+  },
+  {
+    type: 'function',
+    name: 'addAllowed',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'member', type: 'address' }],
+    outputs: [],
   },
   {
     type: 'event',
@@ -262,6 +283,10 @@ interface BridgeDeploymentInputs {
   account: Address
   assetIds: number[]
   tokens: Address[]
+  /** Gate bridge deposits behind an owner-managed, add-only allowlist (permissioned desks). */
+  permissioned?: boolean
+  /** Initial Base allowlist members; only valid with `permissioned`. */
+  initialAllowed?: Address[]
 }
 
 /** The contract creation code (runtime bytecode + ABI-encoded constructor args). */
@@ -269,7 +294,7 @@ function bridgeInitCode(opts: BridgeDeploymentInputs): Hex {
   return encodeDeployData({
     abi: opts.artifact.abi,
     bytecode: opts.artifact.bytecode,
-    args: [opts.account, opts.assetIds, opts.tokens],
+    args: [opts.account, opts.assetIds, opts.tokens, opts.permissioned ?? false, opts.initialAllowed ?? []],
   })
 }
 
@@ -394,6 +419,46 @@ export async function deployBridge(
 export interface BaseShieldResult {
   depositId: number
   txHash: Hex
+}
+
+/** May `account` deposit on this bridge? Always true on an open (non-permissioned) bridge.
+ * Pre-permissioning bridges have neither view; treat a read failure as "allowed" so old desks
+ * keep working (the bridge would revert a truly disallowed deposit anyway). */
+export async function baseBridgeAllowed(bridge: Address, account: Address): Promise<boolean> {
+  const pub = createPublicClient({ chain: baseSepolia, transport: custom(eth()) })
+  try {
+    const permissioned = (await pub.readContract({
+      address: bridge,
+      abi: bridgeAbi,
+      functionName: 'permissioned',
+    })) as boolean
+    if (!permissioned) return true
+    return (await pub.readContract({
+      address: bridge,
+      abi: bridgeAbi,
+      functionName: 'allowed',
+      args: [account],
+    })) as boolean
+  } catch {
+    return true
+  }
+}
+
+/** Owner-signed `addAllowed` on a permissioned bridge (trustless desks: the connected EVM wallet
+ * is the bridge owner). Add-only, mirroring the Stellar allowlist. */
+export async function baseBridgeAddAllowed(bridge: Address, member: Address, account: Address): Promise<Hex> {
+  const transport = custom(eth())
+  const wallet = createWalletClient({ account, chain: baseSepolia, transport })
+  const pub = createPublicClient({ chain: baseSepolia, transport })
+  const txHash = await wallet.writeContract({
+    address: bridge,
+    abi: bridgeAbi,
+    functionName: 'addAllowed',
+    args: [member],
+  })
+  const receipt = await pub.waitForTransactionReceipt({ hash: txHash })
+  if (receipt.status !== 'success') throw new Error(`addAllowed reverted (tx ${txHash}).`)
+  return txHash
 }
 
 /** approve(bridge, amount) then shield(assetId, amount, ownerTag); returns the deposit id. */

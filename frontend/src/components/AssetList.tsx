@@ -3,6 +3,7 @@ import { errorMessage } from '@mosaic/sdk'
 import { api, type CatalogAsset } from '../api'
 import { useWallet } from '../WalletContext'
 import type { StorageMode } from '../StorageModeContext'
+import ExplorerLink from './ui/ExplorerLink'
 
 function short(addr: string): string {
   return addr.length > 12 ? `${addr.slice(0, 5)}…${addr.slice(-4)}` : addr
@@ -64,7 +65,7 @@ export default function AssetList({
               <div>
                 <label style={{ margin: 0 }}>Stellar</label>
                 <div className="mono">
-                  {a.stellar_token === 'native' ? 'XLM (native)' : a.stellar_token}
+                  {a.stellar_token === 'native' ? 'XLM (native)' : <ExplorerLink address={a.stellar_token} />}
                 </div>
                 <div className="muted">{a.stellar_decimals} decimals</div>
               </div>
@@ -73,7 +74,7 @@ export default function AssetList({
               <div>
                 <label style={{ margin: 0 }}>Base</label>
                 <div className="mono">
-                  {a.base_token === 'native' ? 'ETH (native)' : a.base_token}
+                  {a.base_token === 'native' ? 'ETH (native)' : <ExplorerLink address={a.base_token} />}
                 </div>
                 <div className="muted">
                   {chainName(a.base_chain_id)} · {a.base_decimals} decimals

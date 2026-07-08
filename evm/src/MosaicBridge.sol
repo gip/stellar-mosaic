@@ -55,7 +55,20 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
 
     mapping(uint64 depositId => Deposit) public deposits;
 
+    /// Does this bridge gate deposits behind the allowlist? Fixed at deployment (flipping an open
+    /// bridge to permissioned would strand nothing here — deposits are one-way — but the mode
+    /// mirrors the paired Stellar desk, whose flag IS load-bearing, so both are immutable choices).
+    /// Deliberately a regular storage variable, not `immutable`: trustless desk verification
+    /// compares this contract's runtime bytecode against the vendored artifact, and immutables are
+    /// embedded in runtime code.
+    bool public permissioned;
+
+    /// Addresses that may deposit when `permissioned`. Add-only (matching the Stellar desk's
+    /// allowlist, where removal would strand shielded funds behind the unshield gate).
+    mapping(address account => bool) public allowed;
+
     event AssetRegistered(uint32 indexed assetId, address indexed token);
+    event AllowedAdded(address indexed member);
     event Shielded(
         uint64 indexed depositId,
         uint32 indexed assetId,
@@ -74,15 +87,48 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
     /// Wrong deposit route for the asset's Base side: ERC20 `shield` on a native asset, or
     /// `shieldNative` on an ERC20 asset.
     error WrongDepositRoute(uint32 assetId);
+    /// Permissioned bridge: the depositor is not on the allowlist.
+    error NotAllowed(address account);
+    /// Allowlist operation on an open (non-permissioned) bridge.
+    error NotPermissioned();
 
     /// Deploy a bridge and bind its initial asset registry atomically. This keeps browser-based
     /// desk creation to one paid transaction and prevents a half-configured bridge from being
-    /// attached to its Stellar settlement contract.
-    constructor(address admin, uint32[] memory assetIds, address[] memory tokens) Ownable(admin) {
+    /// attached to its Stellar settlement contract. `permissioned_` + `initialAllowed` seed the
+    /// optional deposit allowlist (empty + false = open bridge, the default).
+    constructor(
+        address admin,
+        uint32[] memory assetIds,
+        address[] memory tokens,
+        bool permissioned_,
+        address[] memory initialAllowed
+    ) Ownable(admin) {
         if (assetIds.length != tokens.length) revert InvalidAssetArrays();
+        if (!permissioned_ && initialAllowed.length != 0) revert NotPermissioned();
+        permissioned = permissioned_;
+        for (uint256 i = 0; i < initialAllowed.length; i++) {
+            _addAllowed(initialAllowed[i]);
+        }
         for (uint256 i = 0; i < assetIds.length; i++) {
             _registerAsset(assetIds[i], tokens[i]);
         }
+    }
+
+    /// Add a depositor to a permissioned bridge's allowlist. Add-only: there is no removal,
+    /// matching the paired Stellar desk. Idempotent.
+    function addAllowed(address member) external onlyOwner {
+        if (!permissioned) revert NotPermissioned();
+        _addAllowed(member);
+    }
+
+    function _addAllowed(address member) internal {
+        if (member == address(0)) revert NotAllowed(address(0));
+        allowed[member] = true;
+        emit AllowedAdded(member);
+    }
+
+    function _requireAllowed() internal view {
+        if (permissioned && !allowed[msg.sender]) revert NotAllowed(msg.sender);
     }
 
     /// Bind a protocol asset id to its ERC20 token. Permanent (a rebind would silently change what a
@@ -109,6 +155,7 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
         whenNotPaused
         returns (uint64 depositId)
     {
+        _requireAllowed();
         address token = assetToken[assetId];
         if (token == address(0)) revert AssetNotRegistered(assetId);
         if (token == NATIVE) revert WrongDepositRoute(assetId); // native ETH -> use shieldNative
@@ -139,6 +186,7 @@ contract MosaicBridge is Ownable, Pausable, ReentrancyGuard {
         whenNotPaused
         returns (uint64 depositId)
     {
+        _requireAllowed();
         address token = assetToken[assetId];
         if (token == address(0)) revert AssetNotRegistered(assetId);
         if (token != NATIVE) revert WrongDepositRoute(assetId); // ERC20 asset -> use shield

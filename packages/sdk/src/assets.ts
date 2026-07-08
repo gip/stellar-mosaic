@@ -22,6 +22,8 @@ export type VkName = "lift" | "unshield" | "cancel" | "join";
 export interface ProtocolRelease {
   schema_version: number;
   wasm_hash: string;
+  /** Every released wasm hash — desks deployed from earlier releases stay verifiable. */
+  wasm_hashes?: string[];
   vk_hashes: Record<VkName, string>;
   bridge_image_id?: string;
 }

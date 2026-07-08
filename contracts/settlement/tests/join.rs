@@ -50,6 +50,7 @@ fn deploy(env: &Env, assets: Vec<AssetInit>) -> Address {
             admin,
             assets,
             Vec::<settlement::PairDef>::new(env),
+            None::<Vec<Address>>,
         ),
     )
 }

@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
 import { Keypair, Networks, rpc } from "@stellar/stellar-sdk";
 import {
   BASE_SEPOLIA_CONFIG_ID,
@@ -28,6 +28,14 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A Stellar transaction hash as the CLI logs it to stderr (64 lowercase hex chars). */
 const STELLAR_TX_HASH = /\b[0-9a-f]{64}\b/g;
+
+/** sha256 of the lowercased runtime-bytecode hex of earlier released MosaicBridge builds. An
+ * in-flight trustless deploy signed against an old artifact must stay completable after the server
+ * upgrades — the exact-bytecode check below otherwise strands it permanently. All artifacts before
+ * desk permissioning shipped one runtime bytecode; such bridges are inherently open. */
+const LEGACY_BRIDGE_CODE_SHA256 = new Set([
+  "adec1a0da7b333f8c37fd3381f4eacd3a6b8355cfff95b3fe28226ff7b2a4241",
+]);
 
 /** Accept a 0x-prefixed or bare 32-byte hex private key. */
 function normalizePrivateKey(key: string): Hex {
@@ -82,6 +90,39 @@ function pairsFromBody(body: Record<string, unknown>): Omit<PairDef, "pair_id">[
   });
 }
 
+const STELLAR_ADDRESS = /^G[A-Z2-7]{55}$/;
+const EVM_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/** Optional desk permissioning from the create-desk body: the flag plus the initial Stellar (G…)
+ * and Base (0x…) allowlists. Members are only legal on a permissioned desk. */
+function permissioningFromBody(body: Record<string, unknown>): {
+  permissioned: boolean;
+  allowlist: string[];
+  baseAllowlist: string[];
+} {
+  // Strict boolean: the mode is immutable, so a truthy non-boolean (e.g. the string "true")
+  // silently deploying a permanently open desk is the worst possible coercion.
+  if (body.permissioned != null && typeof body.permissioned !== "boolean") {
+    throw new Error("permissioned must be a boolean");
+  }
+  const permissioned = body.permissioned === true;
+  const readList = (value: unknown, pattern: RegExp, label: string): string[] => {
+    if (value == null) return [];
+    if (!Array.isArray(value)) throw new Error(`${label} must be an array of addresses`);
+    return value.map((entry) => {
+      const address = String(entry).trim();
+      if (!pattern.test(address)) throw new Error(`invalid ${label} entry: ${address}`);
+      return address;
+    });
+  };
+  const allowlist = readList(body.allowlist, STELLAR_ADDRESS, "allowlist");
+  const baseAllowlist = readList(body.base_allowlist, EVM_ADDRESS, "base_allowlist");
+  if (!permissioned && (allowlist.length > 0 || baseAllowlist.length > 0)) {
+    throw new Error("an initial allowlist requires a permissioned desk");
+  }
+  return { permissioned, allowlist, baseAllowlist };
+}
+
 /** Base-side asset→token mappings the server should register on the bridge. The caller (the
  * frontend / CLI) supplies the Base token addresses, which the Stellar asset defs do not carry.
  * Accepts the new `base_assets` shape or the legacy `base_deployment.assets` shape. */
@@ -134,6 +175,12 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
     const assets = assetsFromBody(body);
     const pairs = pairsFromBody(body);
     const baseAssets = baseAssetsFromBody(body);
+    const { permissioned, allowlist, baseAllowlist } = permissioningFromBody(body);
+    // Trusted mode: the on-chain admin is the server-held sponsor key, not the creator — without
+    // this seed the creator deploys a desk they themselves cannot shield into or unshield from.
+    if (permissioned && creator && STELLAR_ADDRESS.test(creator) && !allowlist.includes(creator)) {
+      allowlist.unshift(creator);
+    }
     // Fail fast, before funding a sponsor and deploying the Stellar contract: if the desk needs a
     // bridge this server cannot build, there is no point creating half a desk.
     if (baseAssets.length > 0 && !this.canDeployBase) {
@@ -159,7 +206,12 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
     const startLedger = await this.latestLedger();
     await record({ kind: "user_action", action: "create_desk", status: "started", metadata: { asset_count: assets.length, pair_count: pairs.length } });
     const deployer = new StellarCliDeployer({ network: this.network, source: sponsor.secret(), stellarBin: this.stellarBin });
-    const { contractId, txHash: stellarTx } = await deployer.deploySettlement({ assets, pairs, admin: sponsor.publicKey() });
+    const { contractId, txHash: stellarTx } = await deployer.deploySettlement({
+      assets,
+      pairs,
+      admin: sponsor.publicKey(),
+      allowlist: permissioned ? allowlist : undefined,
+    });
     await record({
       kind: "user_action", action: "create_desk", status: "succeeded", contract_id: contractId, tx_hash: stellarTx,
       metadata: { asset_count: assets.length, pair_count: pairs.length },
@@ -174,11 +226,21 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
       assets: assets.map((asset) => ({ ...asset, token: asset.token ?? "represented" })),
       pairs: pairs.map((pair, pair_id) => ({ ...pair, pair_id })),
       base_deployment: null,
+      permissioned,
+      creator_address: creator ?? null,
     };
 
     if (baseAssets.length > 0) {
       const requireFinality = body.require_finality === true;
-      desk.base_deployment = await this.deployAndConfigureBase(desk, sponsor.secret(), baseAssets, record, requireFinality);
+      desk.base_deployment = await this.deployAndConfigureBase(
+        desk,
+        sponsor.secret(),
+        baseAssets,
+        record,
+        requireFinality,
+        permissioned,
+        baseAllowlist,
+      );
     }
     return { desk, sponsorSecret: sponsor.secret() };
   }
@@ -192,6 +254,8 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
     baseAssets: BaseAssetMapping[],
     record: (event: Partial<ActivityEvent> & Pick<ActivityEvent, "kind">) => Promise<void>,
     requireFinality = false,
+    permissioned = false,
+    initialAllowed: string[] = [],
   ): Promise<Desk["base_deployment"]> {
     const deployerAddress = privateKeyToAccount(normalizePrivateKey(this.baseDeployerKey!)).address;
     const base: NonNullable<Desk["base_deployment"]> = {
@@ -202,9 +266,11 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
       error: null,
       assets: baseAssets,
       require_finality: requireFinality,
+      // Persist the seed so a failed deploy can be retried with the same allowlist.
+      ...(permissioned && initialAllowed.length > 0 ? { allowlist: initialAllowed } : {}),
     };
     try {
-      const deployed = await this.deployBridgeOnBase(baseAssets);
+      const deployed = await this.deployBridgeOnBase(baseAssets, permissioned, initialAllowed);
       base.tx_hash = deployed.txHash;
       base.bridge_address = deployed.bridgeAddress;
       await record({
@@ -232,7 +298,11 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
   }
 
   /** Deploy a MosaicBridge on Base Sepolia via the CREATE2 proxy, signed and paid by the operator key. */
-  private async deployBridgeOnBase(baseAssets: BaseAssetMapping[]): Promise<{ txHash: string; bridgeAddress: string; deployer: string }> {
+  private async deployBridgeOnBase(
+    baseAssets: BaseAssetMapping[],
+    permissioned = false,
+    initialAllowed: string[] = [],
+  ): Promise<{ txHash: string; bridgeAddress: string; deployer: string }> {
     if (!this.baseRpc || !this.baseDeployerKey) throw new Error("Base deployment is not configured on this MCP server");
     const artifact = (await loadMosaicBridge()) as MosaicBridgeArtifact;
     const account = privateKeyToAccount(normalizePrivateKey(this.baseDeployerKey));
@@ -245,6 +315,8 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
       account.address,
       baseAssets.map((asset) => asset.asset_id),
       baseAssets.map((asset) => asset.token),
+      permissioned,
+      initialAllowed,
     );
     const txHash = await walletClient.sendTransaction({ to: CREATE2_PROXY, data: call.data });
     const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
@@ -292,9 +364,26 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
     const code = await client.getCode({ address: bridgeAddress as Address });
     if (!code || code === "0x") throw new Error("Base bridge has no code");
     const expectedCode = typeof artifact.deployedBytecode === "string" ? artifact.deployedBytecode : artifact.deployedBytecode?.object;
-    if (expectedCode && code.toLowerCase() !== expectedCode.toLowerCase()) throw new Error("Base bridge bytecode does not match MosaicBridge");
+    const isCurrentCode = !expectedCode || code.toLowerCase() === expectedCode.toLowerCase();
+    const isLegacyCode =
+      !isCurrentCode &&
+      LEGACY_BRIDGE_CODE_SHA256.has(createHash("sha256").update(code.toLowerCase()).digest("hex"));
+    if (!isCurrentCode && !isLegacyCode) throw new Error("Base bridge bytecode does not match MosaicBridge");
     const owner = (await client.readContract({ address: bridgeAddress as Address, abi: artifact.abi, functionName: "owner" })) as string;
     if (owner.toLowerCase() !== setup.deployer_address.toLowerCase()) throw new Error("Base bridge owner does not match deployer");
+    if (isLegacyCode) {
+      // Pre-permissioning bridges have no `permissioned()`/allowlist and are inherently open.
+      if (desk.permissioned === true) throw new Error("a permissioned desk cannot use a pre-permissioning Base bridge");
+    } else {
+      const bridgePermissioned = (await client.readContract({
+        address: bridgeAddress as Address,
+        abi: artifact.abi,
+        functionName: "permissioned",
+      })) as boolean;
+      if (bridgePermissioned !== (desk.permissioned === true)) {
+        throw new Error("Base bridge permissioned flag does not match the desk");
+      }
+    }
     for (const asset of setup.assets) {
       const token = (await client.readContract({
         address: bridgeAddress as Address,
@@ -341,7 +430,15 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
         desk_id: desk.id,
         metadata: { action_id: actionId, name: desk.name, ...(event.metadata ?? {}) },
       });
-    const base_deployment = await this.deployAndConfigureBase(desk, sponsor, setup.assets, record, setup.require_finality ?? false);
+    const base_deployment = await this.deployAndConfigureBase(
+      desk,
+      sponsor,
+      setup.assets,
+      record,
+      setup.require_finality ?? false,
+      desk.permissioned === true,
+      setup.allowlist ?? [],
+    );
     return this.store.insertDesk({ ...desk, base_deployment }, null);
   }
 
@@ -366,6 +463,122 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
       image_id: release.bridge_image_id ?? null,
       config_id: BASE_SEPOLIA_CONFIG_ID,
     };
+  }
+
+  /** Add members to a permissioned desk's on-chain allowlists. Only the desk creator's session may
+   * call this (Trusted mode: the server holds the Stellar admin sponsor key and the Base bridge
+   * owner key, so on-chain auth alone would not restrain other authenticated users). Add-only. */
+  async addDeskAllowed(
+    id: string,
+    body: { stellar_members?: string[]; evm_members?: string[] },
+    address: string,
+  ): Promise<{ ok: boolean; stellar_tx_hashes: string[]; evm_tx_hashes: string[] }> {
+    if (!this.store) throw new Error("MCP store is not configured");
+    const desk = await this.store.getDesk(id);
+    if (desk.permissioned !== true) throw new Error("this desk is not permissioned");
+    if (!desk.creator_address || desk.creator_address !== address) {
+      throw new Error("only the desk creator may manage its allowlist");
+    }
+    const stellarMembers = (body.stellar_members ?? []).map((member) => {
+      const value = String(member).trim();
+      if (!STELLAR_ADDRESS.test(value)) throw new Error(`invalid Stellar member: ${value}`);
+      return value;
+    });
+    const evmMembers = (body.evm_members ?? []).map((member) => {
+      const value = String(member).trim();
+      if (!EVM_ADDRESS.test(value)) throw new Error(`invalid Base member: ${value}`);
+      return value;
+    });
+    if (stellarMembers.length === 0 && evmMembers.length === 0) throw new Error("no members to add");
+
+    // Resolve every precondition for BOTH legs before the first on-chain write, so a request that
+    // was never going to fully succeed does not land a partial Stellar-only update.
+    let sponsor: string | null = null;
+    if (stellarMembers.length > 0) {
+      sponsor = await this.store.sponsorSecret(id);
+      if (!sponsor) throw new Error("desk has no sponsor key");
+    }
+    let evm: { bridgeAddress: string; artifact: MosaicBridgeArtifact } | null = null;
+    if (evmMembers.length > 0) {
+      const bridgeAddress = desk.base_deployment?.bridge_address;
+      if (!bridgeAddress || desk.base_deployment?.status !== "active") {
+        throw new Error("this desk has no active Base bridge");
+      }
+      if (!this.baseRpc || !this.baseDeployerKey) throw new Error("Base management is not configured on this MCP server");
+      evm = { bridgeAddress, artifact: (await loadMosaicBridge()) as MosaicBridgeArtifact };
+    }
+
+    // Both `add_allowed` and `addAllowed` are idempotent, so a partial failure is safely retried
+    // with the full member list — but report what already landed so nothing looks lost.
+    const stellarTxHashes: string[] = [];
+    const evmTxHashes: string[] = [];
+    try {
+      if (sponsor) {
+        for (const member of stellarMembers) {
+          const tx = await this.invokeAddAllowed(desk.contract_id, sponsor, member);
+          if (tx) stellarTxHashes.push(tx);
+        }
+      }
+      if (evm) {
+        const account = privateKeyToAccount(normalizePrivateKey(this.baseDeployerKey!));
+        const publicClient = createPublicClient({ chain: baseSepolia, transport: http(this.baseRpc) });
+        const walletClient = createWalletClient({ account, chain: baseSepolia, transport: http(this.baseRpc) });
+        for (const member of evmMembers) {
+          const txHash = await walletClient.writeContract({
+            address: evm.bridgeAddress as Address,
+            abi: evm.artifact.abi as Abi,
+            functionName: "addAllowed",
+            args: [member as Address],
+          });
+          const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
+          if (receipt.status !== "success") throw new Error(`addAllowed(${member}) reverted (${txHash})`);
+          evmTxHashes.push(txHash);
+        }
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      const landed =
+        stellarTxHashes.length > 0 || evmTxHashes.length > 0
+          ? ` Members added before the failure stayed added (adds are idempotent; retry with the full list).` +
+            ` Landed tx hashes — stellar: [${stellarTxHashes.join(", ")}], base: [${evmTxHashes.join(", ")}].`
+          : "";
+      throw new Error(`${message}${landed}`);
+    }
+    return { ok: true, stellar_tx_hashes: stellarTxHashes, evm_tx_hashes: evmTxHashes };
+  }
+
+  /** Invoke `add_allowed` on the desk (sponsor/admin-signed) without blocking the event loop
+   * (`spawnSync` would freeze every other MCP session for the duration). Returns the tx hash if
+   * the CLI logged one (best-effort, for the explorer link). */
+  private invokeAddAllowed(contractId: string, sponsorSecret: string, member: string): Promise<string | undefined> {
+    const net = ["--rpc-url", this.network.rpcUrl, "--network-passphrase", this.network.networkPassphrase];
+    const args = [
+      "contract",
+      "invoke",
+      "--id",
+      contractId,
+      "--source-account",
+      sponsorSecret,
+      ...net,
+      "--send",
+      "yes",
+      "--",
+      "add_allowed",
+      "--member",
+      member,
+    ];
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.stellarBin ?? "stellar", args, { timeout: 120_000 });
+      let stderr = "";
+      child.stdout.on("data", () => {});
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      child.on("error", reject);
+      child.on("close", (code, signal) => {
+        if (signal) reject(new Error(`add_allowed(${member}) was killed (${signal}; timeout?)`));
+        else if (code !== 0) reject(new Error(`add_allowed failed: ${stderr}`));
+        else resolve(stderr.match(STELLAR_TX_HASH)?.pop() ?? undefined);
+      });
+    });
   }
 
   private async latestLedger(): Promise<number | null> {

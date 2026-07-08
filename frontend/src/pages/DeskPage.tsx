@@ -8,12 +8,14 @@ import OrderBook from '../components/OrderBook'
 import OrderForm from '../components/OrderForm'
 import RecentTrades from '../components/RecentTrades'
 import ShieldUnshieldPanel from '../components/ShieldUnshieldPanel'
+import AllowlistPanel from '../components/AllowlistPanel'
 import CancelOrderButton from '../components/CancelOrderButton'
 import Pane from '../components/ui/Pane'
 import Tabs from '../components/ui/Tabs'
 import StatusDot, { type StatusTone } from '../components/ui/StatusDot'
 import Modal from '../components/ui/Modal'
 import ScrollTable from '../components/ui/ScrollTable'
+import ExplorerLink from '../components/ui/ExplorerLink'
 import Toasts, { type ToastItem } from '../components/Toasts'
 import { notesForDesk, reconcile, type Note } from '../notes'
 import { formatAmount } from '../amount'
@@ -64,13 +66,13 @@ function DeskDetailsTable({
       <tbody>
         <tr>
           <th>Stellar contract</th>
-          <td className="mono">{desk.contract_id}</td>
+          <td className="mono"><ExplorerLink address={desk.contract_id} /></td>
         </tr>
         <tr>
           <th>Base bridge</th>
           <td className="mono">
             {desk.base_deployment?.bridge_address ? (
-              desk.base_deployment.bridge_address
+              <ExplorerLink address={desk.base_deployment.bridge_address} />
             ) : (
               <span className="muted">
                 {desk.base_deployment ? `not deployed (${desk.base_deployment.status})` : 'not deployed'}
@@ -157,6 +159,29 @@ export default function DeskPage() {
   const [activePairId, setActivePairId] = useState<number | null>(null)
   const [tradeTab, setTradeTab] = useState<'trade' | 'fund'>('trade')
   const bookIndex = useBookIndex(effectiveMode, desk, networkPassphrase)
+  // On a permissioned desk: is the connected wallet on the allowlist (`is_allowed` view)? `null` =
+  // open desk / not yet known — fund actions only lock on a definitive `false`. Polled because
+  // membership is add-only: a `false` can flip to `true` when the desk owner adds the wallet.
+  // Keyed by (desk, wallet) so a result for a previous desk/wallet is ignored, not reset.
+  const [allowedState, setAllowedState] = useState<{ key: string; value: boolean } | null>(null)
+  const allowedKey = `${deskId}:${address}`
+  const walletAllowed = desk?.permissioned === true && allowedState?.key === allowedKey ? allowedState.value : null
+  useEffect(() => {
+    if (!deskId || !address || desk?.permissioned !== true) return
+    let alive = true
+    const key = `${deskId}:${address}`
+    const tick = () =>
+      api
+        .isAllowed(effectiveMode, deskId, address)
+        .then((allowed) => alive && setAllowedState({ key, value: allowed }))
+        .catch(() => {})
+    tick()
+    const h = setInterval(tick, 30_000)
+    return () => {
+      alive = false
+      clearInterval(h)
+    }
+  }, [effectiveMode, deskId, address, desk?.permissioned])
 
   const currentVerifiedDesk = useMemo<Desk | null>(() => {
     if (!desk || bookIndex.status !== 'synced') return null
@@ -350,7 +375,7 @@ export default function DeskPage() {
   if (!desk) return <p className="muted">Loading…</p>
 
   const verifiedDesk = currentVerifiedDesk ?? lastVerifiedDesk ?? desk
-  const fundActionsDisabled =
+  const verificationDisabled =
     bookIndex.status === 'synced'
       ? null
       : bookIndex.status === 'error'
@@ -358,6 +383,20 @@ export default function DeskPage() {
         : bookIndex.error
           ? `Contract verification is retrying: ${bookIndex.error}`
           : 'Contract verification and event replay are still in progress.'
+  // The Stellar allowlist gates shield (depositor) and unshield (recipient) only. The Base deposit
+  // route is gated by the bridge's own 0x… allowlist (checked inside ShieldFromBaseForm), so a
+  // Stellar-side miss must not lock that tab — the two lists are independent.
+  const stellarNotAllowed =
+    walletAllowed === false
+      ? `This desk is permissioned and your wallet is not on its allowlist. Ask the desk owner to add ${address ? `${address.slice(0, 4)}…${address.slice(-4)}` : 'your address'}.`
+      : null
+  const fundActionsDisabled = verificationDisabled ?? stellarNotAllowed
+  // The desk owner manages the allowlist: trustless desks are admin'd by the creating wallet;
+  // trusted desks by the server on behalf of the recorded creator session.
+  const managesAllowlist =
+    desk.permissioned === true &&
+    !!address &&
+    (trustlessDesk ? desk.sponsor_pubkey === address : desk.creator_address === address)
   const displayDesk = currentVerifiedDesk ?? desk
   const orderDesk = currentVerifiedDesk ?? lastVerifiedDesk ?? desk
   const orderDisabledReason =
@@ -382,6 +421,11 @@ export default function DeskPage() {
       <>
         <div className="desk-head">
           <h1 className="desk-title">{desk.name}</h1>
+          {desk.permissioned === true && (
+            <span className="pill accent" title="Only allowlisted addresses can shield and unshield on this desk.">
+              Permissioned
+            </span>
+          )}
           <StatusDot tone={bookTone} title={bookIndex.error ?? undefined}>
             Book {bookIndex.status}
             {bookIndex.status === 'syncing' &&
@@ -451,6 +495,18 @@ export default function DeskPage() {
       <Toasts items={toasts} onDismiss={dismissToast} />
       <div className="desk-head">
         <h1 className="desk-title">{desk.name}</h1>
+        {desk.permissioned === true && (
+          <span
+            className="pill accent"
+            title={
+              walletAllowed === false
+                ? 'Only allowlisted addresses can shield and unshield — your wallet is not on the allowlist.'
+                : 'Only allowlisted addresses can shield and unshield on this desk.'
+            }
+          >
+            Permissioned{walletAllowed === true ? ' · allowed' : walletAllowed === false ? ' · not allowed' : ''}
+          </span>
+        )}
         <StatusDot tone={bookTone} title={bookIndex.error ?? undefined}>
           Book {bookIndex.status}
           {bookIndex.status === 'syncing' &&
@@ -537,6 +593,12 @@ export default function DeskPage() {
               </ScrollTable>
             </details>
           </Pane>
+
+          {managesAllowlist && address && (
+            <Pane title="Allowlist">
+              <AllowlistPanel desk={desk} walletAddress={address} trustless={trustlessDesk} />
+            </Pane>
+          )}
         </div>
 
         {/* Center — order book + trade tape */}
@@ -624,6 +686,7 @@ export default function DeskPage() {
                   notes={notes}
                   userPubkey={address}
                   disabledReason={fundActionsDisabled}
+                  baseDisabledReason={verificationDisabled}
                   trustless={trustlessDesk}
                   onRecheck={bookIndex.status === 'error' ? bookIndex.recheck : undefined}
                   onDone={reloadNotes}

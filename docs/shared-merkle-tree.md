@@ -69,6 +69,12 @@ behind a credential rather than identifying the trader on-chain.
 - **Two-tier desks:** a public desk and a permissioned desk are just different admin policies over the
   same contract — no protocol change, only an added gate on `shield`/`submit_order`.
 
+> **Shipped (plaintext-address variant):** desks are now optionally permissioned at creation — a
+> constructor allowlist gates `shield` (depositor), `unshield` (recipient), and the Base bridge's
+> deposits (`msg.sender`), with add-only, admin-managed membership (see `architecture.md`). This is
+> the "different admin policies" shape above, applied to the custody boundary rather than orders.
+> The in-circuit variants (allowlisted owner tags, credential proofs) remain future work.
+
 ## Verdict
 
 Architecture A (canonical Stellar tree + proof-attested mirror on Base, reusing the bridge's Steel
