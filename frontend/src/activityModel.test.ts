@@ -525,3 +525,61 @@ test('job events merge with persisted legs into one group without duplicate line
   assert.deepEqual(new Set(groups[0].lines.map((line) => line.tx)), new Set([job.deposit!.base_tx_hash, stellarTx]))
   assert.equal(groups[0].lines.length, 2)
 })
+
+test('allowlist adds group by action id with member summary and per-chain tx links', () => {
+  const actionId = 'action-allow-1'
+  const member = 'G' + 'A'.repeat(55)
+  const stellarTx = 'd'.repeat(64)
+  const baseTx = '0x' + 'e'.repeat(64)
+  const activities: ActivityEvent[] = [
+    {
+      kind: 'user_action',
+      action: 'add_allowed',
+      status: 'succeeded',
+      desk_id: 'desk-1',
+      tx_hash: stellarTx,
+      metadata: { action_id: actionId, member },
+      created_at: 1,
+    },
+    {
+      kind: 'user_action',
+      action: 'add_allowed',
+      status: 'succeeded',
+      desk_id: 'desk-1',
+      tx_hash: baseTx,
+      metadata: { action_id: actionId, member: '0x' + '1'.repeat(40), chain: 'base' },
+      created_at: 2,
+    },
+  ]
+
+  const groups = activityGroups(activities, [])
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].action, 'Allowlist')
+  assert.equal(groups[0].summary, 'Allow 2 members')
+  assert.equal(groups[0].status, 'succeeded')
+  assert.deepEqual(new Set(groups[0].lines.map((line) => line.tx)), new Set([stellarTx, baseTx]))
+  assert.ok(txUrl(baseTx, activities[1]).includes('sepolia.basescan.org'))
+  assert.ok(txUrl(stellarTx, activities[0]).includes('stellar.expert'))
+})
+
+test('a single allowlist add summarizes the member address', () => {
+  const member = 'G' + 'B'.repeat(55)
+  const groups = activityGroups(
+    [
+      {
+        kind: 'user_action',
+        action: 'add_allowed',
+        status: 'succeeded',
+        desk_id: 'desk-1',
+        tx_hash: 'f'.repeat(64),
+        metadata: { action_id: 'action-allow-2', member },
+        created_at: 1,
+      },
+    ],
+    [],
+  )
+  assert.equal(groups.length, 1)
+  assert.equal(groups[0].action, 'Allowlist')
+  assert.equal(groups[0].summary, `Allow ${member.slice(0, 8)}...${member.slice(-6)}`)
+  assert.equal(groups[0].lines.length, 1)
+})

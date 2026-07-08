@@ -5,6 +5,7 @@ import type { Address } from 'viem'
 import { api, type Desk } from '../api'
 import { addAllowedTrustless } from '../trustless'
 import { baseBridgeAddAllowed, connectBase } from '../base'
+import { newActionId, recordDeployActivity } from '../deployActivity'
 import Field from './ui/Field'
 import Button from './ui/Button'
 
@@ -62,8 +63,25 @@ export default function AllowlistPanel({
           if (deployer && account.toLowerCase() !== deployer.toLowerCase()) {
             throw new Error(`Connect the bridge owner wallet ${deployer} in your EVM wallet first.`)
           }
-          const txHash = await baseBridgeAddAllowed(bridge as Address, value as Address, account)
-          setStatus(`Allowed ${short(value)} on the Base bridge (tx ${txHash.slice(0, 8)}…)`)
+          // The Stellar leg's activity is recorded by the SDK client; this MetaMask-signed Base leg
+          // bypasses the SDK, so the browser records it itself (best-effort, like deploys).
+          const actionId = newActionId()
+          try {
+            const txHash = await baseBridgeAddAllowed(bridge as Address, value as Address, account)
+            await recordDeployActivity('trustless', {
+              kind: 'user_action', action: 'add_allowed', status: 'succeeded',
+              wallet_address: walletAddress, desk_id: desk.id, tx_hash: txHash,
+              metadata: { action_id: actionId, member: value, chain: 'base', bridge_address: bridge },
+            })
+            setStatus(`Allowed ${short(value)} on the Base bridge (tx ${txHash.slice(0, 8)}…)`)
+          } catch (cause) {
+            await recordDeployActivity('trustless', {
+              kind: 'error', action: 'add_allowed', status: 'failed',
+              wallet_address: walletAddress, desk_id: desk.id, message: errorMessage(cause),
+              metadata: { action_id: actionId, member: value, chain: 'base', bridge_address: bridge },
+            })
+            throw cause
+          }
         }
       } else {
         await api.addDeskAllowed(desk.id, isStellar ? { stellar_members: [value] } : { evm_members: [value] })

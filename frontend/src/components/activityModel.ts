@@ -2,7 +2,7 @@ import type { ActivityEvent } from '@mosaic/sdk'
 import type { Operation } from '../api'
 import { formatAmount, formatPrice } from '../amount.ts'
 
-export type ActivityAction = 'Deploy' | 'Shield' | 'Unshield' | 'Place Order' | 'Cancel Order'
+export type ActivityAction = 'Deploy' | 'Shield' | 'Unshield' | 'Place Order' | 'Cancel Order' | 'Allowlist'
 
 export interface TransactionLine {
   id: string
@@ -229,6 +229,7 @@ function actionForValue(value?: string): ActivityAction | undefined {
     submit_order: 'Place Order',
     place_order: 'Place Order',
     cancel_order: 'Cancel Order',
+    add_allowed: 'Allowlist',
   } as Partial<Record<string, ActivityAction>>)[value]
 }
 
@@ -284,6 +285,7 @@ function describeMethod(value?: string): string | undefined {
     submit_order: 'Submit order',
     place_order: 'Submit order',
     cancel_order: 'Cancel order',
+    add_allowed: 'Add allowlist member',
   } as Record<string, string>)[value]
 }
 
@@ -404,6 +406,17 @@ function summaryForActivities(action: ActivityAction, activities: ActivityEvent[
         side,
         refund,
       ].filter(Boolean).join(', ')
+    }
+    case 'Allowlist': {
+      // One trusted-mode add may cover several members (Stellar + Base legs share one action_id).
+      const members = new Set<string>()
+      for (const activity of activities) {
+        const member = metadataString(activity.metadata, ['member'])
+        if (member) members.add(member)
+      }
+      if (members.size === 0) return 'Allowlist member added'
+      if (members.size === 1) return `Allow ${short([...members][0])}`
+      return `Allow ${members.size} members`
     }
   }
 }

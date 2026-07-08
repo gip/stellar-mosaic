@@ -178,7 +178,8 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
     const { permissioned, allowlist, baseAllowlist } = permissioningFromBody(body);
     // Trusted mode: the on-chain admin is the server-held sponsor key, not the creator — without
     // this seed the creator deploys a desk they themselves cannot shield into or unshield from.
-    if (permissioned && creator && STELLAR_ADDRESS.test(creator) && !allowlist.includes(creator)) {
+    // `include_creator: false` is an explicit client opt-out (the create-desk form's checkbox).
+    if (permissioned && body.include_creator !== false && creator && STELLAR_ADDRESS.test(creator) && !allowlist.includes(creator)) {
       allowlist.unshift(creator);
     }
     // Fail fast, before funding a sponsor and deploying the Stellar contract: if the desk needs a
@@ -472,6 +473,7 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
     id: string,
     body: { stellar_members?: string[]; evm_members?: string[] },
     address: string,
+    network?: string,
   ): Promise<{ ok: boolean; stellar_tx_hashes: string[]; evm_tx_hashes: string[] }> {
     if (!this.store) throw new Error("MCP store is not configured");
     const desk = await this.store.getDesk(id);
@@ -490,6 +492,16 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
       return value;
     });
     if (stellarMembers.length === 0 && evmMembers.length === 0) throw new Error("no members to add");
+
+    // One action_id for the whole request so the Stellar and Base legs fold into a single
+    // Activity group in the creator's wallet (same convention as `createDesk`). Best-effort.
+    const actionId = randomUUID();
+    const record = (event: Partial<ActivityEvent> & Pick<ActivityEvent, "kind">) =>
+      this.recordDeployActivity(address, network, {
+        ...event,
+        desk_id: id,
+        metadata: { action_id: actionId, name: desk.name, ...(event.metadata ?? {}) },
+      });
 
     // Resolve every precondition for BOTH legs before the first on-chain write, so a request that
     // was never going to fully succeed does not land a partial Stellar-only update.
@@ -517,6 +529,10 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
         for (const member of stellarMembers) {
           const tx = await this.invokeAddAllowed(desk.contract_id, sponsor, member);
           if (tx) stellarTxHashes.push(tx);
+          await record({
+            kind: "user_action", action: "add_allowed", status: "succeeded",
+            contract_id: desk.contract_id, tx_hash: tx, metadata: { member },
+          });
         }
       }
       if (evm) {
@@ -533,10 +549,19 @@ export class SponsoredStellarDeployHandlers implements DeployHandlers {
           const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash });
           if (receipt.status !== "success") throw new Error(`addAllowed(${member}) reverted (${txHash})`);
           evmTxHashes.push(txHash);
+          await record({
+            kind: "user_action", action: "add_allowed", status: "succeeded",
+            tx_hash: txHash, metadata: { member, chain: "base", bridge_address: evm.bridgeAddress },
+          });
         }
       }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
+      await record({
+        kind: "error", action: "add_allowed", status: "failed", message,
+        contract_id: desk.contract_id,
+        metadata: { stellar_members: stellarMembers, evm_members: evmMembers },
+      });
       const landed =
         stellarTxHashes.length > 0 || evmTxHashes.length > 0
           ? ` Members added before the failure stayed added (adds are idempotent; retry with the full list).` +

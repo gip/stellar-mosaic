@@ -3,6 +3,7 @@ import { errorMessage } from '@mosaic/sdk'
 import { Link } from 'react-router-dom'
 import { api, type BaseDeploymentConfig, type CatalogAsset } from '../api'
 import { useEthereumWallet } from '../EthereumWalletContext'
+import { useWallet } from '../WalletContext'
 import { displayEth, estimateBridgeDeployment } from '../base'
 import type { Address } from 'viem'
 import { assetKindOf, baseTokenAddress, eligibleBaseAssets, hasEnoughEth } from '../baseDeployment'
@@ -42,9 +43,13 @@ export default function CreateDeskForm({
   const [waitForFinality, setWaitForFinality] = useState(false)
   // Optional permissioning: immutable at deploy; the allowlist is add-only afterwards.
   const [permissioned, setPermissioned] = useState(false)
+  // On by default: a permissioned desk without its creator on the allowlist is one the creator
+  // can't shield into or unshield from (the admin role grants no membership).
+  const [includeCreator, setIncludeCreator] = useState(true)
   const [allowlistText, setAllowlistText] = useState('')
   const [baseAllowlistText, setBaseAllowlistText] = useState('')
   const ethereum = useEthereumWallet()
+  const wallet = useWallet()
   const canSelfFund = mode === 'trustless'
   const effectiveStellarDeployment: 'sponsored' | 'self-funded' = canSelfFund ? 'self-funded' : 'sponsored'
 
@@ -113,6 +118,7 @@ export default function CreateDeskForm({
     setSelected([])
     setPairs([])
     setPermissioned(false)
+    setIncludeCreator(true)
     setAllowlistText('')
     setBaseAllowlistText('')
   }
@@ -151,10 +157,23 @@ export default function CreateDeskForm({
         symbol: asset.symbol,
         token: baseTokenAddress(asset),
       }))
-      const allowlist = permissioned ? parseMembers(allowlistText, /^G[A-Z2-7]{55}$/, 'Stellar') : undefined
-      const baseAllowlist =
+      let allowlist = permissioned ? parseMembers(allowlistText, /^G[A-Z2-7]{55}$/, 'Stellar') : undefined
+      let baseAllowlist =
         permissioned && deployBase ? parseMembers(baseAllowlistText, /^0x[0-9a-fA-F]{40}$/, 'Base') : undefined
-      const permissioning = { permissioned: permissioned || undefined, allowlist, base_allowlist: baseAllowlist }
+      if (permissioned && includeCreator) {
+        // Seed the creator's connected wallet(s) so they aren't gated out of their own desk. The
+        // trusted server also seeds the session address; `include_creator: false` opts out of that.
+        if (wallet.address && !allowlist!.includes(wallet.address)) allowlist = [wallet.address, ...allowlist!]
+        if (baseAllowlist && ethereum.address && !baseAllowlist.some((m) => m.toLowerCase() === ethereum.address!.toLowerCase())) {
+          baseAllowlist = [ethereum.address, ...baseAllowlist]
+        }
+      }
+      const permissioning = {
+        permissioned: permissioned || undefined,
+        allowlist,
+        base_allowlist: baseAllowlist,
+        include_creator: permissioned ? includeCreator : undefined,
+      }
 
       if (effectiveStellarDeployment === 'self-funded') {
         // Trustless: the browser wallet pays, so it deploys the Stellar contract *and* the Base
@@ -339,6 +358,25 @@ export default function CreateDeskForm({
               The allowlist is add-only — members can be added later but never removed, so a member's
               shielded funds can always exit.
             </p>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '6px 0' }}>
+              <input
+                type="checkbox"
+                checked={includeCreator}
+                onChange={(e) => setIncludeCreator(e.target.checked)}
+              />
+              Add my address
+              {wallet.address ? ` (${wallet.address.slice(0, 4)}…${wallet.address.slice(-4)})` : ''} to the
+              allowlist
+              {wantsBaseBridge && ethereum.address
+                ? ` — and ${ethereum.address.slice(0, 6)}…${ethereum.address.slice(-4)} to the bridge allowlist`
+                : ''}
+            </label>
+            {!includeCreator && (
+              <p className="warn">
+                Without your own address on the allowlist you cannot shield into or unshield from this
+                desk until it is added later.
+              </p>
+            )}
             <label>Initial Stellar members — one G… address per line (can be added later)</label>
             <textarea
               value={allowlistText}

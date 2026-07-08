@@ -408,6 +408,8 @@ export const api = {
     permissioned?: boolean
     allowlist?: string[]
     base_allowlist?: string[]
+    /** Seed the creator on the allowlist (server-side, from the session address). Default true. */
+    include_creator?: boolean
   }) => wrap(async () => {
     const desk = (await mcp.createDesk(body)) as Desk
     deskCache('trusted').set(desk.id, desk)
@@ -422,6 +424,9 @@ export const api = {
     permissioned?: boolean
     allowlist?: string[]
     base_allowlist?: string[]
+    /** Accepted for symmetry with `createDesk`; the form already seeds the creator client-side
+     * (there is no server on this path to do it). */
+    include_creator?: boolean
   }) => wrap(async () => {
     const address = await currentAddress()
     if (!address) throw new ApiError(401, 'Connect Freighter before deploying a trustless desk.')

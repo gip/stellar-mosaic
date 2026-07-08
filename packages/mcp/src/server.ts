@@ -37,6 +37,7 @@ export interface DeployHandlers {
     id: string,
     body: { stellar_members?: string[]; evm_members?: string[] },
     address: string,
+    network?: string,
   ): Promise<{ ok: boolean; stellar_tx_hashes: string[]; evm_tx_hashes: string[] }>;
 }
 
@@ -290,6 +291,7 @@ export function createMosaicMcpServer(opts: MosaicMcpOptions = {}): McpServer {
             evm_members: args.evm_members as string[] | undefined,
           },
           s.address,
+          s.network,
         ),
       );
     },

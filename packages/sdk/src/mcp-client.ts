@@ -251,6 +251,8 @@ class HttpMcpClient implements McpClient {
     permissioned?: boolean;
     allowlist?: string[];
     base_allowlist?: string[];
+    /** Seed the creator (session address) on a permissioned desk's allowlist. Default true. */
+    include_creator?: boolean;
   }): Promise<Desk> {
     return this.call("create_desk", this.auth({ body }));
   }
